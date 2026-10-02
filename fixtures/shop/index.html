@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Demo Shop</title>
+<style>
+  body { font-family: sans-serif; max-width: 640px; margin: 2rem auto; }
+  .hidden { display: none; }
+  .error { color: #b00; }
+  li { margin: .4rem 0; }
+</style>
+</head>
+<body>
+<h1>Demo Shop</h1>
+
+<section id="login">
+  <h2>登录</h2>
+  <form id="login-form">
+    <label>用户名 <input name="username" autocomplete="off"></label><br>
+    <label>密码 <input name="password" type="password"></label><br>
+    <button type="submit">登录</button>
+  </form>
+  <p id="login-error" class="error" role="alert"></p>
+</section>
+
+<section id="shop" class="hidden">
+  <h2>商品列表</h2>
+  <p>欢迎，<span id="who"></span>！ <button id="logout">退出登录</button></p>
+  <ul>
+    <li>机械键盘 ¥399 <button data-sku="kb" data-price="399">加入购物车</button></li>
+    <li>无线鼠标 ¥129 <button data-sku="mouse" data-price="129">加入购物车</button></li>
+    <li>显示器支架 ¥219 <button data-sku="stand" data-price="219">加入购物车</button></li>
+  </ul>
+  <h2>购物车</h2>
+  <p id="cart-summary">购物车为空</p>
+  <label>收货地址 <input id="address" name="address"></label><br>
+  <button id="checkout" disabled>去结算</button>
+  <p id="checkout-error" class="error" role="alert"></p>
+</section>
+
+<section id="done" class="hidden">
+  <h2>订单已提交</h2>
+  <p id="order-info"></p>
+  <button id="again">继续购物</button>
+</section>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const show = (id) => ['login', 'shop', 'done'].forEach(s => $('#' + s).classList.toggle('hidden', s !== id));
+let cart = [];
+
+function renderCart() {
+  const total = cart.reduce((s, i) => s + i.price, 0);
+  $('#cart-summary').textContent = cart.length ? `共 ${cart.length} 件，合计 ¥${total}` : '购物车为空';
+  $('#checkout').disabled = cart.length === 0;
+}
+
+$('#login-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  if (f.get('username') === 'alice' && f.get('password') === 'secret123') {
+    $('#who').textContent = 'alice';
+    $('#login-error').textContent = '';
+    show('shop');
+  } else {
+    $('#login-error').textContent = '用户名或密码错误';
+  }
+});
+
+document.querySelectorAll('[data-sku]').forEach(b => b.addEventListener('click', () => {
+  cart.push({ sku: b.dataset.sku, price: Number(b.dataset.price) });
+  renderCart();
+}));
+
+$('#checkout').addEventListener('click', () => {
+  const addr = $('#address').value.trim();
+  if (!addr) { $('#checkout-error').textContent = '请填写收货地址'; return; }
+  // Deliberate defects so the run report has something to catch.
+  fetch('/api/analytics').catch(() => {});
+  console.error('analytics: tracker not configured');
+  const total = cart.reduce((s, i) => s + i.price, 0);
+  $('#order-info').textContent = `订单号 A${Date.now() % 100000}，共 ${cart.length} 件，合计 ¥${total}，寄往：${addr}`;
+  show('done');
+});
+
+$('#again').addEventListener('click', () => { cart = []; renderCart(); show('shop'); });
+$('#logout').addEventListener('click', () => { cart = []; renderCart(); show('login'); });
+</script>
+</body>
+</html>

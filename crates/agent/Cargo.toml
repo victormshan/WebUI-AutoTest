@@ -1,0 +1,14 @@
+[package]
+name = "agent"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+chrono = { version = "0.4.45", features = ["serde"] }
+llm = { version = "0.1.0", path = "../llm" }
+mcp-client = { version = "0.1.0", path = "../mcp-client" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
