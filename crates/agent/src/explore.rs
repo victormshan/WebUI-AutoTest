@@ -37,6 +37,9 @@ pub struct ExploreConfig {
     pub max_depth: usize,
     /// Tasks run concurrently, each in its own browser.
     pub jobs: usize,
+    /// Consecutive clean LLM-free replays required before a flow is saved
+    /// as verified; assertions that fail in between are dropped as flaky.
+    pub verify_runs: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +61,12 @@ pub struct TaskOutcome {
     pub success: bool,
     /// The saved flow replayed cleanly without the LLM.
     pub verified: bool,
+    /// The agent hit the deny list (not a finding about the site).
+    #[serde(default)]
+    pub blocked: bool,
+    /// Assertions removed because they did not hold on every replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flaky_assertions: Vec<String>,
     pub flow: Option<PathBuf>,
     pub summary: String,
 }
@@ -244,6 +253,11 @@ impl<'a> Explorer<'a> {
     }
 
     async fn propose(&self, snap: &str, known: &[String], limit: usize) -> Result<Vec<Proposal>> {
+        let deny = if self.cfg.agent.deny.is_empty() {
+            "(none)".to_string()
+        } else {
+            self.cfg.agent.deny.join(", ")
+        };
         let system = format!(
             r#"You are a QA lead exploring a web application to build a regression suite.
 Given the CURRENT PAGE (accessibility snapshot), the test CONTEXT, and tasks ALREADY KNOWN, propose up to {limit} NEW end-to-end user tasks that START from this page.
@@ -252,6 +266,7 @@ Each task must be something an automated agent can finish and verify on screen. 
 - Cover the main business paths first; add at most one negative/validation task per form (kind "negative").
 - Never propose destructive or irreversible actions (deleting data, real payments, sending messages to real people, changing passwords).
 - Skip tasks that need information not in CONTEXT (e.g. unknown credentials) and tasks whose intent duplicates one ALREADY KNOWN.
+- Elements whose label contains any of these keywords are off-limits to the agent: {deny}. Do not propose tasks that need them.
 - Return fewer tasks (or none) rather than padding.
 
 Reply with ONLY JSON: {{"tasks": [{{"name": "<short_snake_case_ascii>", "goal": "<instruction>", "kind": "positive"|"negative"}}]}}"#
@@ -298,6 +313,8 @@ Reply with ONLY JSON: {{"tasks": [{{"name": "<short_snake_case_ascii>", "goal": 
             to_state: None,
             success: false,
             verified: false,
+            blocked: false,
+            flaky_assertions: Vec::new(),
             flow: None,
             summary: String::new(),
         };
@@ -338,6 +355,10 @@ Reply with ONLY JSON: {{"tasks": [{{"name": "<short_snake_case_ascii>", "goal": 
 
         outcome.success = trace.success;
         outcome.summary = trace.summary.clone();
+        outcome.blocked = trace
+            .steps
+            .iter()
+            .any(|s| s.result.starts_with("Blocked by safety policy"));
         if !trace.success {
             tracing::warn!("task {name}: agent did not succeed: {}", trace.summary);
             return Ok(None);
@@ -361,31 +382,67 @@ Reply with ONLY JSON: {{"tasks": [{{"name": "<short_snake_case_ascii>", "goal": 
         }
         flow.assertions = suggest_assertions(&trace, Some(self.llm)).await;
 
-        // A flow is only useful if it replays without the LLM.
-        let browser = Browser::launch(&self.cfg.browser).await?;
-        let check = replay(&browser, &flow, None, &self.cfg.replay).await;
-        browser.close().await?;
-        let check = check?;
-        outcome.verified = check.passed;
-
-        let path = if check.passed {
+        let verified = self.verify(name, &mut flow, outcome).await?;
+        outcome.verified = verified;
+        let path = if verified {
             out_dir.join(format!("{name}.yaml"))
         } else {
-            tracing::warn!(
-                "task {name}: flow failed verification: {:?}",
-                check.failures
-            );
             out_dir.join("unverified").join(format!("{name}.yaml"))
         };
         flow.save(&path)?;
         outcome.flow = Some(path);
-        tracing::info!("task {name}: done (verified={})", check.passed);
+        tracing::info!("task {name}: done (verified={verified})");
 
-        Ok((check.passed && p.kind != "negative").then_some(Reached {
+        Ok((verified && p.kind != "negative").then_some(Reached {
             id: to_id,
             label: to_label,
             flow,
         }))
+    }
+}
+
+impl Explorer<'_> {
+    /// A flow is only useful if it replays without the LLM — repeatedly.
+    /// Replays until `verify_runs` consecutive clean passes. Assertions that
+    /// fail while every step succeeded are treated as flaky (e.g. exact AI
+    /// wording) and dropped; any other failure makes the flow unverified.
+    async fn verify(&self, name: &str, flow: &mut Flow, outcome: &mut TaskOutcome) -> Result<bool> {
+        let need = self.cfg.verify_runs.max(1);
+        let mut clean = 0;
+        for _ in 0..need + 2 {
+            let browser = Browser::launch(&self.cfg.browser).await?;
+            let check = replay(&browser, flow, None, &self.cfg.replay).await;
+            browser.close().await?;
+            let check = check?;
+
+            if check.passed {
+                clean += 1;
+                if clean >= need {
+                    return Ok(true);
+                }
+                continue;
+            }
+            clean = 0;
+            let only_assertions = check.failures.len() == check.failed_assertions.len();
+            if !only_assertions {
+                tracing::warn!(
+                    "task {name}: flow failed verification: {:?}",
+                    check.failures
+                );
+                return Ok(false);
+            }
+            for a in &check.failed_assertions {
+                tracing::warn!("task {name}: dropping flaky assertion: {a}");
+                outcome.flaky_assertions.push(a.to_string());
+            }
+            flow.assertions
+                .retain(|a| !check.failed_assertions.contains(a));
+            if flow.assertions.is_empty() {
+                tracing::warn!("task {name}: no stable assertions left");
+                return Ok(false);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -428,6 +485,10 @@ pub fn markdown(r: &ExploreReport) -> String {
     m.push_str("```\n\n| task | kind | result | flow |\n|---|---|---|---|\n");
     for t in &r.tasks {
         let result = match (t.success, t.verified) {
+            _ if t.blocked => "⛔ blocked by deny list",
+            (true, true) if !t.flaky_assertions.is_empty() => {
+                "✅ verified (flaky assertions dropped)"
+            }
             (true, true) => "✅ verified",
             (true, false) => "⚠️ unverified",
             // The page did not meet the proposed expectation: either a bug or an
@@ -490,6 +551,8 @@ mod tests {
                 to_state: Some("b".into()),
                 success: true,
                 verified: true,
+                blocked: false,
+                flaky_assertions: vec![],
                 flow: Some("flows/login.yaml".into()),
                 summary: "ok".into(),
             }],

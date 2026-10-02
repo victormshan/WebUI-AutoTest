@@ -1,0 +1,39 @@
+name: ask_simple_question
+goal: In the prompt textbox "Enter a prompt for Gemini", type "1+1等于几？" and press Enter to submit. Wait for the response and verify that an answer containing "2" appears in the conversation, with the user's question shown above it.
+start_url: https://gemini.google.com/app
+steps:
+- intent: Fill the prompt textbox with the question first, then press Enter.
+  tool: fill
+  args:
+    uid: $0
+    value: 1+1等于几？
+  targets:
+  - role: textbox
+    name: Enter a prompt for Gemini
+- intent: The prompt is filled in and the textbox is focused. Press Enter to submit.
+  tool: press_key
+  args:
+    key: Enter
+- intent: The question was submitted and Gemini is still typing. Wait for the answer to appear.
+  tool: wait_for
+  args:
+    text:
+    - 1+1等于2
+    - 1 + 1 等于 2
+    - 等于 2
+    - 等于2
+    - = 2
+    timeout: 15000
+assertions:
+- element:
+    role: heading
+    name: You said 1+1等于几？
+- element:
+    role: heading
+    name: Gemini said
+- element:
+    role: textbox
+    name: Enter a prompt for Gemini
+allowed_console_errors:
+- '[error] Loading a manifest from ''https://gemini.google.com/_/BardChatUi/manifest.json'' violates the following Content Security Policy directive: "manifest-src ''none''". The action has been blocked.'
+allowed_failed_requests: []

@@ -230,7 +230,8 @@ Reply with ONLY JSON: {"assertions": [ ... ]} where each item is one of
   {"element": {"role": "<role>", "name": "<exact accessible name>"}}
   {"text": "<substring of some element's text>"}
   {"absent_text": "<text that must NOT appear, e.g. an error message>"}
-Rules: copy role/name/text exactly from the snapshot; avoid volatile values (order ids, timestamps, random numbers); prefer business outcomes (confirmation headings, totals, counts) over generic chrome like the site title."#;
+Rules: copy role/name/text exactly from the snapshot; avoid volatile values (order ids, timestamps, random numbers); prefer business outcomes (confirmation headings, totals, counts) over generic chrome like the site title.
+Never assert the exact wording of generated or personalized content (AI/chat answers, search results, feeds, recommendations): it changes between runs. Assert its presence through stable structure instead (e.g. the heading or label that wraps the answer)."#;
     let user = format!(
         "GOAL:\n{}\n\nVERDICT: {}\nEVIDENCE: {}\n\nFINAL PAGE:\n{}\nYour JSON reply:",
         trace.goal,

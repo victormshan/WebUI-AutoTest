@@ -1,0 +1,53 @@
+name: new_chat_after_question
+goal: Type "1+1等于几？" in the prompt textbox and submit it, wait for the answer to appear, then click the "New chat" link and verify the page returns to the start screen showing the heading "Meet Gemini, your personal AI assistant" with an empty prompt textbox.
+start_url: https://gemini.google.com/app
+steps:
+- intent: Fill the prompt textbox with the question, then submit.
+  tool: fill
+  args:
+    uid: $0
+    value: 1+1等于几？
+  targets:
+  - role: textbox
+    name: Enter a prompt for Gemini
+- intent: The prompt is filled in. Click Send message to submit.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: Send message
+- intent: The response is still streaming (Stop response button visible, answer partial). Wait for the answer to complete.
+  tool: wait_for
+  args:
+    text:
+    - Gemini replied
+    - 1+1 等于 2
+    - 等于 2
+    timeout: 15000
+- intent: The answer '1+1 等于 2。' is displayed and complete. Now click the New chat link.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: link
+    name: New chat
+    nth: 1
+- intent: A confirmation dialog appeared asking to clear the current chat. Confirm by clicking the 'New chat' button in the dialog.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: New chat
+assertions:
+- element:
+    role: textbox
+    name: Enter a prompt for Gemini
+- element:
+    role: link
+    name: New chat
+- absent_text: 1+1等于几？
+allowed_console_errors:
+- '[error] Loading a manifest from ''https://gemini.google.com/_/BardChatUi/manifest.json'' violates the following Content Security Policy directive: "manifest-src ''none''". The action has been blocked.'
+allowed_failed_requests: []

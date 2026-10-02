@@ -5,6 +5,7 @@
 //! - [`ClaudeCli`]: shells out to `claude -p`, reusing the local Claude Code login.
 
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -19,12 +20,66 @@ pub trait Llm: Send + Sync {
     fn describe(&self) -> String;
 }
 
-/// Picks the API backend when `ANTHROPIC_API_KEY` is set, otherwise the CLI.
+/// Picks the API backend when `ANTHROPIC_API_KEY` is set, otherwise the CLI,
+/// wrapped with a per-call timeout (`WEBTEST_LLM_TIMEOUT_SECS`, default 180)
+/// and retries.
 pub fn from_env(model: Option<String>) -> Box<dyn Llm> {
     let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    match std::env::var("ANTHROPIC_API_KEY") {
+    let inner: Box<dyn Llm> = match std::env::var("ANTHROPIC_API_KEY") {
         Ok(key) if !key.is_empty() => Box::new(AnthropicApi::new(key, model)),
         _ => Box::new(ClaudeCli::new(model)),
+    };
+    let secs = std::env::var("WEBTEST_LLM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(180);
+    Box::new(Resilient {
+        inner,
+        timeout: Duration::from_secs(secs),
+        retries: 2,
+    })
+}
+
+/// Bounds every call with a timeout and retries failures. Dropping a timed-out
+/// call kills the `claude -p` child (`kill_on_drop`).
+pub struct Resilient {
+    inner: Box<dyn Llm>,
+    timeout: Duration,
+    retries: usize,
+}
+
+#[async_trait]
+impl Llm for Resilient {
+    async fn complete(&self, system: &str, user: &str) -> Result<String> {
+        let mut last = None;
+        for attempt in 0..=self.retries {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_secs(2 * attempt as u64)).await;
+            }
+            match tokio::time::timeout(self.timeout, self.inner.complete(system, user)).await {
+                Ok(Ok(text)) => return Ok(text),
+                Ok(Err(e)) => {
+                    tracing::warn!("LLM call failed (attempt {}): {e:#}", attempt + 1);
+                    last = Some(e);
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "LLM call timed out after {:?} (attempt {})",
+                        self.timeout,
+                        attempt + 1
+                    );
+                    last = Some(anyhow::anyhow!(
+                        "LLM call timed out after {:?}",
+                        self.timeout
+                    ));
+                }
+            }
+        }
+        Err(last.expect("at least one attempt"))
+    }
+
+    fn describe(&self) -> String {
+        self.inner.describe()
     }
 }
 
@@ -206,6 +261,35 @@ mod tests {
     fn extracts_fenced_json() {
         let v = extract_json("Sure:\n```json\n{\"a\": {\"b\": \"}\"}}\n```").unwrap();
         assert_eq!(v["a"]["b"], "}");
+    }
+
+    struct Flaky {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Llm for Flaky {
+        async fn complete(&self, _: &str, _: &str) -> Result<String> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                // First call hangs past the timeout.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+            Ok("ok".into())
+        }
+        fn describe(&self) -> String {
+            "flaky".into()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_after_timeout() {
+        let llm = Resilient {
+            inner: Box::new(Flaky { calls: 0.into() }),
+            timeout: Duration::from_secs(5),
+            retries: 1,
+        };
+        assert_eq!(llm.complete("s", "u").await.unwrap(), "ok");
     }
 
     #[test]

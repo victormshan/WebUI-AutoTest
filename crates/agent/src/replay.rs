@@ -50,10 +50,15 @@ pub struct ReplayReport {
     pub steps_total: usize,
     pub failures: Vec<String>,
     pub heals: Vec<Heal>,
+    /// Assertions that did not hold (also listed in `failures`).
+    pub failed_assertions: Vec<Assertion>,
     pub duration_ms: u128,
     /// The flow with healed locators applied (only when something was healed).
     #[serde(skip)]
     pub healed_flow: Option<Flow>,
+    /// Page snapshot at the moment of failure, for debugging.
+    #[serde(skip)]
+    pub failure_snapshot: Option<String>,
 }
 
 pub async fn replay(
@@ -70,8 +75,10 @@ pub async fn replay(
         steps_total: flow.steps.len(),
         failures: Vec::new(),
         heals: Vec::new(),
+        failed_assertions: Vec::new(),
         duration_ms: 0,
         healed_flow: None,
+        failure_snapshot: None,
     };
     let mut healed = flow.clone();
 
@@ -91,6 +98,9 @@ pub async fn replay(
     }
 
     report.passed = report.failures.is_empty();
+    if !report.passed {
+        report.failure_snapshot = browser.snapshot().await.ok();
+    }
     if !report.heals.is_empty() {
         report.healed_flow = Some(healed);
     }
@@ -114,8 +124,10 @@ pub async fn reach(browser: &Browser, flow: &Flow, opts: &ReplayOptions) -> Resu
         steps_total: flow.steps.len(),
         failures: Vec::new(),
         heals: Vec::new(),
+        failed_assertions: Vec::new(),
         duration_ms: 0,
         healed_flow: None,
+        failure_snapshot: None,
     };
     let mut scratch = flow.clone();
     run_steps(browser, flow, None, opts, &mut report, &mut scratch).await?;
@@ -230,6 +242,7 @@ async fn check_assertions(
             report
                 .failures
                 .extend(failed.iter().map(|a| format!("assertion failed: {a}")));
+            report.failed_assertions = failed.into_iter().cloned().collect();
             return Ok(());
         }
         tokio::time::sleep(opts.poll).await;

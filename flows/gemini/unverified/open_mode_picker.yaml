@@ -1,0 +1,35 @@
+name: open_mode_picker
+goal: Click the button "Open mode picker, currently Flash-Lite" and verify that a menu opens listing selectable model/mode options. Then close the menu with Escape without changing the selection and verify the picker button still shows Flash-Lite.
+start_url: https://gemini.google.com/app
+steps:
+- intent: The snapshot has no 'Open mode picker, currently Flash-Lite' button. It may still be loading, so I'll wait for it before concluding anything.
+  tool: wait_for
+  args:
+    text:
+    - Open mode picker
+    - Flash-Lite
+    timeout: 5000
+- intent: The mode picker button is now present as uid=2_12. Click it to open the menu.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: Open mode picker, currently Flash-Lite
+- intent: The menu is open, showing the options 3.5 Flash-Lite (selected), 3.6 Flash, 3.1 Pro, and a sign-in item. Now press Escape to close it.
+  tool: press_key
+  args:
+    key: Escape
+assertions:
+- element:
+    role: button
+    name: Open mode picker, currently Flash-Lite
+- element:
+    role: textbox
+    name: Enter a prompt for Gemini
+- element:
+    role: button
+    name: Upload & tools
+allowed_console_errors:
+- '[error] Loading a manifest from ''https://gemini.google.com/_/BardChatUi/manifest.json'' violates the following Content Security Policy directive: "manifest-src ''none''". The action has been blocked.'
+allowed_failed_requests: []

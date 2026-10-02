@@ -168,6 +168,12 @@ struct ExploreArgs {
         default_value = "删除,delete,remove,注销账号"
     )]
     deny: Vec<String>,
+    /// Consecutive clean replays required before a flow counts as verified
+    #[arg(long, default_value_t = 3)]
+    verify_runs: usize,
+    /// Seconds to wait for elements and assertions during verification
+    #[arg(long, default_value_t = 5)]
+    timeout: u64,
     #[arg(long, env = "WEBTEST_MODEL")]
     model: Option<String>,
     /// Output directory for flows and the exploration report
@@ -356,6 +362,16 @@ async fn replay_all(cfg: &BrowserConfig, args: ReplayArgs) -> Result<bool> {
             tracing::warn!("healed flow written to {}", out.display());
         }
         print_report(&report);
+        if let Some(snap) = &report.failure_snapshot {
+            std::fs::create_dir_all("runs")?;
+            let p = PathBuf::from("runs").join(format!(
+                "replay-{}-{}.snapshot.txt",
+                report.name,
+                chrono::Utc::now().format("%Y%m%d-%H%M%S")
+            ));
+            std::fs::write(&p, snap)?;
+            println!("  page at failure: {}", p.display());
+        }
         reports.push(report);
     }
 
@@ -402,12 +418,16 @@ async fn explore(browser: BrowserConfig, args: ExploreArgs) -> Result<bool> {
             deny: args.deny,
             ..Default::default()
         },
-        replay: ReplayOptions::default(),
+        replay: ReplayOptions {
+            timeout: Duration::from_secs(args.timeout),
+            ..Default::default()
+        },
         context: args.context,
         max_tasks: args.max_tasks,
         tasks_per_state: args.tasks_per_state,
         max_depth: args.max_depth,
         jobs: args.jobs,
+        verify_runs: args.verify_runs,
     };
     let report = Explorer::new(llm.as_ref(), cfg)
         .run(&args.url, &args.out)
@@ -421,6 +441,7 @@ async fn explore(browser: BrowserConfig, args: ExploreArgs) -> Result<bool> {
     println!("tasks: {}", report.tasks.len());
     for t in &report.tasks {
         let result = match (t.success, t.verified) {
+            _ if t.blocked => "BLOCKED",
             (true, true) => "verified",
             (true, false) => "UNVERIFIED",
             _ => "REVIEW",
@@ -431,7 +452,10 @@ async fn explore(browser: BrowserConfig, args: ExploreArgs) -> Result<bool> {
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         println!("  {result:<10} [{}] {:<24} {flow}", t.kind, t.name);
-        if !t.success {
+        for a in &t.flaky_assertions {
+            println!("             └ dropped flaky assertion: {a}");
+        }
+        if !t.success && !t.blocked {
             let why: String = t.summary.chars().take(160).collect();
             println!("             └ {why}");
         }
