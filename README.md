@@ -1,7 +1,10 @@
 # webtest — 基于 chrome-devtools-mcp 的 Rust 网页测试环境
 
 Rust 通过 MCP（`rmcp`）驱动 [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp)，
-由 Claude 读取页面无障碍树、自主决定操作，完成自然语言描述的测试目标，并记录可回放的运行轨迹。
+分两个阶段：
+
+1. **探索**（`run`）：Claude 读取页面无障碍树、自主操作，完成自然语言描述的目标，生成轨迹和测试用例（flow）。
+2. **回放**（`replay`）：按 flow 确定性执行，不调用大模型，几秒跑完，适合放进 CI。元素被改名或移动时，才调用大模型修复定位（自愈）。
 
 ```
 webtest (Rust) ──stdio/MCP──► chrome-devtools-mcp ──CDP──► Chrome (headless)
@@ -15,9 +18,10 @@ webtest (Rust) ──stdio/MCP──► chrome-devtools-mcp ──CDP──► C
 |---|---|
 | `crates/mcp-client` | 启动 chrome-devtools-mcp，调用工具，`navigate` / `snapshot` 便捷方法 |
 | `crates/llm` | `Llm` trait，Anthropic API 与 Claude Code CLI 两种后端，JSON 提取 |
-| `crates/agent` | 观察→决策→执行循环、快照压缩、语义定位器、安全拦截、自动诊断 |
+| `crates/agent` | 观察→决策→执行循环、快照压缩、语义定位器、安全拦截、自动诊断；`flow`（测试用例格式）、`replay`（回放、断言、自愈、JUnit） |
 | `crates/cli` | `webtest` 命令行 |
-| `fixtures/shop` | 演示站点（登录 / 加购 / 结算，内置一个 console 错误和一个 404） |
+| `fixtures/shop` | 演示站点（登录 / 加购 / 结算，内置一个 console 错误和一个 404）及其变体：`v2-renamed`（按钮改名）、`v3-bug`（金额算错）、`v4-console`（新增 console 错误） |
+| `flows/` | 测试用例 YAML |
 
 ## 环境准备（WSL，无需 sudo）
 
@@ -43,6 +47,52 @@ webtest run --url http://127.0.0.1:8765/ \
 `run` 输出 PASS/FAIL、结论、页面证据、console 错误和失败请求，失败时退出码为 1；
 完整轨迹写入 `runs/<时间>.json`，每一步都带有与 uid 无关的定位器（`role` + `name` + `nth`），用于后续确定性回放。
 
-常用参数：`--max-steps`、`--model`（默认 `claude-sonnet-5-5`）、`--deny 删除,delete`（拒绝操作含这些关键词的元素）、`--headed`、`--out`。
+### 回放
+
+```bash
+# 探索并保存 flow（大模型自动挑选断言，每条断言都会先在录制时的页面上验证一遍）
+webtest run --url http://127.0.0.1:8765/ --goal "..." --save flows/checkout.yaml
+# 或从已有轨迹生成：webtest save runs/xxx.json flows/checkout.yaml [--no-llm]
+
+webtest replay flows/*.yaml                      # 回放；找不到元素时调用大模型自愈
+webtest replay flows/*.yaml --no-heal            # 纯确定性回放，完全不调用大模型
+webtest replay flows/*.yaml --url https://staging.example.com/ --junit report.xml
+```
+
+flow 示例：
+
+```yaml
+steps:
+- intent: 点击登录按钮
+  tool: click
+  args: { uid: $0 }              # $n 对应 targets[n]，回放时在最新快照中解析
+  targets:
+  - { role: button, name: 登录 }
+assertions:
+- element: { role: heading, name: 订单已提交 }
+- text: 共 2 件，合计 ¥528
+- absent_text: 用户名或密码错误
+allowed_console_errors: [...]    # 录制时已存在的错误；回放时出现新的错误即判失败
+allowed_failed_requests: [...]   # 同源请求只记录路径，配合 --url 使用时仍能匹配
+```
+
+判定规则：
+
+- **PASS**：所有步骤执行成功，断言全部通过，没有新出现的 console 错误或失败请求。
+- **PASS (healed)**：有元素定位被大模型修复。修复结果写入 `<name>.healed.yaml`，加 `--update` 则直接覆盖原文件。
+- **FAIL**：元素找不到且无法修复、步骤报错、断言失败或出现新错误。断言失败和新错误**不会**被自愈，它们正是要抓的回归问题。
+
+每个 flow 使用一个全新的浏览器（临时用户目录），用例之间不会互相影响。
+
+### 测试
+
+```bash
+cargo test                                   # 单元测试
+cargo test -p webtest -- --ignored           # 端到端：用 fixtures 验证通过、改名、金额 bug、新 console 错误四种情况
+```
+
+### 其他参数
+
+`run` 的常用参数：`--max-steps`、`--model`（默认 `claude-sonnet-5-5`）、`--deny 删除,delete`（拒绝操作含这些关键词的元素）、`--headed`、`--out`。
 
 调试：`webtest repl` 从标准输入读取 `<工具名> <JSON参数>`，逐行调用并打印结果。

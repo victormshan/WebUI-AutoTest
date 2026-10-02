@@ -108,9 +108,9 @@ fn parse(raw: &str) -> Vec<Node> {
     normalize(raw).lines().filter_map(parse_line).collect()
 }
 
-/// Shrinks a snapshot for the LLM: drops line breaks and merges runs of
-/// sibling `StaticText` nodes (some sites emit one node per character).
-pub fn compact(raw: &str, max_chars: usize) -> String {
+/// Parses and normalizes: drops line breaks and merges runs of sibling
+/// `StaticText` nodes (some sites emit one node per character).
+fn merged(raw: &str) -> Vec<Node> {
     let mut out: Vec<Node> = Vec::new();
     for n in parse(raw) {
         if n.role == "LineBreak" {
@@ -126,6 +126,12 @@ pub fn compact(raw: &str, max_chars: usize) -> String {
         }
         out.push(n);
     }
+    out
+}
+
+/// Shrinks a snapshot for the LLM (see [`merged`]), capped at `max_chars`.
+pub fn compact(raw: &str, max_chars: usize) -> String {
+    let out = merged(raw);
     let mut s = String::new();
     for n in &out {
         if n.role == "StaticText" && n.name.trim().is_empty() {
@@ -190,6 +196,25 @@ pub fn describe(raw: &str, uid: &str) -> Option<String> {
     })
 }
 
+/// True if an element with exactly this role and name exists.
+pub fn has_element(raw: &str, role: &str, name: &str) -> bool {
+    merged(raw).iter().any(|n| n.role == role && n.name == name)
+}
+
+/// True if any element's name contains `text`.
+pub fn contains_text(raw: &str, text: &str) -> bool {
+    merged(raw).iter().any(|n| n.name.contains(text))
+}
+
+/// `(role, name)` of headings and alerts with text: stable "landmarks" of a page state.
+pub fn landmarks(raw: &str) -> Vec<(String, String)> {
+    merged(raw)
+        .into_iter()
+        .filter(|n| matches!(n.role.as_str(), "heading" | "alert") && !n.name.trim().is_empty())
+        .map(|n| (n.role, n.name))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +255,15 @@ uid=1_0 RootWebArea "Shop" url="http://x/"
         );
         let newer = SNAP.replace("2_6", "3_1").replace("2_8", "3_2");
         assert_eq!(resolve(&newer, &loc).as_deref(), Some("3_2"));
+    }
+
+    #[test]
+    fn queries() {
+        assert!(has_element(SNAP, "button", "去结算"));
+        assert!(!has_element(SNAP, "button", "去"));
+        assert!(contains_text(SNAP, "ab"));
+        assert!(contains_text(SNAP, "去结"));
+        assert!(!contains_text(SNAP, "zzz"));
     }
 
     #[test]

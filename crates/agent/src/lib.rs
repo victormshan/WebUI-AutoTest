@@ -3,6 +3,8 @@
 //! Every executed step is recorded with a uid-free [`Locator`] so the trace can
 //! later be replayed deterministically without the LLM.
 
+pub mod flow;
+pub mod replay;
 pub mod snapshot;
 
 use anyhow::{Result, bail};
@@ -83,6 +85,9 @@ pub struct Trace {
     pub evidence: String,
     pub steps: Vec<Step>,
     pub diagnostics: Diagnostics,
+    /// Raw snapshot the model judged the outcome on (basis for assertions).
+    #[serde(default)]
+    pub final_snapshot: String,
 }
 
 pub struct Agent<'a> {
@@ -123,6 +128,7 @@ impl<'a> Agent<'a> {
             evidence: String::new(),
             steps: Vec::new(),
             diagnostics: Diagnostics::default(),
+            final_snapshot: String::new(),
         };
 
         let nav = self.browser.navigate(start_url).await?;
@@ -178,6 +184,7 @@ impl<'a> Agent<'a> {
                     trace.success = success;
                     trace.summary = summary;
                     trace.evidence = evidence;
+                    trace.final_snapshot = raw_snapshot;
                     break;
                 }
                 Decision::Act {
@@ -193,7 +200,7 @@ impl<'a> Agent<'a> {
             }
         }
 
-        trace.diagnostics = self.diagnostics().await?;
+        trace.diagnostics = collect_diagnostics(self.browser).await?;
         trace.finished_at = Some(Utc::now());
         Ok(trace)
     }
@@ -272,31 +279,43 @@ impl<'a> Agent<'a> {
                 .then_some(line)
         })
     }
+}
 
-    /// Built-in checks that need no assertions: console errors and HTTP failures.
-    async fn diagnostics(&self) -> Result<Diagnostics> {
-        let console = self
-            .browser
-            .call("list_console_messages", serde_json::json!({}))
-            .await?;
-        let network = self
-            .browser
-            .call("list_network_requests", serde_json::json!({}))
-            .await?;
-        Ok(Diagnostics {
-            console_errors: console
-                .text
-                .lines()
-                .filter(|l| l.contains("] [error]") || l.contains(" [error] "))
-                .map(str::to_string)
-                .collect(),
-            failed_requests: network
-                .text
-                .lines()
-                .filter(|l| l.starts_with("reqid=") && http_failed(l))
-                .map(str::to_string)
-                .collect(),
-        })
+/// Built-in checks that need no assertions: console errors and HTTP failures.
+/// Entries are normalized (ids and arg counts stripped) so runs can be compared.
+pub async fn collect_diagnostics(browser: &Browser) -> Result<Diagnostics> {
+    let console = browser
+        .call("list_console_messages", serde_json::json!({}))
+        .await?;
+    let network = browser
+        .call("list_network_requests", serde_json::json!({}))
+        .await?;
+    Ok(Diagnostics {
+        console_errors: console
+            .text
+            .lines()
+            .filter(|l| l.starts_with("msgid=") && l.contains(" [error] "))
+            .map(|l| strip_arg_count(strip_id(l)).to_string())
+            .collect(),
+        failed_requests: network
+            .text
+            .lines()
+            .filter(|l| l.starts_with("reqid=") && http_failed(l))
+            .map(|l| strip_id(l).to_string())
+            .collect(),
+    })
+}
+
+/// `msgid=3 [error] x` -> `[error] x`
+fn strip_id(line: &str) -> &str {
+    line.split_once(' ').map_or(line, |(_, rest)| rest)
+}
+
+/// `... (0 args)` -> `...`
+fn strip_arg_count(line: &str) -> &str {
+    match line.rsplit_once(" (") {
+        Some((head, tail)) if tail.ends_with(" args)") || tail.ends_with(" arg)") => head,
+        _ => line,
     }
 }
 
@@ -312,7 +331,7 @@ fn http_failed(line: &str) -> bool {
 }
 
 /// All element uids referenced by tool arguments (`uid`, `from_uid`, `fill_form.elements[].uid`, ...).
-fn uids_in(args: &Value) -> Vec<String> {
+pub(crate) fn uids_in(args: &Value) -> Vec<String> {
     let mut out = Vec::new();
     fn walk(v: &Value, out: &mut Vec<String>) {
         match v {
@@ -434,6 +453,19 @@ mod tests {
         assert_eq!(
             uids_in(&serde_json::json!({"from_uid": "1", "to_uid": "2"})).len(),
             2
+        );
+    }
+
+    #[test]
+    fn normalizes_diagnostic_lines() {
+        let l = "msgid=4 [error] analytics: tracker not configured (1 args)";
+        assert_eq!(
+            strip_arg_count(strip_id(l)),
+            "[error] analytics: tracker not configured"
+        );
+        assert_eq!(
+            strip_id("reqid=2 GET http://x/a [404]"),
+            "GET http://x/a [404]"
         );
     }
 

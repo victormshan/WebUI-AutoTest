@@ -1,0 +1,69 @@
+name: checkout
+goal: 用账号 alice / 密码 secret123 登录，把机械键盘和无线鼠标加入购物车，填写收货地址后结算，确认订单已提交且合计金额正确
+start_url: http://127.0.0.1:8765/
+steps:
+- intent: Fill in the login form with the given credentials.
+  tool: fill_form
+  args:
+    elements:
+    - uid: $0
+      value: alice
+    - uid: $1
+      value: secret123
+  targets:
+  - role: textbox
+    name: 用户名
+  - role: textbox
+    name: 密码
+- intent: Credentials are filled in; click the login button.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: 登录
+- intent: Logged in. Add the mechanical keyboard to the cart first.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: 加入购物车
+- intent: Keyboard is in the cart (1 item, ¥399). Now add the wireless mouse.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: 加入购物车
+    nth: 1
+- intent: Cart shows 2 items, total ¥528 (399+129). Now fill in the shipping address.
+  tool: fill
+  args:
+    uid: $0
+    value: 上海市浦东新区世纪大道100号
+  targets:
+  - role: textbox
+    name: 收货地址
+- intent: Address filled, cart has 2 items totaling ¥528. Click checkout.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: 去结算
+assertions:
+- element:
+    role: heading
+    name: 订单已提交
+- text: 共 2 件，合计 ¥528
+- text: 寄往：上海市浦东新区世纪大道100号
+- element:
+    role: button
+    name: 继续购物
+allowed_console_errors:
+- '[error] Failed to load resource: the server responded with a status of 404 (File not found)'
+- '[error] analytics: tracker not configured'
+allowed_failed_requests:
+- GET /favicon.ico [404]
+- GET /api/analytics [404]

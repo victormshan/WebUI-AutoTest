@@ -1,7 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::time::Duration;
 
-use agent::{Agent, AgentConfig};
-use anyhow::Result;
+use agent::flow::{Flow, suggest_assertions};
+use agent::replay::{ReplayOptions, ReplayReport, junit_xml, replay};
+use agent::{Agent, AgentConfig, Trace};
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use mcp_client::{Browser, BrowserConfig};
 use tokio::io::AsyncBufReadExt;
@@ -56,6 +60,10 @@ enum Cmd {
     Snapshot { url: String },
     /// Let the LLM agent accomplish a goal on a page and record a trace
     Run(RunArgs),
+    /// Turn a successful trace into a replayable flow (YAML)
+    Save(SaveArgs),
+    /// Replay flows deterministically; the LLM is only used to heal broken locators
+    Replay(ReplayArgs),
     /// Read `<tool> [json-args]` lines from stdin and print each result (debugging aid)
     Repl,
 }
@@ -83,10 +91,53 @@ struct RunArgs {
     /// Directory for trace JSON files
     #[arg(long, default_value = "runs")]
     out: PathBuf,
+    /// On success, also save a replayable flow to this YAML file
+    #[arg(long)]
+    save: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct SaveArgs {
+    /// Trace JSON written by `webtest run`
+    trace: PathBuf,
+    /// Output flow YAML
+    flow: PathBuf,
+    /// Flow name (defaults to the output file stem)
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long, env = "WEBTEST_MODEL")]
+    model: Option<String>,
+    /// Don't use the LLM to pick assertions; use page headings/alerts instead
+    #[arg(long)]
+    no_llm: bool,
+}
+
+#[derive(Args)]
+struct ReplayArgs {
+    /// Flow YAML files
+    #[arg(required = true)]
+    flows: Vec<PathBuf>,
+    /// Override every flow's start URL (e.g. a staging server)
+    #[arg(long)]
+    url: Option<String>,
+    /// Never call the LLM; a missing element fails the flow
+    #[arg(long)]
+    no_heal: bool,
+    /// Write healed locators back into the flow files (default: `<name>.healed.yaml`)
+    #[arg(long)]
+    update: bool,
+    /// Seconds to wait for elements and assertions
+    #[arg(long, default_value_t = 5)]
+    timeout: u64,
+    /// Write a JUnit XML report
+    #[arg(long)]
+    junit: Option<PathBuf>,
+    #[arg(long, env = "WEBTEST_MODEL")]
+    model: Option<String>,
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -95,14 +146,32 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::parse();
-    let browser = Browser::launch(&cli.browser.config()).await?;
-    let result = run(&browser, cli.cmd).await;
-    browser.close().await?;
-    result
+    match dispatch(Cli::parse()).await {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::from(2)
+        }
+    }
 }
 
-async fn run(browser: &Browser, cmd: Cmd) -> Result<()> {
+/// Returns whether the command "passed".
+async fn dispatch(cli: Cli) -> Result<bool> {
+    let cfg = cli.browser.config();
+    match cli.cmd {
+        Cmd::Save(args) => save(args).await,
+        Cmd::Replay(args) => replay_all(&cfg, args).await,
+        cmd => {
+            let browser = Browser::launch(&cfg).await?;
+            let result = with_browser(&browser, cmd).await;
+            browser.close().await?;
+            result
+        }
+    }
+}
+
+async fn with_browser(browser: &Browser, cmd: Cmd) -> Result<bool> {
     match cmd {
         Cmd::Tools => {
             for t in browser.tools().await? {
@@ -115,41 +184,7 @@ async fn run(browser: &Browser, cmd: Cmd) -> Result<()> {
             anyhow::ensure!(!nav.is_error, "navigation failed: {}", nav.text);
             println!("{}", browser.snapshot().await?);
         }
-        Cmd::Run(args) => {
-            let llm = llm::from_env(args.model);
-            tracing::info!("model backend: {}", llm.describe());
-            let cfg = AgentConfig {
-                max_steps: args.max_steps,
-                deny: args.deny,
-                ..Default::default()
-            };
-            let trace = Agent::new(browser, llm.as_ref(), cfg)
-                .run(&args.goal, &args.url)
-                .await?;
-
-            std::fs::create_dir_all(&args.out)?;
-            let path = args
-                .out
-                .join(format!("{}.json", trace.started_at.format("%Y%m%d-%H%M%S")));
-            std::fs::write(&path, serde_json::to_string_pretty(&trace)?)?;
-
-            println!("{}", if trace.success { "PASS" } else { "FAIL" });
-            println!("summary : {}", trace.summary);
-            if !trace.evidence.is_empty() {
-                println!("evidence: {}", trace.evidence);
-            }
-            println!("steps   : {}", trace.steps.len());
-            for e in &trace.diagnostics.console_errors {
-                println!("console : {e}");
-            }
-            for r in &trace.diagnostics.failed_requests {
-                println!("network : {r}");
-            }
-            println!("trace   : {}", path.display());
-            if !trace.success {
-                std::process::exit(1);
-            }
-        }
+        Cmd::Run(args) => return run(browser, args).await,
         Cmd::Repl => {
             let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
             while let Some(line) = lines.next_line().await? {
@@ -166,6 +201,151 @@ async fn run(browser: &Browser, cmd: Cmd) -> Result<()> {
                 );
             }
         }
+        Cmd::Save(_) | Cmd::Replay(_) => unreachable!("handled without a shared browser"),
     }
-    Ok(())
+    Ok(true)
+}
+
+async fn run(browser: &Browser, args: RunArgs) -> Result<bool> {
+    let llm = llm::from_env(args.model);
+    tracing::info!("model backend: {}", llm.describe());
+    let cfg = AgentConfig {
+        max_steps: args.max_steps,
+        deny: args.deny,
+        ..Default::default()
+    };
+    let trace = Agent::new(browser, llm.as_ref(), cfg)
+        .run(&args.goal, &args.url)
+        .await?;
+
+    std::fs::create_dir_all(&args.out)?;
+    let path = args
+        .out
+        .join(format!("{}.json", trace.started_at.format("%Y%m%d-%H%M%S")));
+    std::fs::write(&path, serde_json::to_string_pretty(&trace)?)?;
+
+    println!("{}", if trace.success { "PASS" } else { "FAIL" });
+    println!("summary : {}", trace.summary);
+    if !trace.evidence.is_empty() {
+        println!("evidence: {}", trace.evidence);
+    }
+    println!("steps   : {}", trace.steps.len());
+    for e in &trace.diagnostics.console_errors {
+        println!("console : {e}");
+    }
+    for r in &trace.diagnostics.failed_requests {
+        println!("network : {r}");
+    }
+    println!("trace   : {}", path.display());
+
+    if let (true, Some(flow_path)) = (trace.success, &args.save) {
+        let flow = build_flow(&trace, flow_path, None, Some(llm.as_ref())).await?;
+        flow.save(flow_path)?;
+        println!(
+            "flow    : {} ({} steps, {} assertions)",
+            flow_path.display(),
+            flow.steps.len(),
+            flow.assertions.len()
+        );
+    }
+    Ok(trace.success)
+}
+
+async fn build_flow(
+    trace: &Trace,
+    path: &Path,
+    name: Option<String>,
+    llm: Option<&dyn llm::Llm>,
+) -> Result<Flow> {
+    let name = name.unwrap_or_else(|| {
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "flow".into())
+    });
+    let mut flow = Flow::from_trace(trace, &name)?;
+    flow.assertions = suggest_assertions(trace, llm).await;
+    Ok(flow)
+}
+
+async fn save(args: SaveArgs) -> Result<bool> {
+    let text = std::fs::read_to_string(&args.trace)
+        .with_context(|| format!("reading {}", args.trace.display()))?;
+    let trace: Trace = serde_json::from_str(&text)?;
+    let llm = (!args.no_llm).then(|| llm::from_env(args.model));
+    let flow = build_flow(&trace, &args.flow, args.name, llm.as_deref()).await?;
+    flow.save(&args.flow)?;
+    println!(
+        "{}: {} steps, {} assertions",
+        args.flow.display(),
+        flow.steps.len(),
+        flow.assertions.len()
+    );
+    for a in &flow.assertions {
+        println!("  - {a}");
+    }
+    Ok(true)
+}
+
+async fn replay_all(cfg: &BrowserConfig, args: ReplayArgs) -> Result<bool> {
+    let healer = (!args.no_heal).then(|| llm::from_env(args.model.clone()));
+    let opts = ReplayOptions {
+        timeout: Duration::from_secs(args.timeout),
+        url_override: args.url.clone(),
+        ..Default::default()
+    };
+
+    let mut reports = Vec::new();
+    for path in &args.flows {
+        let flow = Flow::load(path)?;
+        tracing::info!("replaying {} ({})", flow.name, path.display());
+        // Fresh browser per flow: no state leaks between tests.
+        let browser = Browser::launch(cfg).await?;
+        let report = replay(&browser, &flow, healer.as_deref(), &opts).await;
+        browser.close().await?;
+        let report = report?;
+
+        if let Some(healed) = &report.healed_flow {
+            let out = if args.update {
+                path.clone()
+            } else {
+                path.with_extension("healed.yaml")
+            };
+            healed.save(&out)?;
+            tracing::warn!("healed flow written to {}", out.display());
+        }
+        print_report(&report);
+        reports.push(report);
+    }
+
+    let passed = reports.iter().filter(|r| r.passed).count();
+    println!("\n{passed}/{} flows passed", reports.len());
+    if let Some(path) = &args.junit {
+        std::fs::write(path, junit_xml(&reports))?;
+        println!("junit: {}", path.display());
+    }
+    Ok(passed == reports.len())
+}
+
+fn print_report(r: &ReplayReport) {
+    let status = match (r.passed, r.heals.is_empty()) {
+        (true, true) => "PASS",
+        (true, false) => "PASS (healed)",
+        (false, _) => "FAIL",
+    };
+    println!(
+        "{status:<14} {} — {}/{} steps, {:.1}s",
+        r.name,
+        r.steps_run,
+        r.steps_total,
+        r.duration_ms as f64 / 1000.0
+    );
+    for h in &r.heals {
+        println!(
+            "  healed step {}: {} -> {} ({})",
+            h.step, h.from, h.to, h.reason
+        );
+    }
+    for f in &r.failures {
+        println!("  ✗ {f}");
+    }
 }
