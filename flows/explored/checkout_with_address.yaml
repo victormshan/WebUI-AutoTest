@@ -1,0 +1,61 @@
+name: checkout_with_address
+goal: 点击“机械键盘”的“加入购物车”,在“收货地址”输入框输入“上海市浦东新区世纪大道100号”,点击“去结算”按钮,验证页面显示下单成功/订单已提交的提示信息,并且购物车被清空或显示订单确认内容。
+start_url: http://127.0.0.1:8765/
+steps:
+- intent: Fill username and password in one go.
+  tool: fill_form
+  args:
+    elements:
+    - uid: $0
+      value: alice
+    - uid: $1
+      value: secret123
+  targets:
+  - role: textbox
+    name: 用户名
+  - role: textbox
+    name: 密码
+- intent: Fields are filled. Click the login button.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: 登录
+- intent: First, add the mechanical keyboard to the cart by clicking its '加入购物车' button.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: 加入购物车
+- intent: The cart now has 1 item. Next, fill in the shipping address.
+  tool: fill
+  args:
+    uid: $0
+    value: 上海市浦东新区世纪大道100号
+  targets:
+  - role: textbox
+    name: 收货地址
+- intent: Address is filled. Now click the checkout button.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: 去结算
+assertions:
+- element:
+    role: heading
+    name: 订单已提交
+- text: 共 1 件，合计 ¥399
+- text: 寄往：上海市浦东新区世纪大道100号
+- element:
+    role: button
+    name: 继续购物
+allowed_console_errors:
+- '[error] Failed to load resource: the server responded with a status of 404 (File not found)'
+- '[error] analytics: tracker not configured'
+allowed_failed_requests:
+- GET /favicon.ico [404]
+- GET /api/analytics [404]

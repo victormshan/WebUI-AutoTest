@@ -1,0 +1,52 @@
+name: checkout_without_address
+goal: 点击“无线鼠标”的“加入购物车”,保持“收货地址”输入框为空,点击“去结算”按钮,验证页面显示收货地址必填或类似的错误提示,且没有显示下单成功信息,购物车内商品仍保留。
+start_url: http://127.0.0.1:8765/
+steps:
+- intent: Fill username and password in one go.
+  tool: fill_form
+  args:
+    elements:
+    - uid: $0
+      value: alice
+    - uid: $1
+      value: secret123
+  targets:
+  - role: textbox
+    name: 用户名
+  - role: textbox
+    name: 密码
+- intent: Fields are filled. Click the login button.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: 登录
+- intent: The wireless mouse's add-to-cart button is the first step; click it.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: 加入购物车
+    nth: 1
+- intent: Cart has 1 item (wireless mouse, ¥129). Address is empty. Click checkout.
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: 去结算
+assertions:
+- text: 请填写收货地址
+- element:
+    role: textbox
+    name: 收货地址
+- element:
+    role: button
+    name: 去结算
+- absent_text: 下单成功
+allowed_console_errors:
+- '[error] Failed to load resource: the server responded with a status of 404 (File not found)'
+allowed_failed_requests:
+- GET /favicon.ico [404]

@@ -215,6 +215,67 @@ pub fn landmarks(raw: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Roles that make up a page's "shape" for state identity.
+const STRUCTURAL_ROLES: &[&str] = &[
+    "heading",
+    "button",
+    "link",
+    "textbox",
+    "searchbox",
+    "checkbox",
+    "radio",
+    "combobox",
+    "listbox",
+    "menuitem",
+    "tab",
+    "switch",
+    "slider",
+    "spinbutton",
+];
+
+/// Identity of a page state: URL path plus the set of headings and controls.
+/// Dynamic text (counts, totals, messages) is ignored so that e.g. a cart with
+/// one or two items is the same state.
+pub fn fingerprint(raw: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let nodes = merged(raw);
+    let url = nodes
+        .iter()
+        .find(|n| n.role == "RootWebArea")
+        .and_then(|n| n.rest.split("url=\"").nth(1))
+        .and_then(|u| u.split('"').next())
+        .unwrap_or("")
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let mut parts: Vec<String> = nodes
+        .iter()
+        .filter(|n| STRUCTURAL_ROLES.contains(&n.role.as_str()))
+        .map(|n| format!("{}:{}", n.role, n.name))
+        .collect();
+    parts.sort();
+    parts.dedup();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut h);
+    parts.hash(&mut h);
+    format!("{:016x}", h.finish())[..8].to_string()
+}
+
+/// Short human label for a page state: its headings, most specific last.
+pub fn label(raw: &str) -> String {
+    let heads: Vec<String> = merged(raw)
+        .into_iter()
+        .filter(|n| n.role == "heading" && !n.name.trim().is_empty())
+        .map(|n| n.name)
+        .collect();
+    let mut s = heads.join(" · ");
+    if s.chars().count() > 60 {
+        s = s.chars().take(57).collect::<String>() + "...";
+    }
+    if s.is_empty() { "(untitled)".into() } else { s }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +325,17 @@ uid=1_0 RootWebArea "Shop" url="http://x/"
         assert!(contains_text(SNAP, "ab"));
         assert!(contains_text(SNAP, "去结"));
         assert!(!contains_text(SNAP, "zzz"));
+    }
+
+    #[test]
+    fn fingerprint_ignores_dynamic_text() {
+        let a = SNAP.replace(r#"StaticText "a""#, r#"StaticText "共 1 件""#);
+        let b = SNAP.replace(r#"StaticText "a""#, r#"StaticText "共 2 件""#);
+        assert_eq!(fingerprint(&a), fingerprint(&b));
+        let c = SNAP.replace(r#"button "去结算""#, r#"button "提交订单""#);
+        assert_ne!(fingerprint(SNAP), fingerprint(&c));
+        let d = SNAP.replace(r#"url="http://x/""#, r#"url="http://x/?q=1""#);
+        assert_eq!(fingerprint(SNAP), fingerprint(&d));
     }
 
     #[test]

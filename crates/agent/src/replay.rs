@@ -98,6 +98,30 @@ pub async fn replay(
     Ok(report)
 }
 
+/// Opens the flow's start page and runs its steps without healing, assertions
+/// or diagnostics — used to bring a browser into a known state.
+/// Returns the first failure, if any.
+pub async fn reach(browser: &Browser, flow: &Flow, opts: &ReplayOptions) -> Result<Option<String>> {
+    let url = opts.url_override.as_deref().unwrap_or(&flow.start_url);
+    let nav = browser.navigate(url).await?;
+    if nav.is_error {
+        return Ok(Some(format!("could not open {url}: {}", nav.text)));
+    }
+    let mut report = ReplayReport {
+        name: flow.name.clone(),
+        passed: false,
+        steps_run: 0,
+        steps_total: flow.steps.len(),
+        failures: Vec::new(),
+        heals: Vec::new(),
+        duration_ms: 0,
+        healed_flow: None,
+    };
+    let mut scratch = flow.clone();
+    run_steps(browser, flow, None, opts, &mut report, &mut scratch).await?;
+    Ok(report.failures.into_iter().next())
+}
+
 async fn run_steps(
     browser: &Browser,
     flow: &Flow,

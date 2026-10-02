@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use agent::explore::{ExploreConfig, Explorer};
 use agent::flow::{Flow, suggest_assertions};
 use agent::replay::{ReplayOptions, ReplayReport, junit_xml, replay};
 use agent::{Agent, AgentConfig, Trace};
@@ -64,6 +65,8 @@ enum Cmd {
     Save(SaveArgs),
     /// Replay flows deterministically; the LLM is only used to heal broken locators
     Replay(ReplayArgs),
+    /// Discover user tasks automatically and record them as verified flows
+    Explore(ExploreArgs),
     /// Read `<tool> [json-args]` lines from stdin and print each result (debugging aid)
     Repl,
 }
@@ -136,6 +139,42 @@ struct ReplayArgs {
     model: Option<String>,
 }
 
+#[derive(Args)]
+struct ExploreArgs {
+    /// Start URL
+    #[arg(long)]
+    url: String,
+    /// Test data the agent may use, e.g. "账号 alice / 密码 secret123"
+    #[arg(long, default_value = "")]
+    context: String,
+    /// Total number of tasks to attempt
+    #[arg(long, default_value_t = 8)]
+    max_tasks: usize,
+    /// New tasks proposed per page state
+    #[arg(long, default_value_t = 4)]
+    tasks_per_state: usize,
+    /// How many state transitions deep to explore
+    #[arg(long, default_value_t = 2)]
+    max_depth: usize,
+    /// Tasks run in parallel (one browser each)
+    #[arg(long, default_value_t = 2)]
+    jobs: usize,
+    /// Per-task step limit for the agent
+    #[arg(long, default_value_t = 20)]
+    max_steps: usize,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "删除,delete,remove,注销账号"
+    )]
+    deny: Vec<String>,
+    #[arg(long, env = "WEBTEST_MODEL")]
+    model: Option<String>,
+    /// Output directory for flows and the exploration report
+    #[arg(long, default_value = "flows/explored")]
+    out: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -162,6 +201,7 @@ async fn dispatch(cli: Cli) -> Result<bool> {
     match cli.cmd {
         Cmd::Save(args) => save(args).await,
         Cmd::Replay(args) => replay_all(&cfg, args).await,
+        Cmd::Explore(args) => explore(cfg, args).await,
         cmd => {
             let browser = Browser::launch(&cfg).await?;
             let result = with_browser(&browser, cmd).await;
@@ -201,7 +241,9 @@ async fn with_browser(browser: &Browser, cmd: Cmd) -> Result<bool> {
                 );
             }
         }
-        Cmd::Save(_) | Cmd::Replay(_) => unreachable!("handled without a shared browser"),
+        Cmd::Save(_) | Cmd::Replay(_) | Cmd::Explore(_) => {
+            unreachable!("handled without a shared browser")
+        }
     }
     Ok(true)
 }
@@ -348,4 +390,52 @@ fn print_report(r: &ReplayReport) {
     for f in &r.failures {
         println!("  ✗ {f}");
     }
+}
+
+async fn explore(browser: BrowserConfig, args: ExploreArgs) -> Result<bool> {
+    let llm = llm::from_env(args.model);
+    tracing::info!("model backend: {}", llm.describe());
+    let cfg = ExploreConfig {
+        browser,
+        agent: AgentConfig {
+            max_steps: args.max_steps,
+            deny: args.deny,
+            ..Default::default()
+        },
+        replay: ReplayOptions::default(),
+        context: args.context,
+        max_tasks: args.max_tasks,
+        tasks_per_state: args.tasks_per_state,
+        max_depth: args.max_depth,
+        jobs: args.jobs,
+    };
+    let report = Explorer::new(llm.as_ref(), cfg)
+        .run(&args.url, &args.out)
+        .await?;
+
+    println!("\nstates: {}", report.states.len());
+    for s in &report.states {
+        let via = s.reached_by.as_deref().unwrap_or("start");
+        println!("  {} depth {} via {via:<20} {}", s.id, s.depth, s.label);
+    }
+    println!("tasks: {}", report.tasks.len());
+    for t in &report.tasks {
+        let result = match (t.success, t.verified) {
+            (true, true) => "verified",
+            (true, false) => "UNVERIFIED",
+            _ => "REVIEW",
+        };
+        let flow = t
+            .flow
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        println!("  {result:<10} [{}] {:<24} {flow}", t.kind, t.name);
+        if !t.success {
+            let why: String = t.summary.chars().take(160).collect();
+            println!("             └ {why}");
+        }
+    }
+    println!("report: {}", args.out.join("explore.md").display());
+    Ok(report.tasks.iter().any(|t| t.verified))
 }

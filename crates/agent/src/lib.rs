@@ -3,6 +3,7 @@
 //! Every executed step is recorded with a uid-free [`Locator`] so the trace can
 //! later be replayed deterministically without the LLM.
 
+pub mod explore;
 pub mod flow;
 pub mod replay;
 pub mod snapshot;
@@ -116,7 +117,18 @@ impl<'a> Agent<'a> {
         Self { browser, llm, cfg }
     }
 
+    /// Opens `start_url`, then pursues `goal`.
     pub async fn run(&self, goal: &str, start_url: &str) -> Result<Trace> {
+        let nav = self.browser.navigate(start_url).await?;
+        if nav.is_error {
+            bail!("could not open {start_url}: {}", nav.text);
+        }
+        self.run_here(goal, start_url).await
+    }
+
+    /// Pursues `goal` from whatever page the browser is on now (e.g. after
+    /// replaying a prefix). `start_url` is only recorded in the trace.
+    pub async fn run_here(&self, goal: &str, start_url: &str) -> Result<Trace> {
         let mut trace = Trace {
             goal: goal.to_string(),
             start_url: start_url.to_string(),
@@ -130,11 +142,6 @@ impl<'a> Agent<'a> {
             diagnostics: Diagnostics::default(),
             final_snapshot: String::new(),
         };
-
-        let nav = self.browser.navigate(start_url).await?;
-        if nav.is_error {
-            bail!("could not open {start_url}: {}", nav.text);
-        }
 
         let tools: Vec<ToolInfo> = self
             .browser
