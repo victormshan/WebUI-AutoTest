@@ -183,3 +183,77 @@ fn reuses_saved_login_state() {
         "missing state file is a usage error"
     );
 }
+
+#[test]
+#[ignore = "needs Chrome + npx"]
+fn refreshes_expired_session_and_retries() {
+    // Cookies are not port-scoped: a session from server A is sent to server B,
+    // which does not know it — exactly what an expired session looks like.
+    let a = Server::start();
+    let b = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("alice.json");
+    let state = state.to_str().unwrap();
+
+    let o = webtest(&[
+        "login",
+        "--flow",
+        "flows/login.yaml",
+        "--url",
+        &a.url(""),
+        "--save-state",
+        state,
+    ]);
+    assert!(o.status.success(), "{}", stdout(&o));
+
+    let o = webtest(&[
+        "--storage-state",
+        state,
+        "--login-flow",
+        "flows/login.yaml",
+        "replay",
+        "flows/checkout_logged_in.yaml",
+        "--no-heal",
+        "--timeout",
+        "2",
+        "--url",
+        &b.url(""),
+    ]);
+    assert!(
+        o.status.success(),
+        "{}{}",
+        stdout(&o),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(
+        stdout(&o).contains("PASS (session refreshed)"),
+        "{}",
+        stdout(&o)
+    );
+}
+
+#[test]
+#[ignore = "needs Chrome + npx"]
+fn creates_missing_state_via_login_flow() {
+    let s = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("new.json");
+    let o = webtest(&[
+        "--storage-state",
+        state.to_str().unwrap(),
+        "--login-flow",
+        "flows/login.yaml",
+        "replay",
+        "flows/checkout_logged_in.yaml",
+        "--no-heal",
+        "--url",
+        &s.url(""),
+    ]);
+    assert!(
+        o.status.success(),
+        "{}{}",
+        stdout(&o),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(state.exists());
+}

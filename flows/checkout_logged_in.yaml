@@ -2,6 +2,7 @@ name: checkout_logged_in
 goal: （已登录）把机械键盘和无线鼠标加入购物车，填写收货地址后结算，确认订单已提交且合计金额正确
 start_url: http://127.0.0.1:8765/
 storage_state: auth/alice.json
+login_flow: flows/login.yaml
 steps:
 - intent: Logged in. Add the mechanical keyboard to the cart first.
   tool: click

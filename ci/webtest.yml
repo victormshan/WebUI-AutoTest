@@ -1,0 +1,63 @@
+# GitHub Actions workflow. Enable it by copying this file to
+# .github/workflows/webtest.yml (requires an account with the `workflow` scope).
+name: webtest
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 2 * * *" # daily regression run
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # chrome-devtools-mcp: don't send usage statistics from CI.
+  CI: "true"
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  e2e:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@v2
+      # Framework self-tests against fixtures/shop (uses the runner's Chrome).
+      - run: cargo test --locked -p webtest -- --ignored --test-threads 2
+
+  regression:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@v2
+      - name: Replay flows
+        env:
+          # Optional: enables LLM self-healing of broken locators.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: scripts/ci.sh
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webtest-reports
+          path: reports/
+          if-no-files-found: ignore

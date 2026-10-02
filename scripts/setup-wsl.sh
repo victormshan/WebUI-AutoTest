@@ -31,6 +31,7 @@ for a in "$@"; do
 done
 exec "$HOME/.local/bin/zig" cc -target x86_64-linux-gnu "$@"
 EOF
+  # shellcheck disable=SC2016 # $HOME/$@ must stay literal in the generated script
   printf '#!/bin/sh\nexec "$HOME/.local/bin/zig" ar "$@"\n' >"$BIN/zigar"
   chmod +x "$BIN/zigcc" "$BIN/zigar"
   if ! grep -q zigcc "$HOME/.cargo/config.toml" 2>/dev/null; then

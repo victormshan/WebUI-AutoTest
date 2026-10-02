@@ -32,6 +32,8 @@ pub struct ExploreConfig {
     pub replay: ReplayOptions,
     /// Path recorded in generated flows when `browser.storage_state` is set.
     pub storage_state_path: Option<String>,
+    /// Login flow recorded in generated flows (for session refresh on replay).
+    pub login_flow_path: Option<String>,
     /// Free-form test data the LLM may use (accounts, addresses, ...).
     pub context: String,
     pub max_tasks: usize,
@@ -128,6 +130,7 @@ impl<'a> Explorer<'a> {
             goal: String::new(),
             start_url: start_url.to_string(),
             storage_state: self.cfg.storage_state_path.clone(),
+            login_flow: self.cfg.login_flow_path.clone(),
             steps: Vec::new(),
             assertions: Vec::new(),
             allowed_console_errors: Vec::new(),
@@ -373,6 +376,7 @@ Reply with ONLY JSON: {{"tasks": [{{"name": "<short_snake_case_ascii>", "goal": 
         let mut flow = Flow::from_trace(&trace, name)?;
         flow.goal = p.goal.clone();
         flow.storage_state = prefix.storage_state.clone();
+        flow.login_flow = prefix.login_flow.clone();
         flow.steps.splice(0..0, prefix.steps.iter().cloned());
         for e in &prefix.allowed_console_errors {
             if !flow.allowed_console_errors.contains(e) {

@@ -50,6 +50,8 @@ pub struct ReplayReport {
     pub steps_total: usize,
     pub failures: Vec<String>,
     pub heals: Vec<Heal>,
+    /// The run was retried after refreshing an expired login state.
+    pub session_refreshed: bool,
     /// Assertions that did not hold (also listed in `failures`).
     pub failed_assertions: Vec<Assertion>,
     pub duration_ms: u128,
@@ -75,6 +77,7 @@ pub async fn replay(
         steps_total: flow.steps.len(),
         failures: Vec::new(),
         heals: Vec::new(),
+        session_refreshed: false,
         failed_assertions: Vec::new(),
         duration_ms: 0,
         healed_flow: None,
@@ -124,6 +127,7 @@ pub async fn reach(browser: &Browser, flow: &Flow, opts: &ReplayOptions) -> Resu
         steps_total: flow.steps.len(),
         failures: Vec::new(),
         heals: Vec::new(),
+        session_refreshed: false,
         failed_assertions: Vec::new(),
         duration_ms: 0,
         healed_flow: None,
@@ -331,19 +335,110 @@ pub fn junit_xml(reports: &[ReplayReport]) -> String {
                 esc(&r.failures.join("\n"))
             ));
         }
+        let mut notes: Vec<String> = Vec::new();
+        if r.session_refreshed {
+            notes.push("login state was refreshed and the flow retried".into());
+        }
         if !r.heals.is_empty() {
-            let lines: Vec<String> = r
-                .heals
-                .iter()
-                .map(|h| format!("step {}: {} -> {} ({})", h.step, h.from, h.to, h.reason))
-                .collect();
+            notes.push("healed locators:".into());
+            notes.extend(
+                r.heals
+                    .iter()
+                    .map(|h| format!("step {}: {} -> {} ({})", h.step, h.from, h.to, h.reason)),
+            );
+        }
+        if !notes.is_empty() {
             x.push_str(&format!(
-                "    <system-out>healed locators:\n{}</system-out>\n",
-                esc(&lines.join("\n"))
+                "    <system-out>{}</system-out>\n",
+                esc(&notes.join("\n"))
             ));
         }
         x.push_str("  </testcase>\n");
     }
     x.push_str("</testsuite>\n");
     x
+}
+
+/// One-line status used in console output and summaries.
+pub fn status(r: &ReplayReport) -> &'static str {
+    match (r.passed, r.heals.is_empty(), r.session_refreshed) {
+        (false, _, _) => "FAIL",
+        (true, false, _) => "PASS (healed)",
+        (true, true, true) => "PASS (session refreshed)",
+        (true, true, false) => "PASS",
+    }
+}
+
+/// Markdown summary (e.g. for `$GITHUB_STEP_SUMMARY`).
+pub fn markdown_summary(reports: &[ReplayReport]) -> String {
+    let cell = |s: &str| s.replace('|', "\\|").replace('\n', " ");
+    let passed = reports.iter().filter(|r| r.passed).count();
+    let mut m = format!(
+        "## webtest: {passed}/{} flows passed\n\n| | flow | status | steps | time | details |\n|---|---|---|---|---|---|\n",
+        reports.len()
+    );
+    for r in reports {
+        let icon = if !r.passed {
+            "❌"
+        } else if !r.heals.is_empty() || r.session_refreshed {
+            "⚠️"
+        } else {
+            "✅"
+        };
+        let mut details: Vec<String> = r.failures.clone();
+        details.extend(
+            r.heals
+                .iter()
+                .map(|h| format!("healed step {}: {} → {}", h.step, h.from, h.to)),
+        );
+        m.push_str(&format!(
+            "| {icon} | {} | {} | {}/{} | {:.1}s | {} |\n",
+            cell(&r.name),
+            status(r),
+            r.steps_run,
+            r.steps_total,
+            r.duration_ms as f64 / 1000.0,
+            cell(&details.join("<br>"))
+        ));
+    }
+    m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(name: &str, passed: bool) -> ReplayReport {
+        ReplayReport {
+            name: name.into(),
+            passed,
+            steps_run: 2,
+            steps_total: 2,
+            failures: if passed {
+                vec![]
+            } else {
+                vec!["assertion failed: text \"a|b\"".into()]
+            },
+            heals: vec![],
+            session_refreshed: false,
+            failed_assertions: vec![],
+            duration_ms: 1500,
+            healed_flow: None,
+            failure_snapshot: None,
+        }
+    }
+
+    #[test]
+    fn summary_and_junit() {
+        let mut ok = report("login", true);
+        ok.session_refreshed = true;
+        let reports = vec![ok, report("checkout", false)];
+        let md = markdown_summary(&reports);
+        assert!(md.contains("1/2 flows passed"));
+        assert!(md.contains("| ⚠️ | login | PASS (session refreshed) | 2/2 | 1.5s |  |"));
+        assert!(md.contains(r#"a\|b"#), "pipes escaped: {md}");
+        let x = junit_xml(&reports);
+        assert!(x.contains(r#"failures="1""#));
+        assert!(x.contains("login state was refreshed"));
+    }
 }

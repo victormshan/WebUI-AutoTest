@@ -123,14 +123,32 @@ webtest --storage-state auth/alice.json explore --url <url>                 # �
 - 用例 YAML 里可以写 `storage_state: auth/alice.json`。`replay` 时会自动加载；命令行的 `--storage-state` 优先级更高。探索生成的用例会自动带上这一项。
 - Cookie 通过 Chrome DevTools 协议（`Storage.getCookies` / `setCookies`）读写。localStorage 只保存执行 `login` 结束时所在页面的那个站点。
 - 状态文件里是有效的会话凭据：权限设为 600，并且 `auth/` 已加入 `.gitignore`。
-- 会话过期后，用到登录态的用例会失败，输出里会提示重新运行 `webtest login`。CI 里建议先跑 `login --flow` 刷新登录态，再执行回放。
+- **自动刷新**：在用例里写 `login_flow: flows/login.yaml`，或者在命令行加 `--login-flow`，就会自动处理两种情况：
+  - 状态文件不存在时，先回放登录用例生成它；
+  - 用到登录态的用例失败时，先刷新登录态再重试一次。重试后通过的标为 **PASS (session refreshed)**；如果是真 bug，重试后仍然 FAIL。每个状态文件在一次运行中最多刷新一次。
+- 如果没有配置登录用例，失败时会提示用 `webtest login` 手动刷新。
 - 演示站点的会话只保存在服务端内存里，重启服务端后旧的状态文件就失效了。
+
+### CI（GitHub Actions）
+
+工作流文件放在 `ci/webtest.yml`。启用方法：复制到 `.github/workflows/webtest.yml` 并提交（这一步需要有 `workflow` 权限的账号）。启用后，它会在 push、PR、每天定时和手动触发时运行，包含三个 job：
+
+| job | 内容 |
+|---|---|
+| `checks` | `cargo fmt --check`、`clippy -D warnings`、单元测试 |
+| `e2e` | 框架自身的端到端测试（`cargo test -- --ignored`），使用 runner 自带的 Chrome |
+| `regression` | 运行 `scripts/ci.sh`：启动演示站点 → 回放 `flows/*.yaml` 和 `flows/explored/*.yaml` → 输出 JUnit 和 Markdown 报告（摘要显示在 Actions 运行页面上），并上传报告 |
+
+- 回放默认不调用大模型（`--no-heal`）。在仓库 Secrets 里配置了 `ANTHROPIC_API_KEY` 时，会开启自愈。
+- 登录态通过 `login_flow` 自动生成，不需要把任何凭据提交到仓库。
+- 本地复现：运行 `scripts/ci.sh`，报告输出在 `reports/`，失败时的页面快照也会复制到这里。用 `WEBTEST_FLOWS` 可以指定要回放的用例。
+- 测自己的站点：把 `ci.sh` 里启动演示站点的那一段换成你的部署地址，或者在回放时加 `--url https://staging...`。
 
 ### 测试
 
 ```bash
 cargo test                                   # 单元测试
-cargo test -p webtest -- --ignored           # 端到端：通过、改名、金额 bug、新 console 错误、登录态复用五种情况
+cargo test -p webtest -- --ignored           # 端到端：通过、改名、金额 bug、新 console 错误、登录态复用、会话过期自动刷新、自动创建登录态
 ```
 
 ### 其他参数

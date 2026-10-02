@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use agent::explore::{ExploreConfig, Explorer};
 use agent::flow::{Flow, suggest_assertions};
-use agent::replay::{ReplayOptions, ReplayReport, junit_xml, replay};
+use agent::replay::{ReplayOptions, ReplayReport, junit_xml, markdown_summary, replay, status};
 use agent::{Agent, AgentConfig, Trace};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -40,6 +40,10 @@ struct BrowserArgs {
     /// For `replay` it overrides a flow's own `storage_state`.
     #[arg(long, env = "WEBTEST_STORAGE_STATE", global = true)]
     storage_state: Option<PathBuf>,
+    /// Login flow used to (re)create the storage state when it is missing or
+    /// a flow fails; overrides a flow's own `login_flow`.
+    #[arg(long, env = "WEBTEST_LOGIN_FLOW", global = true)]
+    login_flow: Option<PathBuf>,
 }
 
 impl BrowserArgs {
@@ -149,6 +153,9 @@ struct ReplayArgs {
     /// Write a JUnit XML report
     #[arg(long)]
     junit: Option<PathBuf>,
+    /// Write a Markdown summary (e.g. append to $GITHUB_STEP_SUMMARY)
+    #[arg(long)]
+    markdown: Option<PathBuf>,
     #[arg(long, env = "WEBTEST_MODEL")]
     model: Option<String>,
 }
@@ -243,12 +250,17 @@ async fn dispatch(cli: Cli) -> Result<bool> {
         Cmd::Login(args) => login(&cli.browser, args).await,
         Cmd::Replay(args) => replay_all(&cli.browser, args).await,
         Cmd::Explore(args) => {
-            let path = cli
+            let state = cli
                 .browser
                 .storage_state
                 .as_ref()
                 .map(|p| p.display().to_string());
-            explore(cli.browser.config()?, path, args).await
+            let login = cli
+                .browser
+                .login_flow
+                .as_ref()
+                .map(|p| p.display().to_string());
+            explore(cli.browser.config()?, state, login, args).await
         }
         cmd => {
             let browser = Browser::launch(&cli.browser.config()?).await?;
@@ -383,24 +395,65 @@ async fn replay_all(browser_args: &BrowserArgs, args: ReplayArgs) -> Result<bool
         url_override: args.url.clone(),
         ..Default::default()
     };
+    // Each state file is refreshed at most once per run.
+    let mut refreshed: Vec<PathBuf> = Vec::new();
 
     let mut reports = Vec::new();
     for path in &args.flows {
         let flow = Flow::load(path)?;
         tracing::info!("replaying {} ({})", flow.name, path.display());
-        // Fresh browser per flow: no state leaks between tests.
-        let mut cfg = browser_args.base_config();
         let state = browser_args
             .storage_state
             .clone()
             .or_else(|| flow.storage_state.as_ref().map(PathBuf::from));
-        if let Some(p) = &state {
-            cfg.storage_state = Some(load_state(p)?);
+        let login_flow = browser_args
+            .login_flow
+            .clone()
+            .or_else(|| flow.login_flow.as_ref().map(PathBuf::from));
+
+        if let (Some(s), Some(l)) = (&state, &login_flow)
+            && !s.exists()
+            && !refreshed.contains(s)
+        {
+            println!(
+                "  no login state at {}; creating it via {}",
+                s.display(),
+                l.display()
+            );
+            refresh_state(browser_args, l, args.url.clone(), s).await?;
+            refreshed.push(s.clone());
         }
-        let browser = Browser::launch(&cfg).await?;
-        let report = replay(&browser, &flow, healer.as_deref(), &opts).await;
-        browser.close().await?;
-        let report = report?;
+
+        let mut report = replay_once(
+            browser_args,
+            &flow,
+            state.as_deref(),
+            healer.as_deref(),
+            &opts,
+        )
+        .await?;
+
+        // A failure with a login state may just be an expired session:
+        // refresh once and retry. A real regression fails again.
+        if let (false, Some(s), Some(l)) = (report.passed, &state, &login_flow)
+            && !refreshed.contains(s)
+        {
+            println!(
+                "  {} failed with login state {}; refreshing via {} and retrying",
+                flow.name,
+                s.display(),
+                l.display()
+            );
+            refreshed.push(s.clone());
+            match refresh_state(browser_args, l, args.url.clone(), s).await {
+                Ok(()) => {
+                    report =
+                        replay_once(browser_args, &flow, Some(s), healer.as_deref(), &opts).await?;
+                    report.session_refreshed = true;
+                }
+                Err(e) => println!("  login refresh failed: {e:#}"),
+            }
+        }
 
         if let Some(healed) = &report.healed_flow {
             let out = if args.update {
@@ -412,10 +465,10 @@ async fn replay_all(browser_args: &BrowserArgs, args: ReplayArgs) -> Result<bool
             tracing::warn!("healed flow written to {}", out.display());
         }
         print_report(&report);
-        if let (false, Some(p)) = (report.passed, &state) {
+        if let (false, Some(p), None) = (report.passed, &state, &login_flow) {
             println!(
                 "  hint: ran with login state {0}; if the session expired, refresh it with \
-                 `webtest login --flow <login flow> --save-state {0}`",
+                 `webtest login --flow <login flow> --save-state {0}` or set `login_flow`",
                 p.display()
             );
         }
@@ -438,17 +491,58 @@ async fn replay_all(browser_args: &BrowserArgs, args: ReplayArgs) -> Result<bool
         std::fs::write(path, junit_xml(&reports))?;
         println!("junit: {}", path.display());
     }
+    if let Some(path) = &args.markdown {
+        std::fs::write(path, markdown_summary(&reports))?;
+        println!("summary: {}", path.display());
+    }
     Ok(passed == reports.len())
 }
 
+/// Replays `flow` in a fresh browser (no state leaks between tests).
+async fn replay_once(
+    browser_args: &BrowserArgs,
+    flow: &Flow,
+    state: Option<&Path>,
+    healer: Option<&dyn llm::Llm>,
+    opts: &ReplayOptions,
+) -> Result<ReplayReport> {
+    let mut cfg = browser_args.base_config();
+    if let Some(p) = state {
+        cfg.storage_state = Some(load_state(p)?);
+    }
+    let browser = Browser::launch(&cfg).await?;
+    let report = replay(&browser, flow, healer, opts).await;
+    browser.close().await?;
+    report
+}
+
+/// Replays `login_flow` and saves the resulting state to `state_path`.
+async fn refresh_state(
+    browser_args: &BrowserArgs,
+    login_flow: &Path,
+    url: Option<String>,
+    state_path: &Path,
+) -> Result<()> {
+    let ok = login(
+        browser_args,
+        LoginArgs {
+            save_state: state_path.to_path_buf(),
+            url,
+            goal: None,
+            flow: Some(login_flow.to_path_buf()),
+            manual: false,
+            model: None,
+        },
+    )
+    .await?;
+    anyhow::ensure!(ok, "login flow {} failed", login_flow.display());
+    Ok(())
+}
+
 fn print_report(r: &ReplayReport) {
-    let status = match (r.passed, r.heals.is_empty()) {
-        (true, true) => "PASS",
-        (true, false) => "PASS (healed)",
-        (false, _) => "FAIL",
-    };
     println!(
-        "{status:<14} {} — {}/{} steps, {:.1}s",
+        "{:<14} {} — {}/{} steps, {:.1}s",
+        status(r),
         r.name,
         r.steps_run,
         r.steps_total,
@@ -468,6 +562,7 @@ fn print_report(r: &ReplayReport) {
 async fn explore(
     browser: BrowserConfig,
     storage_state_path: Option<String>,
+    login_flow_path: Option<String>,
     args: ExploreArgs,
 ) -> Result<bool> {
     let llm = llm::from_env(args.model);
@@ -475,6 +570,7 @@ async fn explore(
     let cfg = ExploreConfig {
         browser,
         storage_state_path,
+        login_flow_path,
         agent: AgentConfig {
             max_steps: args.max_steps,
             deny: args.deny,
