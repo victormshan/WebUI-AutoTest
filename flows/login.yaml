@@ -1,0 +1,35 @@
+name: login
+goal: 用账号 alice / 密码 secret123 登录，进入商品列表
+start_url: http://127.0.0.1:8765/
+steps:
+- intent: 填写用户名和密码
+  tool: fill_form
+  args:
+    elements:
+    - uid: $0
+      value: alice
+    - uid: $1
+      value: secret123
+  targets:
+  - role: textbox
+    name: 用户名
+  - role: textbox
+    name: 密码
+- intent: 点击登录按钮
+  tool: click
+  args:
+    uid: $0
+  targets:
+  - role: button
+    name: 登录
+assertions:
+- element:
+    role: heading
+    name: 商品列表
+- element:
+    role: button
+    name: 退出登录
+allowed_console_errors:
+- '[error] Failed to load resource: the server responded with a status of 404 (File not found)'
+allowed_failed_requests:
+- GET /favicon.ico [404]

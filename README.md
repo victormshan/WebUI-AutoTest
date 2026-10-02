@@ -20,7 +20,7 @@ webtest (Rust) ──stdio/MCP──► chrome-devtools-mcp ──CDP──► C
 | `crates/llm` | `Llm` trait，Anthropic API 与 Claude Code CLI 两种后端，JSON 提取 |
 | `crates/agent` | 观察→决策→执行循环、快照压缩、语义定位器、安全拦截、自动诊断；`flow`（测试用例格式）、`replay`（回放、断言、自愈、JUnit） |
 | `crates/cli` | `webtest` 命令行 |
-| `fixtures/shop` | 演示站点（登录 / 加购 / 结算，内置一个 console 错误和一个 404）及其变体：`v2-renamed`（按钮改名）、`v3-bug`（金额算错）、`v4-console`（新增 console 错误） |
+| `fixtures/shop` | 演示站点：`server.py`（静态页面 + HttpOnly Cookie 会话），登录 / 加购 / 结算，用 localStorage 记住收货地址，内置一个 console 错误和一个 404。`make_variants.py` 生成以下变体：`v2-renamed`（按钮改名）、`v3-bug`（金额算错）、`v4-console`（新增 console 错误） |
 | `flows/` | 测试用例 YAML |
 
 ## 环境准备（WSL，无需 sudo）
@@ -35,8 +35,8 @@ cargo build --release
 ## 用法
 
 ```bash
-# 演示站点
-(cd fixtures/shop && python3 -m http.server 8765 &)
+# 演示站点（静态页面 + Cookie 会话登录接口）
+python3 fixtures/shop/server.py 8765 &
 
 webtest tools                               # 列出 MCP 工具
 webtest snapshot http://127.0.0.1:8765/     # 打印页面无障碍快照
@@ -107,11 +107,30 @@ webtest explore --url http://127.0.0.1:8765/ --context "测试账号 alice / 密
 
 结果为 **needs review** 的任务，表示页面没有满足大模型提出的期望，需要人来判断是缺陷还是目标写得过细。
 
+### 登录态复用
+
+先登录一次，把 Cookie（包括 HttpOnly）和 localStorage 存成文件，之后每个浏览器启动时先注入它，就不用每个任务都从登录开始：
+
+```bash
+webtest login --flow flows/login.yaml --save-state auth/alice.json          # 回放已录好的登录用例（不调用大模型，适合 CI）
+webtest login --url <url> --goal "用 alice / secret123 登录" --save-state auth/alice.json   # 由 agent 完成登录
+webtest login --url <url> --manual --save-state auth/alice.json             # 弹出浏览器手动登录（适用于验证码、两步验证），完成后按回车
+
+webtest --storage-state auth/alice.json replay flows/checkout_logged_in.yaml
+webtest --storage-state auth/alice.json explore --url <url>                 # 探索直接从登录后的页面开始
+```
+
+- 用例 YAML 里可以写 `storage_state: auth/alice.json`。`replay` 时会自动加载；命令行的 `--storage-state` 优先级更高。探索生成的用例会自动带上这一项。
+- Cookie 通过 Chrome DevTools 协议（`Storage.getCookies` / `setCookies`）读写。localStorage 只保存执行 `login` 结束时所在页面的那个站点。
+- 状态文件里是有效的会话凭据：权限设为 600，并且 `auth/` 已加入 `.gitignore`。
+- 会话过期后，用到登录态的用例会失败，输出里会提示重新运行 `webtest login`。CI 里建议先跑 `login --flow` 刷新登录态，再执行回放。
+- 演示站点的会话只保存在服务端内存里，重启服务端后旧的状态文件就失效了。
+
 ### 测试
 
 ```bash
 cargo test                                   # 单元测试
-cargo test -p webtest -- --ignored           # 端到端：用 fixtures 验证通过、改名、金额 bug、新 console 错误四种情况
+cargo test -p webtest -- --ignored           # 端到端：通过、改名、金额 bug、新 console 错误、登录态复用五种情况
 ```
 
 ### 其他参数

@@ -8,7 +8,7 @@ use agent::replay::{ReplayOptions, ReplayReport, junit_xml, replay};
 use agent::{Agent, AgentConfig, Trace};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use mcp_client::{Browser, BrowserConfig};
+use mcp_client::{Browser, BrowserConfig, StorageState};
 use tokio::io::AsyncBufReadExt;
 
 #[derive(Parser)]
@@ -36,10 +36,22 @@ struct BrowserArgs {
         global = true
     )]
     mcp_package: String,
+    /// Saved login state (from `webtest login`) loaded into every browser.
+    /// For `replay` it overrides a flow's own `storage_state`.
+    #[arg(long, env = "WEBTEST_STORAGE_STATE", global = true)]
+    storage_state: Option<PathBuf>,
 }
 
 impl BrowserArgs {
-    fn config(&self) -> BrowserConfig {
+    fn config(&self) -> Result<BrowserConfig> {
+        let mut cfg = self.base_config();
+        if let Some(p) = &self.storage_state {
+            cfg.storage_state = Some(load_state(p)?);
+        }
+        Ok(cfg)
+    }
+
+    fn base_config(&self) -> BrowserConfig {
         let chrome = self.chrome.clone().or_else(|| {
             let p = PathBuf::from(std::env::var_os("HOME")?).join(".local/bin/chrome-wsl");
             p.exists().then_some(p)
@@ -65,6 +77,8 @@ enum Cmd {
     Save(SaveArgs),
     /// Replay flows deterministically; the LLM is only used to heal broken locators
     Replay(ReplayArgs),
+    /// Log in once and save cookies + localStorage for reuse (--storage-state)
+    Login(LoginArgs),
     /// Discover user tasks automatically and record them as verified flows
     Explore(ExploreArgs),
     /// Read `<tool> [json-args]` lines from stdin and print each result (debugging aid)
@@ -140,6 +154,27 @@ struct ReplayArgs {
 }
 
 #[derive(Args)]
+struct LoginArgs {
+    /// Where to write the storage state (contains live session secrets)
+    #[arg(long)]
+    save_state: PathBuf,
+    /// Page to open (required with --goal / --manual; defaults to the flow's start URL)
+    #[arg(long)]
+    url: Option<String>,
+    /// Let the LLM agent log in, e.g. "用 alice / secret123 登录"
+    #[arg(long, conflicts_with_all = ["flow", "manual"])]
+    goal: Option<String>,
+    /// Replay a recorded login flow (no LLM; good for CI)
+    #[arg(long, conflicts_with = "manual")]
+    flow: Option<PathBuf>,
+    /// Open a visible browser, log in by hand, then press Enter here
+    #[arg(long)]
+    manual: bool,
+    #[arg(long, env = "WEBTEST_MODEL")]
+    model: Option<String>,
+}
+
+#[derive(Args)]
 struct ExploreArgs {
     /// Start URL
     #[arg(long)]
@@ -203,13 +238,20 @@ async fn main() -> ExitCode {
 
 /// Returns whether the command "passed".
 async fn dispatch(cli: Cli) -> Result<bool> {
-    let cfg = cli.browser.config();
     match cli.cmd {
         Cmd::Save(args) => save(args).await,
-        Cmd::Replay(args) => replay_all(&cfg, args).await,
-        Cmd::Explore(args) => explore(cfg, args).await,
+        Cmd::Login(args) => login(&cli.browser, args).await,
+        Cmd::Replay(args) => replay_all(&cli.browser, args).await,
+        Cmd::Explore(args) => {
+            let path = cli
+                .browser
+                .storage_state
+                .as_ref()
+                .map(|p| p.display().to_string());
+            explore(cli.browser.config()?, path, args).await
+        }
         cmd => {
-            let browser = Browser::launch(&cfg).await?;
+            let browser = Browser::launch(&cli.browser.config()?).await?;
             let result = with_browser(&browser, cmd).await;
             browser.close().await?;
             result
@@ -247,7 +289,7 @@ async fn with_browser(browser: &Browser, cmd: Cmd) -> Result<bool> {
                 );
             }
         }
-        Cmd::Save(_) | Cmd::Replay(_) | Cmd::Explore(_) => {
+        Cmd::Save(_) | Cmd::Replay(_) | Cmd::Explore(_) | Cmd::Login(_) => {
             unreachable!("handled without a shared browser")
         }
     }
@@ -334,7 +376,7 @@ async fn save(args: SaveArgs) -> Result<bool> {
     Ok(true)
 }
 
-async fn replay_all(cfg: &BrowserConfig, args: ReplayArgs) -> Result<bool> {
+async fn replay_all(browser_args: &BrowserArgs, args: ReplayArgs) -> Result<bool> {
     let healer = (!args.no_heal).then(|| llm::from_env(args.model.clone()));
     let opts = ReplayOptions {
         timeout: Duration::from_secs(args.timeout),
@@ -347,7 +389,15 @@ async fn replay_all(cfg: &BrowserConfig, args: ReplayArgs) -> Result<bool> {
         let flow = Flow::load(path)?;
         tracing::info!("replaying {} ({})", flow.name, path.display());
         // Fresh browser per flow: no state leaks between tests.
-        let browser = Browser::launch(cfg).await?;
+        let mut cfg = browser_args.base_config();
+        let state = browser_args
+            .storage_state
+            .clone()
+            .or_else(|| flow.storage_state.as_ref().map(PathBuf::from));
+        if let Some(p) = &state {
+            cfg.storage_state = Some(load_state(p)?);
+        }
+        let browser = Browser::launch(&cfg).await?;
         let report = replay(&browser, &flow, healer.as_deref(), &opts).await;
         browser.close().await?;
         let report = report?;
@@ -362,6 +412,13 @@ async fn replay_all(cfg: &BrowserConfig, args: ReplayArgs) -> Result<bool> {
             tracing::warn!("healed flow written to {}", out.display());
         }
         print_report(&report);
+        if let (false, Some(p)) = (report.passed, &state) {
+            println!(
+                "  hint: ran with login state {0}; if the session expired, refresh it with \
+                 `webtest login --flow <login flow> --save-state {0}`",
+                p.display()
+            );
+        }
         if let Some(snap) = &report.failure_snapshot {
             std::fs::create_dir_all("runs")?;
             let p = PathBuf::from("runs").join(format!(
@@ -408,11 +465,16 @@ fn print_report(r: &ReplayReport) {
     }
 }
 
-async fn explore(browser: BrowserConfig, args: ExploreArgs) -> Result<bool> {
+async fn explore(
+    browser: BrowserConfig,
+    storage_state_path: Option<String>,
+    args: ExploreArgs,
+) -> Result<bool> {
     let llm = llm::from_env(args.model);
     tracing::info!("model backend: {}", llm.describe());
     let cfg = ExploreConfig {
         browser,
+        storage_state_path,
         agent: AgentConfig {
             max_steps: args.max_steps,
             deny: args.deny,
@@ -462,4 +524,77 @@ async fn explore(browser: BrowserConfig, args: ExploreArgs) -> Result<bool> {
     }
     println!("report: {}", args.out.join("explore.md").display());
     Ok(report.tasks.iter().any(|t| t.verified))
+}
+
+fn load_state(path: &Path) -> Result<StorageState> {
+    if !path.exists() {
+        anyhow::bail!(
+            "storage state {} not found — create it with `webtest login --save-state {}`",
+            path.display(),
+            path.display()
+        );
+    }
+    StorageState::load(path)
+}
+
+async fn login(browser_args: &BrowserArgs, args: LoginArgs) -> Result<bool> {
+    let mut cfg = browser_args.base_config();
+    if args.manual {
+        cfg.headless = false;
+    }
+    let browser = Browser::launch(&cfg).await?;
+    let result = login_with(&browser, &args).await;
+    let state = match result {
+        Ok(true) => browser.storage_state().await,
+        Ok(false) => Err(anyhow::anyhow!("login did not succeed; no state saved")),
+        Err(e) => Err(e),
+    };
+    browser.close().await?;
+    let state = state?;
+    state.save(&args.save_state)?;
+    println!(
+        "saved {} cookies and localStorage for {} origin(s) to {}",
+        state.cookies.len(),
+        state.origins.len(),
+        args.save_state.display()
+    );
+    Ok(true)
+}
+
+async fn login_with(browser: &Browser, args: &LoginArgs) -> Result<bool> {
+    if let Some(path) = &args.flow {
+        let flow = Flow::load(path)?;
+        let opts = ReplayOptions {
+            url_override: args.url.clone(),
+            ..Default::default()
+        };
+        let report = replay(browser, &flow, None, &opts).await?;
+        print_report(&report);
+        return Ok(report.passed);
+    }
+    let url = args
+        .url
+        .as_deref()
+        .context("--url is required with --goal or --manual")?;
+    if let Some(goal) = &args.goal {
+        let llm = llm::from_env(args.model.clone());
+        let trace = Agent::new(browser, llm.as_ref(), AgentConfig::default())
+            .run(goal, url)
+            .await?;
+        println!(
+            "{}: {}",
+            if trace.success { "PASS" } else { "FAIL" },
+            trace.summary
+        );
+        return Ok(trace.success);
+    }
+    anyhow::ensure!(args.manual, "pass one of --goal, --flow or --manual");
+    let nav = browser.navigate(url).await?;
+    anyhow::ensure!(!nav.is_error, "navigation failed: {}", nav.text);
+    println!("Log in in the browser window, then press Enter here to save the session.");
+    let mut line = String::new();
+    tokio::io::BufReader::new(tokio::io::stdin())
+        .read_line(&mut line)
+        .await?;
+    Ok(true)
 }

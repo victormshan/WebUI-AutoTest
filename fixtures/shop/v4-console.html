@@ -13,7 +13,7 @@
 <body>
 <h1>Demo Shop</h1>
 
-<section id="login">
+<section id="login" class="hidden">
   <h2>登录</h2>
   <form id="login-form">
     <label>用户名 <input name="username" autocomplete="off"></label><br>
@@ -55,14 +55,28 @@ function renderCart() {
   $('#checkout').disabled = cart.length === 0;
 }
 
-$('#login-form').addEventListener('submit', (e) => {
+function enterShop(user) {
+  console.error('pricing: fallback price table used'); // new regression
+  $('#who').textContent = user;
+  $('#address').value = localStorage.getItem('lastAddress') || '';
+  $('#login-error').textContent = '';
+  show('shop');
+}
+
+// Server-side session (HttpOnly cookie): a reload stays logged in.
+fetch('/api/me').then(r => r.json()).then(d => d.user ? enterShop(d.user) : show('login'));
+
+$('#login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
-  if (f.get('username') === 'alice' && f.get('password') === 'secret123') {
-    $('#who').textContent = 'alice';
-    $('#login-error').textContent = '';
-    show('shop');
-    console.error('pricing: fallback price table used'); // new regression
+  const r = await fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: f.get('username'), password: f.get('password') }),
+  });
+  const d = await r.json();
+  if (d.user) {
+    enterShop(d.user);
   } else {
     $('#login-error').textContent = '用户名或密码错误';
   }
@@ -76,6 +90,7 @@ document.querySelectorAll('[data-sku]').forEach(b => b.addEventListener('click',
 $('#checkout').addEventListener('click', () => {
   const addr = $('#address').value.trim();
   if (!addr) { $('#checkout-error').textContent = '请填写收货地址'; return; }
+  localStorage.setItem('lastAddress', addr);
   // Deliberate defects so the run report has something to catch.
   fetch('/api/analytics').catch(() => {});
   console.error('analytics: tracker not configured');
@@ -85,7 +100,10 @@ $('#checkout').addEventListener('click', () => {
 });
 
 $('#again').addEventListener('click', () => { cart = []; renderCart(); show('shop'); });
-$('#logout').addEventListener('click', () => { cart = []; renderCart(); show('login'); });
+$('#logout').addEventListener('click', async () => {
+  await fetch('/api/logout', { method: 'POST' });
+  cart = []; renderCart(); show('login');
+});
 </script>
 </body>
 </html>

@@ -11,7 +11,7 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// `python3 -m http.server` on a free port (deliberately not the one the flow was recorded on).
+/// `fixtures/shop/server.py` on a free port (deliberately not the one the flows were recorded on).
 struct Server {
     child: Child,
     port: u16,
@@ -25,14 +25,8 @@ impl Server {
             .unwrap()
             .port();
         let child = Command::new("python3")
-            .args([
-                "-m",
-                "http.server",
-                &port.to_string(),
-                "--bind",
-                "127.0.0.1",
-            ])
-            .current_dir(root().join("fixtures/shop"))
+            .arg(root().join("fixtures/shop/server.py"))
+            .arg(port.to_string())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -57,20 +51,24 @@ impl Drop for Server {
     }
 }
 
-fn replay(url: &str) -> Output {
+fn webtest(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_webtest"))
         .current_dir(root())
-        .args([
-            "replay",
-            "flows/checkout.yaml",
-            "--no-heal",
-            "--timeout",
-            "2",
-            "--url",
-            url,
-        ])
+        .args(args)
         .output()
         .unwrap()
+}
+
+fn replay(url: &str) -> Output {
+    webtest(&[
+        "replay",
+        "flows/checkout.yaml",
+        "--no-heal",
+        "--timeout",
+        "2",
+        "--url",
+        url,
+    ])
 }
 
 fn stdout(o: &Output) -> String {
@@ -122,5 +120,66 @@ fn new_console_error_fails() {
         stdout(&o).contains("new console error: [error] pricing"),
         "{}",
         stdout(&o)
+    );
+}
+
+#[test]
+#[ignore = "needs Chrome + npx"]
+fn reuses_saved_login_state() {
+    let s = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("alice.json");
+    let state = state.to_str().unwrap();
+
+    let o = webtest(&[
+        "login",
+        "--flow",
+        "flows/login.yaml",
+        "--url",
+        &s.url(""),
+        "--save-state",
+        state,
+    ]);
+    assert!(
+        o.status.success(),
+        "{}{}",
+        stdout(&o),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(stdout(&o).contains("saved 1 cookies"), "{}", stdout(&o));
+
+    // Starts on the shop page: only works if the HttpOnly session cookie was restored.
+    let o = webtest(&[
+        "--storage-state",
+        state,
+        "replay",
+        "flows/checkout_logged_in.yaml",
+        "--no-heal",
+        "--timeout",
+        "3",
+        "--url",
+        &s.url(""),
+    ]);
+    assert!(
+        o.status.success(),
+        "{}{}",
+        stdout(&o),
+        String::from_utf8_lossy(&o.stderr)
+    );
+
+    // Without the state the same flow cannot find the shop.
+    let o = webtest(&[
+        "--storage-state",
+        "/nonexistent.json",
+        "replay",
+        "flows/checkout_logged_in.yaml",
+        "--no-heal",
+        "--url",
+        &s.url(""),
+    ]);
+    assert_eq!(
+        o.status.code(),
+        Some(2),
+        "missing state file is a usage error"
     );
 }

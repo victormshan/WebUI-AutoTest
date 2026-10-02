@@ -28,6 +28,9 @@ pub struct Flow {
     pub name: String,
     pub goal: String,
     pub start_url: String,
+    /// Saved login state (see `webtest login`) loaded before the flow starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_state: Option<String>,
     pub steps: Vec<FlowStep>,
     /// `- element: {...}` / `- text: ...` rather than YAML `!tags`.
     #[serde(default, with = "serde_yaml_ng::with::singleton_map_recursive")]
@@ -137,6 +140,7 @@ impl Flow {
             name: name.to_string(),
             goal: trace.goal.clone(),
             start_url: trace.start_url.clone(),
+            storage_state: None,
             steps,
             assertions: Vec::new(),
             allowed_console_errors: dedup(&trace.diagnostics.console_errors),
