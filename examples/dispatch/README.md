@@ -31,7 +31,7 @@ examples/dispatch/dispatch_webtest.py agent --task examples/dispatch/task.exampl
 4. **派发方在执行过程中查看进度**：读取 `$STEP_RELAY_DIR/experiments/<exprId>.json`，这个脚本自己也会每 5 秒把步骤变化打到 stderr。完整过程记录在 `traces/<exprId>.md`。
 5. **脚本汇总输出**：结果 JSON、relay 中的步骤状态、Claude 的最终回复和本次花费。
 
-`STEP_RELAY_DIR` 必须和 MCP 配置里的设置一致。默认值是 `/mnt/c/Users/Administrator/web-relay/step-relay`。
+数据目录默认从 `~/.claude.json` 中 claude-step-relay 的 `env.STEP_RELAY_DIR` 读取，也就是 MCP server 实际写入的目录；也可以用 `STEP_RELAY_DIR` 环境变量覆盖。
 
 ## 任务 JSON
 

@@ -32,8 +32,8 @@ Task JSON for `agent` mode:
 Environment:
   WEBTEST_REPO      repo root (default: two levels above this file)
   STEP_RELAY_HOME   claude-step-relay checkout (default: /mnt/d/dsh/claude-step-relay)
-  STEP_RELAY_DIR    relay data dir; must match the MCP server's setting
-                    (default: /mnt/c/Users/Administrator/web-relay/step-relay)
+  STEP_RELAY_DIR    relay data dir; default: the claude-step-relay entry's
+                    env.STEP_RELAY_DIR in ~/.claude.json (where the MCP server writes)
   CLAUDE_BIN        claude executable (default: claude)
   WEBTEST_LLM_*     LLM backend for `explore` mode (see README)
 """
@@ -51,7 +51,18 @@ from pathlib import Path
 
 REPO = Path(os.environ.get("WEBTEST_REPO", Path(__file__).resolve().parents[2]))
 RELAY_HOME = Path(os.environ.get("STEP_RELAY_HOME", "/mnt/d/dsh/claude-step-relay"))
-RELAY_DIR = Path(os.environ.get("STEP_RELAY_DIR", "/mnt/c/Users/Administrator/web-relay/step-relay"))
+def _relay_dir():
+    """Same data dir the MCP server writes to: env, else the MCP config, else ./step-relay."""
+    if os.environ.get("STEP_RELAY_DIR"):
+        return Path(os.environ["STEP_RELAY_DIR"])
+    try:
+        cfg = json.loads((Path.home() / ".claude.json").read_text(encoding="utf-8"))
+        return Path(cfg["mcpServers"]["claude-step-relay"]["env"]["STEP_RELAY_DIR"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return REPO / "step-relay"
+
+
+RELAY_DIR = _relay_dir()
 WEBTEST = REPO / "target" / "release" / "webtest"
 
 
