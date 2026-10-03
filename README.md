@@ -144,6 +144,40 @@ webtest --storage-state auth/alice.json explore --url <url>                 # �
 - 本地复现：运行 `scripts/ci.sh`，报告输出在 `reports/`，失败时的页面快照也会复制到这里。用 `WEBTEST_FLOWS` 可以指定要回放的用例。
 - 测自己的站点：把 `ci.sh` 里启动演示站点的那一段换成你的部署地址，或者在回放时加 `--url https://staging...`。
 
+### 大模型后端
+
+探索、录制和自愈都需要大模型。用哪个后端由环境变量决定，配置好后可以用 `webtest check-llm` 验证：
+
+| `WEBTEST_LLM_PROVIDER` | 协议 | 默认接口地址 | 密钥 | 默认模型 |
+|---|---|---|---|---|
+| （不设置，且没有任何密钥） | 本机 `claude -p` | – | Claude Code 的登录 | claude-sonnet-5-5 |
+| `anthropic`（设置了 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN` 时自动选用） | Anthropic Messages | `ANTHROPIC_BASE_URL`，否则为 api.anthropic.com | `ANTHROPIC_API_KEY`（通过 x-api-key 头发送）或 `ANTHROPIC_AUTH_TOKEN`（通过 Bearer 发送） | claude-sonnet-5-5 |
+| `deepseek` | OpenAI Chat Completions | api.deepseek.com | `DEEPSEEK_API_KEY` | deepseek-chat |
+| `openai` | OpenAI Chat Completions | `OPENAI_BASE_URL`，否则为 api.openai.com/v1 | `OPENAI_API_KEY` | 无，必须指定 |
+
+- `WEBTEST_LLM_BASE_URL` 和 `WEBTEST_LLM_API_KEY` 可以覆盖上表中的默认值。
+- 模型的优先级：`--model` 参数 > `WEBTEST_MODEL` > 上表中的默认模型。
+- 每次调用的超时由 `WEBTEST_LLM_TIMEOUT_SECS` 控制，默认 180 秒，超时或出错会重试 2 次。
+
+示例：
+
+```bash
+WEBTEST_LLM_PROVIDER=deepseek DEEPSEEK_API_KEY=sk-... webtest check-llm
+ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic ANTHROPIC_AUTH_TOKEN=sk-... WEBTEST_MODEL=deepseek-chat webtest check-llm
+WEBTEST_LLM_PROVIDER=openai WEBTEST_LLM_BASE_URL=http://localhost:11434/v1 WEBTEST_LLM_API_KEY=x webtest --model qwen3 check-llm
+```
+
+### 在 Claude Code 里直接使用
+
+仓库里带了一个技能文件 `.claude/skills/webtest/SKILL.md`。在本仓库目录下打开 Claude Code，直接说"测一下 https://… ，账号 …"即可。Claude 会按技能里的流程操作：准备环境 → 登录 → 探索或录制 → 回放验证 → 如实汇报，并遵守其中的安全规则。
+
+### 从其他 harness 派发
+
+见 `examples/dispatch/`。有三种模式：
+- `replay`：直接调用命令行回放，不调用大模型；
+- `explore`：由 webtest 直接探索，可以用 DeepSeek 等任意后端；
+- `agent`：交给 Claude Code 执行，用 claude-step-relay 追踪进度，并输出结构化结果。
+
 ### 测试
 
 ```bash

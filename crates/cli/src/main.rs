@@ -85,6 +85,11 @@ enum Cmd {
     Login(LoginArgs),
     /// Discover user tasks automatically and record them as verified flows
     Explore(ExploreArgs),
+    /// Show which LLM backend is configured and send it a test prompt
+    CheckLlm {
+        #[arg(long, env = "WEBTEST_MODEL")]
+        model: Option<String>,
+    },
     /// Read `<tool> [json-args]` lines from stdin and print each result (debugging aid)
     Repl,
 }
@@ -247,6 +252,7 @@ async fn main() -> ExitCode {
 async fn dispatch(cli: Cli) -> Result<bool> {
     match cli.cmd {
         Cmd::Save(args) => save(args).await,
+        Cmd::CheckLlm { model } => check_llm(model).await,
         Cmd::Login(args) => login(&cli.browser, args).await,
         Cmd::Replay(args) => replay_all(&cli.browser, args).await,
         Cmd::Explore(args) => {
@@ -301,7 +307,7 @@ async fn with_browser(browser: &Browser, cmd: Cmd) -> Result<bool> {
                 );
             }
         }
-        Cmd::Save(_) | Cmd::Replay(_) | Cmd::Explore(_) | Cmd::Login(_) => {
+        Cmd::Save(_) | Cmd::Replay(_) | Cmd::Explore(_) | Cmd::Login(_) | Cmd::CheckLlm { .. } => {
             unreachable!("handled without a shared browser")
         }
     }
@@ -309,7 +315,7 @@ async fn with_browser(browser: &Browser, cmd: Cmd) -> Result<bool> {
 }
 
 async fn run(browser: &Browser, args: RunArgs) -> Result<bool> {
-    let llm = llm::from_env(args.model);
+    let llm = llm::from_env(args.model)?;
     tracing::info!("model backend: {}", llm.describe());
     let cfg = AgentConfig {
         max_steps: args.max_steps,
@@ -373,7 +379,9 @@ async fn save(args: SaveArgs) -> Result<bool> {
     let text = std::fs::read_to_string(&args.trace)
         .with_context(|| format!("reading {}", args.trace.display()))?;
     let trace: Trace = serde_json::from_str(&text)?;
-    let llm = (!args.no_llm).then(|| llm::from_env(args.model));
+    let llm = (!args.no_llm)
+        .then(|| llm::from_env(args.model))
+        .transpose()?;
     let flow = build_flow(&trace, &args.flow, args.name, llm.as_deref()).await?;
     flow.save(&args.flow)?;
     println!(
@@ -389,7 +397,9 @@ async fn save(args: SaveArgs) -> Result<bool> {
 }
 
 async fn replay_all(browser_args: &BrowserArgs, args: ReplayArgs) -> Result<bool> {
-    let healer = (!args.no_heal).then(|| llm::from_env(args.model.clone()));
+    let healer = (!args.no_heal)
+        .then(|| llm::from_env(args.model.clone()))
+        .transpose()?;
     let opts = ReplayOptions {
         timeout: Duration::from_secs(args.timeout),
         url_override: args.url.clone(),
@@ -565,7 +575,7 @@ async fn explore(
     login_flow_path: Option<String>,
     args: ExploreArgs,
 ) -> Result<bool> {
-    let llm = llm::from_env(args.model);
+    let llm = llm::from_env(args.model)?;
     tracing::info!("model backend: {}", llm.describe());
     let cfg = ExploreConfig {
         browser,
@@ -673,7 +683,7 @@ async fn login_with(browser: &Browser, args: &LoginArgs) -> Result<bool> {
         .as_deref()
         .context("--url is required with --goal or --manual")?;
     if let Some(goal) = &args.goal {
-        let llm = llm::from_env(args.model.clone());
+        let llm = llm::from_env(args.model.clone())?;
         let trace = Agent::new(browser, llm.as_ref(), AgentConfig::default())
             .run(goal, url)
             .await?;
@@ -693,4 +703,25 @@ async fn login_with(browser: &Browser, args: &LoginArgs) -> Result<bool> {
         .read_line(&mut line)
         .await?;
     Ok(true)
+}
+
+async fn check_llm(model: Option<String>) -> Result<bool> {
+    let settings = llm::Settings::from_env(model)?;
+    let llm = settings.build();
+    println!("backend: {}", llm.describe());
+    let started = std::time::Instant::now();
+    let reply = llm
+        .complete(
+            "You are a connectivity check. Follow the instruction exactly.",
+            r#"Reply with only this JSON: {"ok": true}"#,
+        )
+        .await?;
+    println!(
+        "reply ({:.1}s): {}",
+        started.elapsed().as_secs_f64(),
+        reply.trim()
+    );
+    let ok = llm::extract_json(&reply).is_ok_and(|v| v["ok"] == true);
+    println!("{}", if ok { "OK" } else { "UNEXPECTED REPLY" });
+    Ok(ok)
 }

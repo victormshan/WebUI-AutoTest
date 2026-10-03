@@ -1,7 +1,10 @@
 //! Minimal LLM abstraction: one system prompt + one user message -> text.
 //!
-//! Two backends:
-//! - [`AnthropicApi`]: Claude Messages API (needs `ANTHROPIC_API_KEY`).
+//! Backends (see [`Settings::from_env`] for how one is chosen):
+//! - [`AnthropicApi`]: Anthropic Messages protocol — Claude, or any compatible
+//!   endpoint via a custom base URL (e.g. DeepSeek's `/anthropic`).
+//! - [`OpenAiCompat`]: OpenAI Chat Completions protocol — DeepSeek, Qwen,
+//!   vLLM/Ollama and other compatible servers.
 //! - [`ClaudeCli`]: shells out to `claude -p`, reusing the local Claude Code login.
 
 use std::process::Stdio;
@@ -20,24 +23,155 @@ pub trait Llm: Send + Sync {
     fn describe(&self) -> String;
 }
 
-/// Picks the API backend when `ANTHROPIC_API_KEY` is set, otherwise the CLI,
-/// wrapped with a per-call timeout (`WEBTEST_LLM_TIMEOUT_SECS`, default 180)
-/// and retries.
-pub fn from_env(model: Option<String>) -> Box<dyn Llm> {
-    let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let inner: Box<dyn Llm> = match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(key) if !key.is_empty() => Box::new(AnthropicApi::new(key, model)),
-        _ => Box::new(ClaudeCli::new(model)),
-    };
-    let secs = std::env::var("WEBTEST_LLM_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(180);
-    Box::new(Resilient {
-        inner,
-        timeout: Duration::from_secs(secs),
-        retries: 2,
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    Anthropic,
+    OpenAi,
+    ClaudeCli,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Auth {
+    /// `x-api-key: <key>` (Anthropic default)
+    ApiKey,
+    /// `Authorization: Bearer <key>`
+    Bearer,
+}
+
+/// Resolved backend configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    pub provider: Provider,
+    pub model: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub auth: Auth,
+    pub timeout: Duration,
+}
+
+impl Settings {
+    /// Reads the process environment. `model` (e.g. `--model`) wins over env.
+    pub fn from_env(model: Option<String>) -> Result<Self> {
+        Self::from_vars(&|k| std::env::var(k).ok().filter(|v| !v.is_empty()), model)
+    }
+
+    /// Resolution rules:
+    ///
+    /// | `WEBTEST_LLM_PROVIDER` | protocol | base URL default | key |
+    /// |---|---|---|---|
+    /// | `anthropic` | Messages | `ANTHROPIC_BASE_URL` or api.anthropic.com | `ANTHROPIC_API_KEY` (x-api-key) / `ANTHROPIC_AUTH_TOKEN` (Bearer) |
+    /// | `openai` | Chat Completions | `OPENAI_BASE_URL` or api.openai.com/v1 | `OPENAI_API_KEY` |
+    /// | `deepseek` | Chat Completions | api.deepseek.com | `DEEPSEEK_API_KEY` |
+    /// | `claude-cli` | `claude -p` | – | Claude Code login |
+    ///
+    /// `WEBTEST_LLM_BASE_URL` / `WEBTEST_LLM_API_KEY` override the defaults.
+    /// Without a provider: an Anthropic key selects `anthropic`, else `claude-cli`.
+    /// Model: `model` arg, else `WEBTEST_MODEL`, else the provider default.
+    pub fn from_vars(var: &dyn Fn(&str) -> Option<String>, model: Option<String>) -> Result<Self> {
+        let generic_key = var("WEBTEST_LLM_API_KEY");
+        let provider_name = var("WEBTEST_LLM_PROVIDER").map(|p| p.to_lowercase());
+        let provider_name = provider_name.as_deref().unwrap_or_else(|| {
+            if generic_key.is_some()
+                || var("ANTHROPIC_API_KEY").is_some()
+                || var("ANTHROPIC_AUTH_TOKEN").is_some()
+            {
+                "anthropic"
+            } else {
+                "claude-cli"
+            }
+        });
+
+        let (provider, base_default, key, auth, model_default) = match provider_name {
+            "anthropic" => {
+                let (key, auth) = match (var("ANTHROPIC_API_KEY"), var("ANTHROPIC_AUTH_TOKEN")) {
+                    (Some(k), _) => (Some(k), Auth::ApiKey),
+                    (None, Some(t)) => (Some(t), Auth::Bearer),
+                    _ => (None, Auth::ApiKey),
+                };
+                let base =
+                    var("ANTHROPIC_BASE_URL").unwrap_or_else(|| "https://api.anthropic.com".into());
+                (Provider::Anthropic, base, key, auth, Some(DEFAULT_MODEL))
+            }
+            "openai" => {
+                let base =
+                    var("OPENAI_BASE_URL").unwrap_or_else(|| "https://api.openai.com/v1".into());
+                (
+                    Provider::OpenAi,
+                    base,
+                    var("OPENAI_API_KEY"),
+                    Auth::Bearer,
+                    None,
+                )
+            }
+            "deepseek" => (
+                Provider::OpenAi,
+                "https://api.deepseek.com".into(),
+                var("DEEPSEEK_API_KEY"),
+                Auth::Bearer,
+                Some("deepseek-chat"),
+            ),
+            "claude-cli" | "claude" => (
+                Provider::ClaudeCli,
+                String::new(),
+                None,
+                Auth::ApiKey,
+                Some(DEFAULT_MODEL),
+            ),
+            other => bail!(
+                "unknown WEBTEST_LLM_PROVIDER `{other}` (expected anthropic, openai, deepseek or claude-cli)"
+            ),
+        };
+
+        let model = model
+            .or_else(|| var("WEBTEST_MODEL"))
+            .or_else(|| model_default.map(str::to_string))
+            .with_context(|| {
+                format!(
+                    "provider `{provider_name}` needs a model: pass --model or set WEBTEST_MODEL"
+                )
+            })?;
+        let api_key = generic_key.or(key);
+        if provider != Provider::ClaudeCli && api_key.is_none() {
+            bail!(
+                "provider `{provider_name}` needs an API key (WEBTEST_LLM_API_KEY or the provider's key variable)"
+            );
+        }
+        let timeout = Duration::from_secs(
+            var("WEBTEST_LLM_TIMEOUT_SECS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(180),
+        );
+        Ok(Settings {
+            provider,
+            model,
+            base_url: var("WEBTEST_LLM_BASE_URL")
+                .unwrap_or(base_default)
+                .trim_end_matches('/')
+                .to_string(),
+            api_key,
+            auth,
+            timeout,
+        })
+    }
+
+    /// Builds the backend, wrapped with a per-call timeout and retries.
+    pub fn build(&self) -> Box<dyn Llm> {
+        let inner: Box<dyn Llm> = match self.provider {
+            Provider::Anthropic => Box::new(AnthropicApi::new(self)),
+            Provider::OpenAi => Box::new(OpenAiCompat::new(self)),
+            Provider::ClaudeCli => Box::new(ClaudeCli::new(self.model.clone())),
+        };
+        Box::new(Resilient {
+            inner,
+            timeout: self.timeout,
+            retries: 2,
+        })
+    }
+}
+
+/// Backend from the environment (see [`Settings::from_env`]).
+pub fn from_env(model: Option<String>) -> Result<Box<dyn Llm>> {
+    Ok(Settings::from_env(model)?.build())
 }
 
 /// Bounds every call with a timeout and retries failures. Dropping a timed-out
@@ -85,17 +219,21 @@ impl Llm for Resilient {
 
 pub struct AnthropicApi {
     http: reqwest::Client,
+    url: String,
     key: String,
+    auth: Auth,
     model: String,
     max_tokens: u32,
 }
 
 impl AnthropicApi {
-    pub fn new(key: String, model: String) -> Self {
+    pub fn new(s: &Settings) -> Self {
         Self {
             http: reqwest::Client::new(),
-            key,
-            model,
+            url: format!("{}/v1/messages", s.base_url),
+            key: s.api_key.clone().unwrap_or_default(),
+            auth: s.auth,
+            model: s.model.clone(),
             max_tokens: 4096,
         }
     }
@@ -110,22 +248,26 @@ impl Llm for AnthropicApi {
             "system": system,
             "messages": [{ "role": "user", "content": user }],
         });
-        let resp = self
+        let req = self
             .http
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &self.key)
+            .post(&self.url)
             .header("anthropic-version", "2023-06-01")
-            .json(&body)
+            .json(&body);
+        let req = match self.auth {
+            Auth::ApiKey => req.header("x-api-key", &self.key),
+            Auth::Bearer => req.bearer_auth(&self.key),
+        };
+        let resp = req
             .send()
             .await
-            .context("Anthropic API request failed")?;
+            .with_context(|| format!("request to {} failed", self.url))?;
         let status = resp.status();
         let v: Value = resp
             .json()
             .await
-            .context("invalid Anthropic API response")?;
+            .with_context(|| format!("invalid response from {}", self.url))?;
         if !status.is_success() {
-            bail!("Anthropic API error {status}: {v}");
+            bail!("{} returned {status}: {v}", self.url);
         }
         let text = v["content"]
             .as_array()
@@ -139,7 +281,66 @@ impl Llm for AnthropicApi {
     }
 
     fn describe(&self) -> String {
-        format!("anthropic-api ({})", self.model)
+        format!("anthropic-messages ({} @ {})", self.model, self.url)
+    }
+}
+
+/// OpenAI Chat Completions protocol (DeepSeek, Qwen, vLLM, Ollama, ...).
+pub struct OpenAiCompat {
+    http: reqwest::Client,
+    url: String,
+    key: String,
+    model: String,
+    max_tokens: u32,
+}
+
+impl OpenAiCompat {
+    pub fn new(s: &Settings) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            url: format!("{}/chat/completions", s.base_url),
+            key: s.api_key.clone().unwrap_or_default(),
+            model: s.model.clone(),
+            max_tokens: 4096,
+        }
+    }
+}
+
+#[async_trait]
+impl Llm for OpenAiCompat {
+    async fn complete(&self, system: &str, user: &str) -> Result<String> {
+        let body = json!({
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user", "content": user },
+            ],
+        });
+        let resp = self
+            .http
+            .post(&self.url)
+            .bearer_auth(&self.key)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("request to {} failed", self.url))?;
+        let status = resp.status();
+        let v: Value = resp
+            .json()
+            .await
+            .with_context(|| format!("invalid response from {}", self.url))?;
+        if !status.is_success() {
+            bail!("{} returned {status}: {v}", self.url);
+        }
+        v["choices"][0]["message"]["content"]
+            .as_str()
+            .map(str::to_string)
+            .with_context(|| format!("no message content in response: {v}"))
+    }
+
+    fn describe(&self) -> String {
+        format!("openai-chat ({} @ {})", self.model, self.url)
     }
 }
 
@@ -290,6 +491,171 @@ mod tests {
             retries: 1,
         };
         assert_eq!(llm.complete("s", "u").await.unwrap(), "ok");
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let m: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k| m.get(k).cloned()
+    }
+
+    #[test]
+    fn defaults_to_claude_cli_without_keys() {
+        let s = Settings::from_vars(&vars(&[]), None).unwrap();
+        assert_eq!(s.provider, Provider::ClaudeCli);
+        assert_eq!(s.model, DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn anthropic_compatible_base_url_and_bearer_token() {
+        let s = Settings::from_vars(
+            &vars(&[
+                ("ANTHROPIC_AUTH_TOKEN", "t"),
+                ("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic/"),
+                ("WEBTEST_MODEL", "deepseek-chat"),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.provider, Provider::Anthropic);
+        assert_eq!(s.auth, Auth::Bearer);
+        assert_eq!(s.base_url, "https://api.deepseek.com/anthropic");
+        assert_eq!(s.model, "deepseek-chat");
+    }
+
+    #[test]
+    fn deepseek_preset_and_overrides() {
+        let s = Settings::from_vars(
+            &vars(&[
+                ("WEBTEST_LLM_PROVIDER", "DeepSeek"),
+                ("DEEPSEEK_API_KEY", "k"),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (s.provider, s.base_url.as_str(), s.model.as_str()),
+            (
+                Provider::OpenAi,
+                "https://api.deepseek.com",
+                "deepseek-chat"
+            )
+        );
+        let s = Settings::from_vars(
+            &vars(&[
+                ("WEBTEST_LLM_PROVIDER", "openai"),
+                ("WEBTEST_LLM_BASE_URL", "http://localhost:11434/v1"),
+                ("WEBTEST_LLM_API_KEY", "x"),
+            ]),
+            Some("qwen3".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            (s.base_url.as_str(), s.model.as_str()),
+            ("http://localhost:11434/v1", "qwen3")
+        );
+    }
+
+    #[test]
+    fn reports_missing_model_key_or_provider() {
+        let e = Settings::from_vars(
+            &vars(&[("WEBTEST_LLM_PROVIDER", "openai"), ("OPENAI_API_KEY", "k")]),
+            None,
+        );
+        assert!(e.unwrap_err().to_string().contains("needs a model"));
+        let e = Settings::from_vars(&vars(&[("WEBTEST_LLM_PROVIDER", "deepseek")]), None);
+        assert!(e.unwrap_err().to_string().contains("needs an API key"));
+        let e = Settings::from_vars(&vars(&[("WEBTEST_LLM_PROVIDER", "gemini")]), None);
+        assert!(e.unwrap_err().to_string().contains("unknown"));
+    }
+
+    /// One-shot HTTP server: returns the raw request it received.
+    async fn mock_server(response: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = sock.read(&mut chunk).await.unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let len = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if body.len() >= len {
+                        break;
+                    }
+                }
+            }
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                response.len()
+            );
+            sock.write_all(reply.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&buf).to_string()
+        });
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn openai_protocol_on_the_wire() {
+        let (url, req) =
+            mock_server(r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}]}"#).await;
+        let s = Settings::from_vars(
+            &vars(&[
+                ("WEBTEST_LLM_PROVIDER", "deepseek"),
+                ("DEEPSEEK_API_KEY", "sk-1"),
+                ("WEBTEST_LLM_BASE_URL", &url),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            OpenAiCompat::new(&s).complete("SYS", "USER").await.unwrap(),
+            "hi"
+        );
+        let req = req.await.unwrap().to_lowercase();
+        assert!(req.starts_with("post /chat/completions "), "{req}");
+        assert!(req.contains("authorization: bearer sk-1"));
+        let body: Value = serde_json::from_str(req.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(
+            body["messages"][0],
+            json!({"role": "system", "content": "sys"})
+        );
+        assert_eq!(body["model"], "deepseek-chat");
+    }
+
+    #[tokio::test]
+    async fn anthropic_protocol_on_the_wire() {
+        let (url, req) = mock_server(
+            r#"{"content":[{"type":"text","text":"he"},{"type":"text","text":"llo"}]}"#,
+        )
+        .await;
+        let base = format!("{url}/anthropic");
+        let s = Settings::from_vars(
+            &vars(&[("ANTHROPIC_API_KEY", "k-2"), ("ANTHROPIC_BASE_URL", &base)]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            AnthropicApi::new(&s).complete("SYS", "USER").await.unwrap(),
+            "hello"
+        );
+        let req = req.await.unwrap().to_lowercase();
+        assert!(req.starts_with("post /anthropic/v1/messages "), "{req}");
+        assert!(req.contains("x-api-key: k-2") && req.contains("anthropic-version: 2023-06-01"));
+        assert!(req.contains(r#""system":"sys""#));
     }
 
     #[test]

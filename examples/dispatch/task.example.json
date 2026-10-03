@@ -1,0 +1,8 @@
+{
+  "title": "Demo Shop 回归测试",
+  "url": "http://127.0.0.1:8765/",
+  "mode": "replay",
+  "flows": "flows/*.yaml",
+  "context": "登录用例 flows/login.yaml；测试账号 alice / secret123",
+  "notes": "回放时使用 --login-flow flows/login.yaml"
+}
