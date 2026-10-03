@@ -3,6 +3,7 @@
 //! Every executed step is recorded with a uid-free [`Locator`] so the trace can
 //! later be replayed deterministically without the LLM.
 
+pub mod crossreview;
 pub mod explore;
 pub mod flow;
 pub mod replay;

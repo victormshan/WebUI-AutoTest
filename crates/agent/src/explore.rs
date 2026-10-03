@@ -21,6 +21,7 @@ use llm::{Llm, extract_json};
 use mcp_client::{Browser, BrowserConfig};
 use serde::{Deserialize, Serialize};
 
+use crate::crossreview::{self, FlowReview, Proposal, ProposalReview};
 use crate::flow::{Flow, suggest_assertions};
 use crate::replay::{ReplayOptions, reach, replay};
 use crate::{Agent, AgentConfig, snapshot};
@@ -73,6 +74,16 @@ pub struct TaskOutcome {
     pub flaky_assertions: Vec<String>,
     pub flow: Option<PathBuf>,
     pub summary: String,
+    /// Who proposed the task: "claude" or "external" (added by the cross-reviewer).
+    #[serde(default = "claude_source")]
+    pub source: String,
+    /// External AI review of the flow's assertions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<FlowReview>,
+}
+
+fn claude_source() -> String {
+    "claude".into()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -80,18 +91,11 @@ pub struct ExploreReport {
     pub start_url: String,
     pub states: Vec<StateInfo>,
     pub tasks: Vec<TaskOutcome>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct Proposal {
-    name: String,
-    goal: String,
-    #[serde(default = "positive")]
-    kind: String,
-}
-
-fn positive() -> String {
-    "positive".into()
+    /// The external cross-reviewer, when one was configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposal_reviews: Vec<ProposalReview>,
 }
 
 /// A new state a task ended in, with the flow that reaches it.
@@ -110,12 +114,42 @@ struct Pending {
 
 pub struct Explorer<'a> {
     llm: &'a dyn Llm,
+    /// External AI (another vendor) that cross-reviews proposals and flows.
+    reviewer: Option<&'a dyn Llm>,
     cfg: ExploreConfig,
 }
 
+/// Actions that end a login session. With a shared saved login state, one task doing this
+/// invalidates the session for every other task and for replay verification.
+pub const SESSION_ENDING_KEYWORDS: &[&str] = &["退出登录", "登出", "logout", "log out", "sign out"];
+
+/// The deny list actually used: with a shared login state, session-ending actions are added
+/// (the list is also shown to the task proposer and the cross-reviewer as off-limits).
+pub fn effective_deny(cfg: &ExploreConfig) -> Vec<String> {
+    let mut deny = cfg.agent.deny.clone();
+    if cfg.storage_state_path.is_some() {
+        for k in SESSION_ENDING_KEYWORDS {
+            if !deny.iter().any(|d| d.eq_ignore_ascii_case(k)) {
+                deny.push((*k).to_string());
+            }
+        }
+    }
+    deny
+}
+
 impl<'a> Explorer<'a> {
-    pub fn new(llm: &'a dyn Llm, cfg: ExploreConfig) -> Self {
-        Self { llm, cfg }
+    pub fn new(llm: &'a dyn Llm, mut cfg: ExploreConfig) -> Self {
+        cfg.agent.deny = effective_deny(&cfg);
+        Self {
+            llm,
+            reviewer: None,
+            cfg,
+        }
+    }
+
+    pub fn with_reviewer(mut self, reviewer: Option<&'a dyn Llm>) -> Self {
+        self.reviewer = reviewer;
+        self
     }
 
     /// Explores from `start_url`, writing verified flows to `out_dir`.
@@ -123,6 +157,7 @@ impl<'a> Explorer<'a> {
         std::fs::create_dir_all(out_dir)?;
         let mut report = ExploreReport {
             start_url: start_url.to_string(),
+            reviewer: self.reviewer.map(|r| r.describe()),
             ..Default::default()
         };
         let root = Flow {
@@ -175,7 +210,7 @@ impl<'a> Explorer<'a> {
                 state.depth
             );
 
-            let proposals = match self
+            let mut proposals = match self
                 .propose(&snap, &known_goals, budget.min(self.cfg.tasks_per_state))
                 .await
             {
@@ -185,6 +220,13 @@ impl<'a> Explorer<'a> {
                     continue;
                 }
             };
+            if let Some(reviewer) = self.reviewer {
+                let (reviewed, record) = self
+                    .cross_review_proposals(reviewer, &snap, &id, proposals, &known_goals, budget)
+                    .await;
+                proposals = reviewed;
+                report.proposal_reviews.push(record);
+            }
             for p in &proposals {
                 tracing::info!("  proposed [{}] {}: {}", p.kind, p.name, p.goal);
                 known_goals.push(p.goal.clone());
@@ -323,6 +365,8 @@ Reply with ONLY JSON: {{"tasks": [{{"name": "<short_snake_case_ascii>", "goal": 
             flaky_assertions: Vec::new(),
             flow: None,
             summary: String::new(),
+            source: p.source.clone(),
+            review: None,
         };
         match self
             .attempt_inner(&name, &p, prefix, out_dir, &mut outcome)
@@ -390,7 +434,12 @@ Reply with ONLY JSON: {{"tasks": [{{"name": "<short_snake_case_ascii>", "goal": 
         }
         flow.assertions = suggest_assertions(&trace, Some(self.llm)).await;
 
-        let verified = self.verify(name, &mut flow, outcome).await?;
+        let mut verified = self.verify(name, &mut flow, outcome).await?;
+        if let (true, Some(reviewer)) = (verified, self.reviewer) {
+            verified = self
+                .review_flow(reviewer, name, &trace, &mut flow, outcome)
+                .await?;
+        }
         outcome.verified = verified;
         let path = if verified {
             out_dir.join(format!("{name}.yaml"))
@@ -410,6 +459,118 @@ Reply with ONLY JSON: {{"tasks": [{{"name": "<short_snake_case_ascii>", "goal": 
 }
 
 impl Explorer<'_> {
+    /// External AI reviews Claude's proposals for one state: may veto (with a reason) and add.
+    /// On reviewer failure the proposals are kept unchanged and the error is recorded.
+    async fn cross_review_proposals(
+        &self,
+        reviewer: &dyn Llm,
+        snap: &str,
+        state_id: &str,
+        proposals: Vec<Proposal>,
+        known: &[String],
+        budget: usize,
+    ) -> (Vec<Proposal>, ProposalReview) {
+        let mut record = ProposalReview {
+            state: state_id.to_string(),
+            claude: proposals.iter().map(|p| p.name.clone()).collect(),
+            ..Default::default()
+        };
+        let max_additions = (self.cfg.tasks_per_state.div_ceil(2))
+            .min(budget.saturating_sub(proposals.len()).max(1));
+        let (system, user) = crossreview::proposal_review_prompt(
+            snap,
+            &self.cfg.context,
+            &self.cfg.agent.deny,
+            &proposals,
+            known,
+            max_additions,
+        );
+        tracing::info!(
+            "  external review of {} proposals ({})",
+            proposals.len(),
+            reviewer.describe()
+        );
+        let reply = match reviewer
+            .complete(&system, &user)
+            .await
+            .and_then(|t| extract_json(&t))
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("  proposal review failed, keeping Claude's proposals: {e:#}");
+                record.error = Some(format!("{e:#}"));
+                return (proposals, record);
+            }
+        };
+        let (kept, dropped, added) =
+            crossreview::apply_proposal_review(proposals, &reply, max_additions);
+        let (kept, skipped) = crossreview::fit_to_budget(kept, budget);
+        if !skipped.is_empty() {
+            tracing::info!("  task budget: not running {}", skipped.join(", "));
+        }
+        record.skipped_for_budget = skipped;
+        for d in &dropped {
+            tracing::info!("  reviewer dropped {}: {}", d.item, d.reason);
+        }
+        for a in &added {
+            tracing::info!("  reviewer added {a}");
+        }
+        record.dropped = dropped;
+        record.added = added
+            .into_iter()
+            .filter(|a| kept.iter().any(|k| &k.name == a))
+            .collect();
+        (kept, record)
+    }
+
+    /// External AI reviews a verified flow's assertions. Changes are applied only if the
+    /// flow still passes LLM-free verification; otherwise the original assertions are restored.
+    async fn review_flow(
+        &self,
+        reviewer: &dyn Llm,
+        name: &str,
+        trace: &crate::Trace,
+        flow: &mut Flow,
+        outcome: &mut TaskOutcome,
+    ) -> Result<bool> {
+        let (system, user) =
+            crossreview::flow_review_prompt(&flow.goal, &trace.final_snapshot, &flow.assertions);
+        tracing::info!(
+            "task {name}: external review of {} assertions",
+            flow.assertions.len()
+        );
+        let reply = match reviewer
+            .complete(&system, &user)
+            .await
+            .and_then(|t| extract_json(&t))
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("task {name}: flow review failed, keeping assertions: {e:#}");
+                outcome.review = Some(FlowReview {
+                    error: Some(format!("{e:#}")),
+                    ..Default::default()
+                });
+                return Ok(true);
+            }
+        };
+        let before = flow.assertions.clone();
+        let (after, mut review) =
+            crossreview::apply_flow_review(&before, &reply, &trace.final_snapshot);
+        if after != before {
+            flow.assertions = after;
+            if !self.verify(name, flow, outcome).await? {
+                tracing::warn!("task {name}: reviewed assertions failed verification, reverting");
+                flow.assertions = before;
+                review.reverted = true;
+                review.dropped.clear();
+                review.added.clear();
+            }
+        }
+        outcome.review = Some(review);
+        Ok(true)
+    }
+
     /// A flow is only useful if it replays without the LLM — repeatedly.
     /// Replays until `verify_runs` consecutive clean passes. Assertions that
     /// fail while every step succeeded are treated as flaky (e.g. exact AI
@@ -454,6 +615,68 @@ impl Explorer<'_> {
     }
 }
 
+/// "External AI cross-review" section: proposal vetoes/additions per state, assertion changes per flow.
+fn cross_review_markdown(r: &ExploreReport, reviewer: &str) -> String {
+    let cell = |s: &str| s.replace('|', "\\|").replace('\n', " ");
+    let mut m = format!(
+        "\n## 外部 AI 交叉评审\n\n评审者：`{}`（实施方：Claude）\n\n### 任务提案\n\n| 状态 | Claude 提出 | 外部 AI 否决（原因） | 外部 AI 补充 | 因任务预算未执行 |\n|---|---|---|---|---|\n",
+        cell(reviewer)
+    );
+    for pr in &r.proposal_reviews {
+        let dropped = if let Some(e) = &pr.error {
+            format!("评审失败：{}", cell(e))
+        } else {
+            pr.dropped
+                .iter()
+                .map(|d| format!("{}（{}）", d.item, cell(&d.reason)))
+                .collect::<Vec<_>>()
+                .join("<br>")
+        };
+        m.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            pr.state,
+            pr.claude.join(", "),
+            dropped,
+            pr.added.join(", "),
+            pr.skipped_for_budget.join(", ")
+        ));
+    }
+    let reviewed: Vec<&TaskOutcome> = r.tasks.iter().filter(|t| t.review.is_some()).collect();
+    if !reviewed.is_empty() {
+        m.push_str("\n### 用例断言\n\n| 用例 | 删除（原因） | 补充 | 说明 |\n|---|---|---|---|\n");
+        for t in reviewed {
+            let rv = t.review.as_ref().expect("filtered");
+            let dropped = rv
+                .dropped
+                .iter()
+                .map(|d| format!("{}（{}）", cell(&d.item), cell(&d.reason)))
+                .collect::<Vec<_>>()
+                .join("<br>");
+            let mut note = cell(&rv.summary);
+            if rv.reverted {
+                note = format!("改动未通过回放验证，已回退。{note}");
+            }
+            if !rv.rejected_additions.is_empty() {
+                note = format!(
+                    "{note} 未采纳（录制页面上不成立）：{}",
+                    cell(&rv.rejected_additions.join("；"))
+                );
+            }
+            if let Some(e) = &rv.error {
+                note = format!("评审失败：{}", cell(e));
+            }
+            m.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                t.name,
+                dropped,
+                cell(&rv.added.join("；")),
+                note
+            ));
+        }
+    }
+    m
+}
+
 fn slug(s: &str) -> String {
     let s: String = s
         .chars()
@@ -490,7 +713,7 @@ pub fn markdown(r: &ExploreReport) -> String {
             ));
         }
     }
-    m.push_str("```\n\n| task | kind | result | flow |\n|---|---|---|---|\n");
+    m.push_str("```\n\n| task | kind | source | result | flow |\n|---|---|---|---|---|\n");
     for t in &r.tasks {
         let result = match (t.success, t.verified) {
             _ if t.blocked => "⛔ blocked by deny list",
@@ -508,10 +731,18 @@ pub fn markdown(r: &ExploreReport) -> String {
             .as_ref()
             .map(|p| format!("`{}`", p.display()))
             .unwrap_or_default();
+        let source = if t.source == "external" {
+            "外部 AI"
+        } else {
+            "Claude"
+        };
         m.push_str(&format!(
-            "| {} | {} | {result} | {flow} |\n",
+            "| {} | {} | {source} | {result} | {flow} |\n",
             t.name, t.kind
         ));
+    }
+    if let Some(reviewer) = &r.reviewer {
+        m.push_str(&cross_review_markdown(r, reviewer));
     }
     m.push_str("\n## Goals\n\n");
     for t in &r.tasks {
@@ -526,6 +757,39 @@ pub fn markdown(r: &ExploreReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cfg(storage: Option<&str>) -> ExploreConfig {
+        ExploreConfig {
+            browser: mcp_client::BrowserConfig::default(),
+            agent: AgentConfig {
+                deny: vec!["删除".into(), "Logout".into()],
+                ..Default::default()
+            },
+            replay: ReplayOptions::default(),
+            storage_state_path: storage.map(str::to_string),
+            login_flow_path: None,
+            context: String::new(),
+            max_tasks: 1,
+            tasks_per_state: 1,
+            max_depth: 1,
+            jobs: 1,
+            verify_runs: 1,
+        }
+    }
+
+    #[test]
+    fn shared_login_state_puts_session_ending_actions_off_limits() {
+        assert_eq!(effective_deny(&cfg(None)), ["删除", "Logout"]);
+        let d = effective_deny(&cfg(Some("auth/a.json")));
+        assert!(d.contains(&"退出登录".to_string()) && d.contains(&"sign out".to_string()));
+        assert_eq!(
+            d.iter()
+                .filter(|k| k.eq_ignore_ascii_case("logout"))
+                .count(),
+            1,
+            "no duplicates"
+        );
+    }
 
     #[test]
     fn slugs() {
@@ -562,11 +826,64 @@ mod tests {
                 blocked: false,
                 flaky_assertions: vec![],
                 flow: Some("flows/login.yaml".into()),
+                source: "claude".into(),
+                review: None,
                 summary: "ok".into(),
             }],
+            ..Default::default()
         };
         let md = markdown(&r);
         assert!(md.contains("sa -->|login| sb"));
-        assert!(md.contains("| login | positive | ✅ verified | `flows/login.yaml` |"));
+        assert!(md.contains("| login | positive | Claude | ✅ verified | `flows/login.yaml` |"));
+        assert!(!md.contains("外部 AI 交叉评审"), "no reviewer, no section");
+    }
+
+    #[test]
+    fn markdown_reports_cross_review() {
+        use crate::crossreview::Dropped;
+        let mut t = TaskOutcome {
+            name: "wrong_password".into(),
+            goal: "g".into(),
+            kind: "negative".into(),
+            from_state: "a".into(),
+            to_state: None,
+            success: true,
+            verified: true,
+            blocked: false,
+            flaky_assertions: vec![],
+            flow: None,
+            summary: String::new(),
+            source: "external".into(),
+            review: None,
+        };
+        t.review = Some(FlowReview {
+            dropped: vec![Dropped {
+                item: "text \"hi\"".into(),
+                reason: "random greeting".into(),
+            }],
+            added: vec!["text \"错误\"".into()],
+            ..Default::default()
+        });
+        let r = ExploreReport {
+            start_url: "http://x/".into(),
+            tasks: vec![t],
+            reviewer: Some("command (node external-ai.mjs)".into()),
+            proposal_reviews: vec![ProposalReview {
+                state: "a".into(),
+                claude: vec!["login".into(), "delete".into()],
+                dropped: vec![Dropped {
+                    item: "delete".into(),
+                    reason: "irreversible".into(),
+                }],
+                added: vec!["wrong_password".into()],
+                skipped_for_budget: vec![],
+                error: None,
+            }],
+            ..Default::default()
+        };
+        let md = markdown(&r);
+        assert!(md.contains("| wrong_password | negative | 外部 AI |"));
+        assert!(md.contains("| a | login, delete | delete（irreversible） | wrong_password |  |"));
+        assert!(md.contains("random greeting") && md.contains("text \"错误\""));
     }
 }

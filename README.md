@@ -154,6 +154,7 @@ webtest --storage-state auth/alice.json explore --url <url>                 # �
 | `anthropic`（设置了 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN` 时自动选用） | Anthropic Messages | `ANTHROPIC_BASE_URL`，否则为 api.anthropic.com | `ANTHROPIC_API_KEY`（通过 x-api-key 头发送）或 `ANTHROPIC_AUTH_TOKEN`（通过 Bearer 发送） | claude-sonnet-5-5 |
 | `deepseek` | OpenAI Chat Completions | api.deepseek.com | `DEEPSEEK_API_KEY` | deepseek-chat |
 | `openai` | OpenAI Chat Completions | `OPENAI_BASE_URL`，否则为 api.openai.com/v1 | `OPENAI_API_KEY` | 无，必须指定 |
+| `command` | 外部命令：提示走 stdin，回答走 stdout（`WEBTEST_LLM_COMMAND`） | – | – | – |
 
 - `WEBTEST_LLM_BASE_URL` 和 `WEBTEST_LLM_API_KEY` 可以覆盖上表中的默认值。
 - 模型的优先级：`--model` 参数 > `WEBTEST_MODEL` > 上表中的默认模型。
@@ -166,6 +167,32 @@ WEBTEST_LLM_PROVIDER=deepseek DEEPSEEK_API_KEY=sk-... webtest check-llm
 ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic ANTHROPIC_AUTH_TOKEN=sk-... WEBTEST_MODEL=deepseek-chat webtest check-llm
 WEBTEST_LLM_PROVIDER=openai WEBTEST_LLM_BASE_URL=http://localhost:11434/v1 WEBTEST_LLM_API_KEY=x webtest --model qwen3 check-llm
 ```
+
+### 外部 AI 交叉评审（探索）
+
+对齐 dsh-web-relay 的三方协议：Claude 负责探索和写用例，另一家厂商的模型做独立评审。给 `explore` 配一个评审者：
+
+```bash
+webtest explore --url <url> --context "…" \
+  --review-command "node /mnt/d/dsh/claude-step-relay/tools/external-ai.mjs"
+webtest check-llm --review-command "node …/external-ai.mjs"      # 先确认评审者可用
+```
+
+`external-ai.mjs`（在 claude-step-relay 仓库）依次尝试 Gemini API → OpenAI 兼容（DeepSeek）→ dsh-web-relay 的 web-gemini 网页通道（bridge `localhost:8899`，在 WSL 里自动经 Windows `curl.exe` 访问）。也可以不用命令，改用环境变量配置评审者：`WEBTEST_REVIEW_LLM_PROVIDER` / `WEBTEST_REVIEW_LLM_COMMAND` / `WEBTEST_REVIEW_MODEL` 等，它们与上表的 `WEBTEST_*` 一一对应。
+
+评审者做两件事：
+
+1. **审任务提案**：对 Claude 在每个页面状态提出的任务，可以说明理由后**否决**（不安全、缺测试数据、重复、无法在本页验证、碰到禁用关键词）；也可以**补充**漏掉的主流程或反向用例。补充的任务照常执行和验证，报告里标为来自"外部 AI"。
+2. **审用例断言**：对每个验证通过的用例，删掉不稳定或证明不了目标的断言（比如随机问候语、AI 回答原文），并补充缺失的断言。
+
+评审结论不会被直接采信：
+
+- 补充的断言必须在录制时的页面上成立，否则不采纳；
+- 至少保留一条断言；
+- 改动后用例要重新通过不调用大模型的回放验证，失败就回退；
+- 评审调用失败时，保留 Claude 原来的结果，并在报告中注明。
+
+`explore.md` 末尾的"外部 AI 交叉评审"一节会列出每个状态 Claude 提出了哪些任务、外部 AI 否决了哪些（以及原因）、补充了哪些，以及每个用例删除和补充了哪些断言。
 
 ### 在 Claude Code 里直接使用
 

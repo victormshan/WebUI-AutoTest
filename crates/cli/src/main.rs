@@ -90,6 +90,11 @@ enum Cmd {
     CheckLlm {
         #[arg(long, env = "WEBTEST_MODEL")]
         model: Option<String>,
+        /// Check the cross-reviewer (WEBTEST_REVIEW_* / --review-command) instead
+        #[arg(long)]
+        reviewer: bool,
+        #[arg(long)]
+        review_command: Option<String>,
     },
     /// Read `<tool> [json-args]` lines from stdin and print each result (debugging aid)
     Repl,
@@ -192,6 +197,11 @@ struct ExploreArgs {
     /// Start URL
     #[arg(long)]
     url: String,
+    /// External AI cross-reviewer: shell command reading the prompt on stdin and printing the
+    /// answer, e.g. "node /mnt/d/dsh/claude-step-relay/tools/external-ai.mjs". Without it the
+    /// WEBTEST_REVIEW_* environment variables are used (see README); none = no cross-review.
+    #[arg(long)]
+    review_command: Option<String>,
     /// Test data the agent may use, e.g. "账号 alice / 密码 secret123"
     #[arg(long, default_value = "")]
     context: String,
@@ -253,7 +263,11 @@ async fn main() -> ExitCode {
 async fn dispatch(cli: Cli) -> Result<bool> {
     match cli.cmd {
         Cmd::Save(args) => save(args).await,
-        Cmd::CheckLlm { model } => check_llm(model).await,
+        Cmd::CheckLlm {
+            model,
+            reviewer,
+            review_command,
+        } => check_llm(model, reviewer || review_command.is_some(), review_command).await,
         Cmd::Login(args) => login(&cli.browser, args).await,
         Cmd::Replay(args) => replay_all(&cli.browser, args).await,
         Cmd::Explore(args) => {
@@ -604,7 +618,17 @@ async fn explore(
         jobs: args.jobs,
         verify_runs: args.verify_runs,
     };
+    let reviewer = reviewer_settings(args.review_command.as_deref())?.map(|s| s.build());
+    if let Some(r) = &reviewer {
+        tracing::info!("cross-reviewer: {}", r.describe());
+        if r.describe() == llm.describe() {
+            tracing::warn!(
+                "the cross-reviewer is the same model as the implementer; the review is not independent"
+            );
+        }
+    }
     let report = Explorer::new(llm.as_ref(), cfg)
+        .with_reviewer(reviewer.as_deref())
         .run(&args.url, &args.out)
         .await?;
 
@@ -634,6 +658,23 @@ async fn explore(
             let why: String = t.summary.chars().take(160).collect();
             println!("             └ {why}");
         }
+    }
+    if let Some(r) = &report.reviewer {
+        let vetoed: usize = report
+            .proposal_reviews
+            .iter()
+            .map(|p| p.dropped.len())
+            .sum();
+        let added: usize = report.proposal_reviews.iter().map(|p| p.added.len()).sum();
+        let changed = report
+            .tasks
+            .iter()
+            .filter_map(|t| t.review.as_ref())
+            .filter(|rv| !rv.dropped.is_empty() || !rv.added.is_empty())
+            .count();
+        println!(
+            "cross-review by {r}: {vetoed} task(s) vetoed, {added} added; assertions changed in {changed} flow(s)"
+        );
     }
     println!("report: {}", args.out.join("explore.md").display());
     Ok(report.tasks.iter().any(|t| t.verified))
@@ -712,8 +753,25 @@ async fn login_with(browser: &Browser, args: &LoginArgs) -> Result<bool> {
     Ok(true)
 }
 
-async fn check_llm(model: Option<String>) -> Result<bool> {
-    let settings = llm::Settings::from_env(model)?;
+/// The cross-reviewer from --review-command, else from WEBTEST_REVIEW_* (None if unconfigured).
+fn reviewer_settings(review_command: Option<&str>) -> Result<Option<llm::Settings>> {
+    match review_command {
+        Some(cmd) => Ok(Some(llm::Settings::command(cmd))),
+        None => llm::Settings::reviewer_from_env().transpose(),
+    }
+}
+
+async fn check_llm(
+    model: Option<String>,
+    reviewer: bool,
+    review_command: Option<String>,
+) -> Result<bool> {
+    let settings = if reviewer {
+        reviewer_settings(review_command.as_deref())?
+            .context("no reviewer configured: pass --review-command or set WEBTEST_REVIEW_LLM_COMMAND / WEBTEST_REVIEW_LLM_PROVIDER")?
+    } else {
+        llm::Settings::from_env(model)?
+    };
     let llm = settings.build();
     println!("backend: {}", llm.describe());
     let started = std::time::Instant::now();

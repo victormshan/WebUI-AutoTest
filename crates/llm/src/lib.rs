@@ -28,6 +28,8 @@ pub enum Provider {
     Anthropic,
     OpenAi,
     ClaudeCli,
+    /// Any external command: prompt on stdin, answer on stdout (e.g. external-ai.mjs).
+    Command,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +49,8 @@ pub struct Settings {
     pub api_key: Option<String>,
     pub auth: Auth,
     pub timeout: Duration,
+    /// Shell command for [`Provider::Command`].
+    pub command: Option<String>,
 }
 
 impl Settings {
@@ -63,6 +67,7 @@ impl Settings {
     /// | `openai` | Chat Completions | `OPENAI_BASE_URL` or api.openai.com/v1 | `OPENAI_API_KEY` |
     /// | `deepseek` | Chat Completions | api.deepseek.com | `DEEPSEEK_API_KEY` |
     /// | `claude-cli` | `claude -p` | – | Claude Code login |
+    /// | `command` | `sh -c $WEBTEST_LLM_COMMAND`, prompt on stdin | – | – |
     ///
     /// `WEBTEST_LLM_BASE_URL` / `WEBTEST_LLM_API_KEY` override the defaults.
     /// Without a provider: an Anthropic key selects `anthropic`, else `claude-cli`.
@@ -117,8 +122,15 @@ impl Settings {
                 Auth::ApiKey,
                 Some(DEFAULT_MODEL),
             ),
+            "command" => (
+                Provider::Command,
+                String::new(),
+                None,
+                Auth::ApiKey,
+                Some("external"),
+            ),
             other => bail!(
-                "unknown WEBTEST_LLM_PROVIDER `{other}` (expected anthropic, openai, deepseek or claude-cli)"
+                "unknown WEBTEST_LLM_PROVIDER `{other}` (expected anthropic, openai, deepseek, claude-cli or command)"
             ),
         };
 
@@ -131,7 +143,13 @@ impl Settings {
                 )
             })?;
         let api_key = generic_key.or(key);
-        if provider != Provider::ClaudeCli && api_key.is_none() {
+        let command = var("WEBTEST_LLM_COMMAND");
+        if provider == Provider::Command && command.is_none() {
+            bail!(
+                "provider `command` needs WEBTEST_LLM_COMMAND (a shell command reading the prompt on stdin)"
+            );
+        }
+        if !matches!(provider, Provider::ClaudeCli | Provider::Command) && api_key.is_none() {
             bail!(
                 "provider `{provider_name}` needs an API key (WEBTEST_LLM_API_KEY or the provider's key variable)"
             );
@@ -139,7 +157,12 @@ impl Settings {
         let timeout = Duration::from_secs(
             var("WEBTEST_LLM_TIMEOUT_SECS")
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(180),
+                // External commands may relay to slow channels (web-gemini ~20-90s per attempt).
+                .unwrap_or(if provider == Provider::Command {
+                    600
+                } else {
+                    180
+                }),
         );
         Ok(Settings {
             provider,
@@ -151,7 +174,48 @@ impl Settings {
             api_key,
             auth,
             timeout,
+            command,
         })
+    }
+
+    /// Settings for a second, independent model (the cross-reviewer), read from the
+    /// `WEBTEST_REVIEW_*` twins of the `WEBTEST_*` variables (`WEBTEST_REVIEW_LLM_PROVIDER`,
+    /// `WEBTEST_REVIEW_LLM_COMMAND`, `WEBTEST_REVIEW_MODEL`, ...). Provider key variables such as
+    /// `DEEPSEEK_API_KEY` are shared. `None` when no reviewer is configured.
+    pub fn reviewer_from_env() -> Option<Result<Self>> {
+        Self::reviewer_from_vars(&|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+    }
+
+    pub fn reviewer_from_vars(var: &dyn Fn(&str) -> Option<String>) -> Option<Result<Self>> {
+        let mapped = |k: &str| match k.strip_prefix("WEBTEST_") {
+            Some(rest) => var(&format!("WEBTEST_REVIEW_{rest}")),
+            None => var(k),
+        };
+        let has_command = mapped("WEBTEST_LLM_COMMAND").is_some();
+        if mapped("WEBTEST_LLM_PROVIDER").is_none() && !has_command {
+            return None;
+        }
+        let with_default_provider = |k: &str| {
+            if k == "WEBTEST_LLM_PROVIDER" && has_command {
+                mapped(k).or_else(|| Some("command".into()))
+            } else {
+                mapped(k)
+            }
+        };
+        Some(Self::from_vars(&with_default_provider, None))
+    }
+
+    /// A [`Provider::Command`] backend for `command` (e.g. a CLI flag).
+    pub fn command(command: &str) -> Self {
+        Settings {
+            provider: Provider::Command,
+            model: "external".into(),
+            base_url: String::new(),
+            api_key: None,
+            auth: Auth::ApiKey,
+            timeout: Duration::from_secs(600),
+            command: Some(command.to_string()),
+        }
     }
 
     /// Builds the backend, wrapped with a per-call timeout and retries.
@@ -160,6 +224,9 @@ impl Settings {
             Provider::Anthropic => Box::new(AnthropicApi::new(self)),
             Provider::OpenAi => Box::new(OpenAiCompat::new(self)),
             Provider::ClaudeCli => Box::new(ClaudeCli::new(self.model.clone())),
+            Provider::Command => Box::new(CommandLlm {
+                command: self.command.clone().unwrap_or_default(),
+            }),
         };
         Box::new(Resilient {
             inner,
@@ -415,6 +482,51 @@ impl Llm for ClaudeCli {
     }
 }
 
+/// Runs a shell command per call: system + user prompt on stdin, answer on stdout.
+pub struct CommandLlm {
+    command: String,
+}
+
+#[async_trait]
+impl Llm for CommandLlm {
+    async fn complete(&self, system: &str, user: &str) -> Result<String> {
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", &self.command])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("failed to run `{}`", self.command))?;
+        let mut stdin = child.stdin.take().expect("stdin piped");
+        stdin
+            .write_all(format!("{system}\n\n{user}").as_bytes())
+            .await?;
+        drop(stdin);
+        let out = child.wait_with_output().await?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            bail!(
+                "`{}` exited with {}: {}",
+                self.command,
+                out.status,
+                err.chars()
+                    .rev()
+                    .take(500)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect::<String>()
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    fn describe(&self) -> String {
+        format!("command ({})", self.command)
+    }
+}
+
 /// Extracts the first balanced top-level JSON object from model output
 /// (tolerates code fences and surrounding prose).
 pub fn extract_json(text: &str) -> Result<Value> {
@@ -556,6 +668,42 @@ mod tests {
             (s.base_url.as_str(), s.model.as_str()),
             ("http://localhost:11434/v1", "qwen3")
         );
+    }
+
+    #[test]
+    fn reviewer_reads_prefixed_twins_and_command_implies_provider() {
+        assert!(
+            Settings::reviewer_from_vars(&vars(&[("WEBTEST_LLM_PROVIDER", "deepseek")])).is_none()
+        );
+        let s =
+            Settings::reviewer_from_vars(&vars(&[("WEBTEST_REVIEW_LLM_COMMAND", "node x.mjs")]))
+                .unwrap()
+                .unwrap();
+        assert_eq!(s.provider, Provider::Command);
+        assert_eq!(s.command.as_deref(), Some("node x.mjs"));
+        assert_eq!(s.timeout, Duration::from_secs(600));
+        let s = Settings::reviewer_from_vars(&vars(&[
+            ("WEBTEST_REVIEW_LLM_PROVIDER", "deepseek"),
+            ("DEEPSEEK_API_KEY", "k"),
+            ("WEBTEST_LLM_PROVIDER", "claude-cli"),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (s.provider, s.model.as_str()),
+            (Provider::OpenAi, "deepseek-chat")
+        );
+    }
+
+    #[tokio::test]
+    async fn command_backend_pipes_prompt_and_reports_failures() {
+        let ok = Settings::command("tr a-z A-Z").build();
+        assert_eq!(ok.complete("sys", "user").await.unwrap(), "SYS\n\nUSER");
+        let bad = CommandLlm {
+            command: "echo boom >&2; exit 3".into(),
+        };
+        let e = bad.complete("s", "u").await.unwrap_err().to_string();
+        assert!(e.contains("boom") && e.contains("3"), "{e}");
     }
 
     #[test]
