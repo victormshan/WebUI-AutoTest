@@ -120,7 +120,7 @@ webtest --storage-state auth/alice.json replay flows/checkout_logged_in.yaml
 webtest --storage-state auth/alice.json explore --url <url>                 # 探索直接从登录后的页面开始
 ```
 
-- 用例 YAML 里可以写 `storage_state: auth/alice.json`。`replay` 时会自动加载；命令行的 `--storage-state` 优先级更高。探索生成的用例会自动带上这一项。
+- 用例 YAML 里可以写 `storage_state: auth/alice.json`，`replay` 时会自动加载。命令行的 `--storage-state` 只替换**已声明** `storage_state` 的用例所用的文件路径；没有声明的用例（比如在未登录状态下录制的登录用例）照常从未登录状态开始。`--login-flow` 也是同样的规则。探索生成的用例会自动带上这两项。
 - Cookie 通过 Chrome DevTools 协议（`Storage.getCookies` / `setCookies`）读写。localStorage 只保存执行 `login` 结束时所在页面的那个站点。
 - 状态文件里是有效的会话凭据：权限设为 600，并且 `auth/` 已加入 `.gitignore`。
 - **自动刷新**：在用例里写 `login_flow: flows/login.yaml`，或者在命令行加 `--login-flow`，就会自动处理两种情况：

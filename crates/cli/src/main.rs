@@ -37,11 +37,12 @@ struct BrowserArgs {
     )]
     mcp_package: String,
     /// Saved login state (from `webtest login`) loaded into every browser.
-    /// For `replay` it overrides a flow's own `storage_state`.
+    /// For `replay` it only replaces the path of flows that declare `storage_state`;
+    /// flows without it start logged out.
     #[arg(long, env = "WEBTEST_STORAGE_STATE", global = true)]
     storage_state: Option<PathBuf>,
     /// Login flow used to (re)create the storage state when it is missing or
-    /// a flow fails; overrides a flow's own `login_flow`.
+    /// a flow fails; for `replay` it replaces the path of flows that declare `login_flow`.
     #[arg(long, env = "WEBTEST_LOGIN_FLOW", global = true)]
     login_flow: Option<PathBuf>,
 }
@@ -412,14 +413,14 @@ async fn replay_all(browser_args: &BrowserArgs, args: ReplayArgs) -> Result<bool
     for path in &args.flows {
         let flow = Flow::load(path)?;
         tracing::info!("replaying {} ({})", flow.name, path.display());
-        let state = browser_args
-            .storage_state
-            .clone()
-            .or_else(|| flow.storage_state.as_ref().map(PathBuf::from));
-        let login_flow = browser_args
-            .login_flow
-            .clone()
-            .or_else(|| flow.login_flow.as_ref().map(PathBuf::from));
+        let state = effective_path(
+            browser_args.storage_state.as_deref(),
+            flow.storage_state.as_deref(),
+        );
+        let login_flow = effective_path(
+            browser_args.login_flow.as_deref(),
+            flow.login_flow.as_deref(),
+        );
 
         if let (Some(s), Some(l)) = (&state, &login_flow)
             && !s.exists()
@@ -506,6 +507,12 @@ async fn replay_all(browser_args: &BrowserArgs, args: ReplayArgs) -> Result<bool
         println!("summary: {}", path.display());
     }
     Ok(passed == reports.len())
+}
+
+/// Login settings only apply to flows that declare them: a flow recorded
+/// logged out must not start logged in. The CLI value replaces the flow's path.
+fn effective_path(cli: Option<&Path>, flow: Option<&str>) -> Option<PathBuf> {
+    flow.map(|f| cli.map_or_else(|| PathBuf::from(f), Path::to_path_buf))
 }
 
 /// Replays `flow` in a fresh browser (no state leaks between tests).
@@ -724,4 +731,28 @@ async fn check_llm(model: Option<String>) -> Result<bool> {
     let ok = llm::extract_json(&reply).is_ok_and(|v| v["ok"] == true);
     println!("{}", if ok { "OK" } else { "UNEXPECTED REPLY" });
     Ok(ok)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_settings_only_apply_to_flows_that_declare_them() {
+        let cli = Path::new("auth/ci.json");
+        assert_eq!(
+            effective_path(Some(cli), None),
+            None,
+            "logged-out flow stays logged out"
+        );
+        assert_eq!(
+            effective_path(Some(cli), Some("auth/a.json")),
+            Some(cli.to_path_buf())
+        );
+        assert_eq!(
+            effective_path(None, Some("auth/a.json")),
+            Some(PathBuf::from("auth/a.json"))
+        );
+        assert_eq!(effective_path(None, None), None);
+    }
 }
