@@ -20,7 +20,7 @@ use review_gate::relay::RelayTrace;
 use review_gate::reviewer::{self, AskError, ReviewerConfig};
 use review_gate::service::{self, AppState, Job};
 use review_gate::store::Store;
-use review_gate::{mcp, review};
+use review_gate::{hook, mcp, review};
 use serde_json::{Value, json};
 
 #[derive(Parser)]
@@ -50,6 +50,8 @@ enum Cmd {
         #[arg(long)]
         relay_dir: Option<PathBuf>,
     },
+    /// Claude Code PreToolUse hook (Bash): blocks unreviewed `git commit` and unattested `git push`
+    Hook,
     /// Print the gate's attestation public key (pin it in CI)
     Pubkey,
     /// Verify the attestation note on one commit (no service needed)
@@ -351,6 +353,19 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Mcp => {
             mcp::serve_stdio(Client::from_env()?).await?;
             Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Hook => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            let input: Value = serde_json::from_str(&input).context("hook input is not JSON")?;
+            let client = Client::from_env().ok();
+            Ok(match hook::decide(&input, client.as_ref()).await {
+                None => ExitCode::SUCCESS,
+                Some(reason) => {
+                    eprintln!("{reason}");
+                    ExitCode::from(2)
+                }
+            })
         }
         Cmd::Pubkey => {
             let v: Value = Client::from_env()?.get("/pubkey").await?;

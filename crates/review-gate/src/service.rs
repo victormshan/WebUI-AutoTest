@@ -96,6 +96,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/tasks/{id}/reviews/submit", post(submit_review))
         .route("/tasks/{id}/record", post(record))
         .route("/jobs/{job}", get(job_status))
+        .route("/check", post(check_commit))
         .layer(middleware::from_fn_with_state(state.clone(), auth));
     Router::new()
         .route("/health", get(health))
@@ -296,6 +297,20 @@ async fn submit_review(
     Ok(Json(review::submit(
         &s.gate, &id, &b.tree, &b.base, channel, &b.text,
     )?))
+}
+
+#[derive(Deserialize)]
+struct CheckBody {
+    repo: String,
+    tree: String,
+    base: String,
+}
+
+async fn check_commit(
+    State(s): State<Arc<AppState>>,
+    Json(b): Json<CheckBody>,
+) -> ApiResult<crate::gate::CommitCheck> {
+    Ok(Json(s.gate.check_commit(&b.repo, &b.tree, &b.base)?))
 }
 
 /// The attestation verification key (public; pin it in CI).

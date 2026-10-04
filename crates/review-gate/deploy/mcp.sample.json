@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "review-gate": { "command": "review-gate", "args": ["mcp"] }
+  }
+}

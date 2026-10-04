@@ -40,6 +40,17 @@ pub struct ReviewInput {
     pub text: String,
 }
 
+/// Whether a commit of `tree` on top of `base` is covered by the gate (the hook asks this).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CommitCheck {
+    pub allowed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+    pub reason: String,
+}
+
 /// Result of recording a review against a task.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Recorded {
@@ -192,6 +203,63 @@ impl Gate {
             ),
         );
         Ok(r)
+    }
+
+    /// A commit in `repo` is allowed when no running task governs the repository, or when the
+    /// running task holds an unused approved review (strong enough) for exactly `tree` on `base`.
+    pub fn check_commit(
+        &self,
+        repo: &str,
+        tree: &str,
+        base: &str,
+    ) -> Result<CommitCheck, GateError> {
+        let repo = std::fs::canonicalize(repo)
+            .map_err(|e| GateError::Invalid(format!("repo {repo}: {e}")))?
+            .to_string_lossy()
+            .into_owned();
+        let Some(task) = self
+            .store
+            .list_tasks()?
+            .into_iter()
+            .find(|t| t.repo == repo && t.status == Status::Running)
+        else {
+            return Ok(CommitCheck {
+                allowed: true,
+                task: None,
+                review: None,
+                reason: "no running auto-iterate task for this repository".into(),
+            });
+        };
+        let count = self.store.review_count(&task.id, task.current_iteration)?;
+        for attempt in (1..=count).rev() {
+            let r = self
+                .store
+                .load_review(&task.id, &format!("v{}-{attempt}", task.current_iteration))?;
+            if task.history.iter().any(|h| h.review == r.id) {
+                continue;
+            }
+            if r.verdict == Verdict::Approved
+                && r.tree == tree
+                && r.base == base
+                && r.channel.strength() >= task.min_reviewer.strength()
+            {
+                return Ok(CommitCheck {
+                    allowed: true,
+                    reason: format!("covered by approved review {}", r.id),
+                    review: Some(r.id),
+                    task: Some(task.id),
+                });
+            }
+        }
+        Ok(CommitCheck {
+            allowed: false,
+            reason: format!(
+                "task {} 第 {} 版没有覆盖当前暂存内容（tree {tree} on {base}）的通过审核：先审核，通过后原样提交",
+                task.id, task.current_iteration
+            ),
+            task: Some(task.id),
+            review: None,
+        })
     }
 
     /// Applies a review record. `commit`/`tag` are required when the review approved.
@@ -684,5 +752,56 @@ mod tests {
         assert!(Channel::Manual.strength() > Channel::ExternalApi.strength());
         assert!(Channel::WebGemini.strength() > Channel::ClaudeSubagent.strength());
         assert_eq!(Channel::ExternalApi.to_string(), "external-api(4)");
+    }
+
+    #[test]
+    fn check_commit_needs_an_unused_approved_review_of_the_staged_tree() {
+        let e = env();
+        let repo = e.repo.to_string_lossy().to_string();
+        let head = sh(&e.repo, &["rev-parse", "HEAD"]).trim().to_string();
+        let free = e.gate.check_commit(&repo, "x", &head).unwrap();
+        assert!(
+            free.allowed && free.task.is_none(),
+            "no task: anything goes"
+        );
+
+        init(&e, "t", 2, Channel::WebGemini);
+        let rej = review(&e, "t", "v1\n", Verdict::Rejected, Channel::WebGemini);
+        let c = e.gate.check_commit(&repo, &rej.tree, &rej.base).unwrap();
+        assert!(!c.allowed && c.task.as_deref() == Some("t"));
+        let weak = review(&e, "t", "v1\n", Verdict::Approved, Channel::SelfReview);
+        assert!(
+            !e.gate
+                .check_commit(&repo, &weak.tree, &weak.base)
+                .unwrap()
+                .allowed,
+            "too weak"
+        );
+        let ok = review(&e, "t", "v1\n", Verdict::Approved, Channel::WebGemini);
+        let c = e.gate.check_commit(&repo, &ok.tree, &ok.base).unwrap();
+        assert!(
+            c.allowed && c.review.as_deref() == Some(ok.id.as_str()),
+            "{c:?}"
+        );
+        assert!(
+            !e.gate
+                .check_commit(&repo, &rej.base, &rej.base)
+                .unwrap()
+                .allowed,
+            "other tree"
+        );
+
+        sh(&e.repo, &["commit", "-qm", "v1"]);
+        sh(&e.repo, &["tag", "v1"]);
+        e.gate
+            .record("t", &ok.id, Some("HEAD"), Some("v1"))
+            .unwrap();
+        assert!(
+            !e.gate
+                .check_commit(&repo, &ok.tree, &ok.base)
+                .unwrap()
+                .allowed,
+            "used review"
+        );
     }
 }

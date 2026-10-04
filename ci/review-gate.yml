@@ -1,0 +1,49 @@
+# Verifies that every commit pushed to the protected branches carries a review-gate attestation
+# signed by the gate's key. Copy to .github/workflows/review-gate.yml (needs a human with the
+# `workflow` scope — the implementer cannot change this file, which is the point).
+#
+# Merge commits fail the check (an "evil merge" could carry unreviewed content): integrate with
+# fast-forward / rebase only, or add --allow-merges if you accept that risk.
+#
+# Fill in:
+#   REVIEW_GATE_PUBKEY  output of `review-gate pubkey` (or `curl http://127.0.0.1:7878/pubkey`)
+#   REVIEW_GATE_SINCE   the last commit NOT under the gate; everything after it must be attested
+#   VERIFIER_REF        a commit of victormshan/WebUI-AutoTest whose review-gate you trust.
+#                       The verifier is never built from the commits being verified.
+name: review-gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REVIEW_GATE_PUBKEY: "PASTE-PUBLIC-KEY"
+  REVIEW_GATE_SINCE: "PASTE-COMMIT-SHA"
+  VERIFIER_REF: "PASTE-COMMIT-SHA"
+
+jobs:
+  attestations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: repo
+      - name: Fetch attestation notes
+        run: git -C repo fetch origin "refs/notes/review-gate:refs/notes/review-gate"
+      - name: Check out the pinned verifier
+        uses: actions/checkout@v4
+        with:
+          repository: victormshan/WebUI-AutoTest
+          ref: ${{ env.VERIFIER_REF }}
+          path: verifier
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build verifier
+        run: cargo build --release --locked -p review-gate --manifest-path verifier/Cargo.toml
+      - name: Verify
+        run: |
+          head=${{ github.event.pull_request.head.sha || github.sha }}
+          verifier/target/release/review-gate verify-range --repo repo \
+            --pubkey "$REVIEW_GATE_PUBKEY" "$REVIEW_GATE_SINCE..$head"

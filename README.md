@@ -217,3 +217,10 @@ cargo test -p webtest -- --ignored           # 端到端：通过、改名、金
 `run` 的常用参数：`--max-steps`、`--model`（默认 `claude-sonnet-5-5`）、`--deny 删除,delete`（拒绝操作含这些关键词的元素）、`--headed`、`--out`。
 
 调试：`webtest repl` 从标准输入读取 `<工具名> <JSON参数>`，逐行调用并打印结果。
+
+## review-gate：自动迭代的独立审核门
+
+`crates/review-gate` 是 auto-iterate 的审核门，以独立系统用户 `reviewgate` 运行的 Rust 服务（HTTP + MCP + Claude Code 钩子）。
+每一版由另一家厂商的模型审核，通过后由审核门签名（ed25519），签名作为 git note 附在提交上，CI 用钉死的公钥逐个验证。
+安装、用法和 HTTP 接口见 [crates/review-gate/README.md](crates/review-gate/README.md)；CI 模板在 `ci/review-gate.yml`。
+`webtest` 的交叉评审可以直接用 `--review-command "review-gate ask"`。

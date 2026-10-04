@@ -1,0 +1,22 @@
+# systemd unit for the review gate. Installed by deploy/install.sh.
+[Unit]
+Description=review-gate: independent review gate for auto-iterate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=reviewgate
+Group=reviewgate
+EnvironmentFile=-/etc/review-gate/env
+ExecStart=/usr/local/bin/review-gate serve --state /var/lib/reviewgate/state --listen 127.0.0.1:7878 --token-file /etc/review-gate/client.token --relay-dir /var/lib/reviewgate/relay
+Restart=on-failure
+RestartSec=3
+UMask=0022
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/reviewgate
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
