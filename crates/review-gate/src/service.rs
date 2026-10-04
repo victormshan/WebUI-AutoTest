@@ -338,7 +338,7 @@ pub async fn serve(state: Arc<AppState>, listener: tokio::net::TcpListener) -> s
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::client::Client;
     use crate::reviewer::tests::{cfg, mock_bridge};
@@ -347,16 +347,16 @@ mod tests {
     use std::fs;
     use std::time::Duration;
 
-    const TOKEN: &str = "test-token-0123456789abcdef0123456789";
+    pub(crate) const TOKEN: &str = "test-token-0123456789abcdef0123456789";
 
-    struct Env {
-        _dir: tempfile::TempDir,
-        repo: std::path::PathBuf,
-        url: String,
-        client: Client,
+    pub(crate) struct Env {
+        pub(crate) _dir: tempfile::TempDir,
+        pub(crate) repo: std::path::PathBuf,
+        pub(crate) url: String,
+        pub(crate) client: Client,
     }
 
-    async fn start(bridge: &str) -> Env {
+    pub(crate) async fn start(bridge: &str) -> Env {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir(&repo).unwrap();

@@ -1,7 +1,7 @@
 //! review-gate command line.
 //!
 //! Service side (runs as the `reviewgate` system user): `serve`, `admin manual`.
-//! Implementer side (talks to the service over HTTP): `task`, `stage`, `review`, `record`.
+//! Implementer side (talks to the service over HTTP): `task`, `stage`, `review`, `record`, `mcp`.
 //! Standalone: `ask` (one question to an external AI), `verify`/`verify-range` (attestations, for CI).
 
 use std::io::Read;
@@ -15,12 +15,12 @@ use clap::{Parser, Subcommand};
 use review_gate::attest::{self, Keypair};
 use review_gate::client::Client;
 use review_gate::gate::Gate;
-use review_gate::model::{Channel, Task};
+use review_gate::model::Channel;
 use review_gate::relay::RelayTrace;
 use review_gate::reviewer::{self, AskError, ReviewerConfig};
 use review_gate::service::{self, AppState, Job};
 use review_gate::store::Store;
-use review_gate::{git, review};
+use review_gate::{mcp, review};
 use serde_json::{Value, json};
 
 #[derive(Parser)]
@@ -104,6 +104,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AdminCmd,
     },
+    /// MCP server on stdio for Claude Code (forwards to the service with the implementer's token)
+    Mcp,
     /// Ask an external AI (another vendor): prompt on stdin, answer on stdout.
     /// Usable as webtest's `--review-command "review-gate ask"`.
     Ask {
@@ -278,7 +280,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Cmd::Stage { id } => {
             let c = Client::from_env()?;
-            let (tree, base) = stage(&c, &id).await?;
+            let (tree, base) = c.stage(&id).await?;
             print(&json!({ "tree": tree, "base": base }));
             Ok(ExitCode::SUCCESS)
         }
@@ -291,7 +293,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 },
         } => {
             let c = Client::from_env()?;
-            let (tree, base) = stage(&c, &id).await?;
+            let (tree, base) = c.stage(&id).await?;
             let evidence = match evidence {
                 Some(p) => std::fs::read_to_string(&p)
                     .with_context(|| format!("reading {}", p.display()))?,
@@ -318,7 +320,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             cmd: ReviewCmd::Submit { id, channel, file },
         } => {
             let c = Client::from_env()?;
-            let (tree, base) = stage(&c, &id).await?;
+            let (tree, base) = c.stage(&id).await?;
             let text = std::fs::read_to_string(&file)
                 .with_context(|| format!("reading {}", file.display()))?;
             let rec: Value = c
@@ -337,41 +339,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             tag,
         } => {
             let c = Client::from_env()?;
-            let v: Value = c
-                .post(
-                    &format!("/tasks/{id}/record"),
-                    json!({ "review": review, "commit": commit, "tag": tag }),
-                )
+            let v = c
+                .record(&id, &review, commit.as_deref(), tag.as_deref())
                 .await?;
-            // Attach the gate's signed attestation to the commit for CI to verify.
-            if let (Some(note), Some(commit)) = (
-                v["attestation"].as_str(),
-                v["task"]["history"]
-                    .as_array()
-                    .and_then(|h| h.last())
-                    .and_then(|h| h["commit"].as_str()),
-            ) {
-                let repo = v["task"]["repo"].as_str().unwrap_or(".");
-                git::git(
-                    std::path::Path::new(repo),
-                    &[
-                        "notes",
-                        &format!("--ref={}", attest::NOTES_REF),
-                        "add",
-                        "-f",
-                        "-m",
-                        note,
-                        commit,
-                    ],
-                )
-                .context("attaching the attestation note")?;
-                eprintln!(
-                    "attestation attached as git note ({}) on {commit}; push it with: git push origin {}",
-                    attest::NOTES_REF,
-                    attest::NOTES_REF
-                );
+            if let Some(n) = v["note"].as_str() {
+                eprintln!("{n}");
             }
             print(&v);
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Mcp => {
+            mcp::serve_stdio(Client::from_env()?).await?;
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Pubkey => {
@@ -462,12 +440,6 @@ fn load_pubkey(arg: &str) -> Result<ed25519_dalek::VerifyingKey> {
         arg.to_string()
     };
     attest::parse_public_key(&text)
-}
-
-/// Stages the task's repository locally (the implementer owns it) and returns (tree, base).
-async fn stage(c: &Client, id: &str) -> Result<(String, String)> {
-    let task: Task = c.get(&format!("/tasks/{id}")).await?;
-    Ok(git::stage_all(std::path::Path::new(&task.repo))?)
 }
 
 /// Exit codes: 0 answered · 3 no external AI available · 1 failed · 2 usage error.

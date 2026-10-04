@@ -6,7 +6,9 @@ use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::model::Task;
 use crate::service::Job;
+use crate::{attest, git};
 
 pub struct Client {
     base: String,
@@ -107,5 +109,49 @@ impl Client {
             }
             tokio::time::sleep(poll).await;
         }
+    }
+
+    /// Stages the task's repository locally (the implementer owns it) and returns (tree, base).
+    pub async fn stage(&self, task: &str) -> Result<(String, String)> {
+        let t: Task = self.get(&format!("/tasks/{task}")).await?;
+        Ok(git::stage_all(std::path::Path::new(&t.repo))?)
+    }
+
+    /// Applies a review; for an approved version also attaches the gate's signed attestation to
+    /// the commit as a git note (`refs/notes/review-gate`), which CI verifies.
+    pub async fn record(
+        &self,
+        task: &str,
+        review: &str,
+        commit: Option<&str>,
+        tag: Option<&str>,
+    ) -> Result<Value> {
+        let mut v: Value = self
+            .post(
+                &format!("/tasks/{task}/record"),
+                json!({ "review": review, "commit": commit, "tag": tag }),
+            )
+            .await?;
+        let committed = v["task"]["history"]
+            .as_array()
+            .and_then(|h| h.last())
+            .and_then(|h| h["commit"].as_str())
+            .map(str::to_string);
+        if let (Some(note), Some(commit)) =
+            (v["attestation"].as_str().map(str::to_string), committed)
+        {
+            let repo = v["task"]["repo"].as_str().unwrap_or(".").to_string();
+            let notes_ref = format!("--ref={}", attest::NOTES_REF);
+            git::git(
+                std::path::Path::new(&repo),
+                &["notes", &notes_ref, "add", "-f", "-m", &note, &commit],
+            )
+            .context("attaching the attestation note")?;
+            v["note"] = json!(format!(
+                "attestation attached to {commit} as a git note; push it with: git push origin {}",
+                attest::NOTES_REF
+            ));
+        }
+        Ok(v)
     }
 }

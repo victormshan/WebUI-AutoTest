@@ -1456,6 +1456,7 @@ dependencies = [
  "getrandom 0.4.3",
  "llm",
  "reqwest",
+ "rmcp",
  "serde",
  "serde_json",
  "sha2",

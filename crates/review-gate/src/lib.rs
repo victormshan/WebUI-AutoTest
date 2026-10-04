@@ -7,6 +7,7 @@ pub mod attest;
 pub mod client;
 pub mod gate;
 pub mod git;
+pub mod mcp;
 pub mod model;
 pub mod relay;
 pub mod review;
