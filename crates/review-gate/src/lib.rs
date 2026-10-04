@@ -6,6 +6,8 @@
 pub mod gate;
 pub mod git;
 pub mod model;
+pub mod review;
+pub mod reviewer;
 pub mod store;
 
 use model::Status;

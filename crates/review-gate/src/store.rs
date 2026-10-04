@@ -116,6 +116,38 @@ impl Store {
         }
         read_json(&p).map_err(GateError::Io)
     }
+
+    /// Reviewer answers keyed by prompt hash, so an interrupted multi-chunk review can resume.
+    pub fn cache_get<T: DeserializeOwned>(
+        &self,
+        task: &str,
+        key: &str,
+    ) -> Result<Option<T>, GateError> {
+        if !valid_id(key) {
+            return Err(GateError::InvalidId(key.to_string()));
+        }
+        let p = self
+            .root
+            .join("cache")
+            .join(task)
+            .join(format!("{key}.json"));
+        if !valid_id(task) {
+            return Err(GateError::InvalidId(task.to_string()));
+        }
+        if !p.exists() {
+            return Ok(None);
+        }
+        read_json(&p).map(Some).map_err(GateError::Io)
+    }
+
+    pub fn cache_put<T: Serialize>(&self, task: &str, key: &str, v: &T) -> Result<(), GateError> {
+        if !valid_id(task) || !valid_id(key) {
+            return Err(GateError::InvalidId(format!("{task}/{key}")));
+        }
+        let dir = self.root.join("cache").join(task);
+        create_private_dir(&dir).map_err(GateError::Io)?;
+        write_json(&dir.join(format!("{key}.json")), v).map_err(GateError::Io)
+    }
 }
 
 fn create_private_dir(p: &Path) -> Result<()> {
