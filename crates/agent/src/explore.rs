@@ -867,7 +867,7 @@ mod tests {
         let r = ExploreReport {
             start_url: "http://x/".into(),
             tasks: vec![t],
-            reviewer: Some("command (node external-ai.mjs)".into()),
+            reviewer: Some("command (review-gate ask)".into()),
             proposal_reviews: vec![ProposalReview {
                 state: "a".into(),
                 claude: vec!["login".into(), "delete".into()],

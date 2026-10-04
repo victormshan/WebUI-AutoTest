@@ -28,7 +28,7 @@ pub enum Provider {
     Anthropic,
     OpenAi,
     ClaudeCli,
-    /// Any external command: prompt on stdin, answer on stdout (e.g. external-ai.mjs).
+    /// Any external command: prompt on stdin, answer on stdout (e.g. `review-gate ask`).
     Command,
 }
 

@@ -198,8 +198,8 @@ struct ExploreArgs {
     #[arg(long)]
     url: String,
     /// External AI cross-reviewer: shell command reading the prompt on stdin and printing the
-    /// answer, e.g. "node /mnt/d/dsh/claude-step-relay/tools/external-ai.mjs". Without it the
-    /// WEBTEST_REVIEW_* environment variables are used (see README); none = no cross-review.
+    /// answer, e.g. "review-gate ask". Without it the WEBTEST_REVIEW_* environment variables are
+    /// used (see README); none = no cross-review.
     #[arg(long)]
     review_command: Option<String>,
     /// Test data the agent may use, e.g. "账号 alice / 密码 secret123"

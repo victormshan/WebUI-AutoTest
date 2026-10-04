@@ -174,11 +174,11 @@ WEBTEST_LLM_PROVIDER=openai WEBTEST_LLM_BASE_URL=http://localhost:11434/v1 WEBTE
 
 ```bash
 webtest explore --url <url> --context "…" \
-  --review-command "node /mnt/d/dsh/claude-step-relay/tools/external-ai.mjs"
-webtest check-llm --review-command "node …/external-ai.mjs"      # 先确认评审者可用
+  --review-command "review-gate ask"
+webtest check-llm --review-command "review-gate ask"      # 先确认评审者可用
 ```
 
-`external-ai.mjs`（在 claude-step-relay 仓库）依次尝试 Gemini API → OpenAI 兼容（DeepSeek）→ dsh-web-relay 的 web-gemini 网页通道（bridge `localhost:8899`，在 WSL 里自动经 Windows `curl.exe` 访问）。也可以不用命令，改用环境变量配置评审者：`WEBTEST_REVIEW_LLM_PROVIDER` / `WEBTEST_REVIEW_LLM_COMMAND` / `WEBTEST_REVIEW_MODEL` 等，它们与上表的 `WEBTEST_*` 一一对应。
+`review-gate ask`（本仓库 `crates/review-gate`，`cargo build --release -p review-gate`）从 stdin 读提示、向 stdout 输出回答，依次尝试 Gemini API → OpenAI 兼容（DeepSeek）→ dsh-web-gemini-ext 的 web-gemini 网页通道（bridge `localhost:8899`，在 WSL 里自动经 Windows `curl.exe` 访问）；`review-gate ask --probe` 列出可用的评审者。原先 claude-step-relay 里的 `tools/external-ai.mjs` 已停用。也可以不用命令，改用环境变量配置评审者：`WEBTEST_REVIEW_LLM_PROVIDER` / `WEBTEST_REVIEW_LLM_COMMAND` / `WEBTEST_REVIEW_MODEL` 等，它们与上表的 `WEBTEST_*` 一一对应。
 
 评审者做两件事：
 
