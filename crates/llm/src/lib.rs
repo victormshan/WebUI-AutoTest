@@ -499,9 +499,15 @@ impl Llm for CommandLlm {
             .spawn()
             .with_context(|| format!("failed to run `{}`", self.command))?;
         let mut stdin = child.stdin.take().expect("stdin piped");
-        stdin
+        // A command that exits without reading the whole prompt closes the pipe; report its exit
+        // status and stderr below instead of a bare "Broken pipe".
+        if let Err(e) = stdin
             .write_all(format!("{system}\n\n{user}").as_bytes())
-            .await?;
+            .await
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(e.into());
+        }
         drop(stdin);
         let out = child.wait_with_output().await?;
         if !out.status.success() {
@@ -703,6 +709,10 @@ mod tests {
             command: "echo boom >&2; exit 3".into(),
         };
         let e = bad.complete("s", "u").await.unwrap_err().to_string();
+        assert!(e.contains("boom") && e.contains("3"), "{e}");
+        // Exits without reading a prompt larger than the pipe buffer: always a broken pipe.
+        let big = "x".repeat(1 << 20);
+        let e = bad.complete("s", &big).await.unwrap_err().to_string();
         assert!(e.contains("boom") && e.contains("3"), "{e}");
     }
 
