@@ -3,11 +3,13 @@
 //! reviews each version; this gate — running as its own system user, with a private store —
 //! decides whether a version may be committed.
 
+pub mod client;
 pub mod gate;
 pub mod git;
 pub mod model;
 pub mod review;
 pub mod reviewer;
+pub mod service;
 pub mod store;
 
 use model::Status;

@@ -6,7 +6,10 @@ use std::process::Command;
 use crate::GateError;
 
 pub fn git(repo: &Path, args: &[&str]) -> Result<String, GateError> {
+    // The gate runs as its own system user and reads repositories owned by the implementer:
+    // without this git refuses them as "dubious ownership". Writes happen only client-side.
     let out = Command::new("git")
+        .args(["-c", "safe.directory=*"])
         .arg("-C")
         .arg(repo)
         .args(args)

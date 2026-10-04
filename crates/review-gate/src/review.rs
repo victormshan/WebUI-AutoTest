@@ -97,25 +97,42 @@ pub struct Staged {
     pub per_file: Vec<(String, String)>,
 }
 
-pub fn stage(repo: &Path) -> Result<Staged, GateError> {
-    let (tree, base) = git::stage_all(repo)?;
-    let stat = git::git(repo, &["diff", "--cached", "--stat"])?;
+/// Reads what a version changes, **read-only**: the client staged it (`git add -A` +
+/// `git write-tree`) and sends `tree`/`base`; the gate (another system user, read access only)
+/// diffs `base..tree` itself. `base` must still be the repository's HEAD.
+pub fn staged_from(repo: &Path, tree: &str, base: &str) -> Result<Staged, GateError> {
+    let is_hex = |s: &str| s.len() >= 40 && s.chars().all(|c| c.is_ascii_hexdigit());
+    if !is_hex(tree) || !is_hex(base) {
+        return Err(GateError::Invalid(
+            "tree and base must be full object ids".into(),
+        ));
+    }
+    if git::git(repo, &["cat-file", "-t", tree])? != "tree" {
+        return Err(GateError::Invalid(format!("{tree} is not a tree")));
+    }
+    let head = git::rev_parse(repo, "HEAD")?;
+    if head != base {
+        return Err(GateError::Mismatch(format!(
+            "base {base} is not the repository HEAD {head}"
+        )));
+    }
+    let stat = git::git(repo, &["diff", "--stat", base, tree])?;
     if stat.is_empty() {
         return Err(GateError::Invalid(
             "nothing staged: this version has no changes to review".into(),
         ));
     }
-    let names = git::git(repo, &["diff", "--cached", "--name-only"])?;
+    let names = git::git(repo, &["diff", "--name-only", base, tree])?;
     let mut per_file = Vec::new();
     for f in names.lines().filter(|l| !l.is_empty()) {
         per_file.push((
             f.to_string(),
-            git::git(repo, &["diff", "--cached", "--", f])? + "\n",
+            git::git(repo, &["diff", base, tree, "--", f])? + "\n",
         ));
     }
     Ok(Staged {
-        tree,
-        base,
+        tree: tree.to_string(),
+        base: base.to_string(),
         stat,
         per_file,
     })
@@ -185,6 +202,8 @@ fn previous_rejections(gate: &Gate, task: &Task) -> Vec<String> {
 pub async fn run(
     gate: &Gate,
     task_id: &str,
+    tree: &str,
+    base: &str,
     evidence: &str,
     provider: Option<&str>,
     cfg: &ReviewerConfig,
@@ -193,7 +212,7 @@ pub async fn run(
     if task.status != Status::Running {
         return Err(GateError::NotRunning(task.id.clone(), task.status).into());
     }
-    let staged = stage(Path::new(&task.repo))?;
+    let staged = staged_from(Path::new(&task.repo), tree, base)?;
     let previous = previous_rejections(gate, &task);
     let full: String = staged.per_file.iter().map(|(_, d)| d.as_str()).collect();
     let bodies: Vec<String> = if full.len() <= CHUNK_CHARS {
@@ -286,6 +305,48 @@ pub async fn run(
     Ok(record)
 }
 
+/// Stores a review that did not come from an external model: a weaker channel
+/// (`claude-subagent`, `self-review`) or a human (`manual`, admin command only). The text must
+/// carry a VERDICT line; the record is bound to the given staged tree like any other.
+pub fn submit(
+    gate: &Gate,
+    task_id: &str,
+    tree: &str,
+    base: &str,
+    channel: crate::model::Channel,
+    text: &str,
+) -> Result<ReviewRecord, GateError> {
+    use crate::model::Channel;
+    if matches!(channel, Channel::ExternalApi | Channel::WebGemini) {
+        return Err(GateError::Invalid(
+            "external-model reviews are produced by the gate itself".into(),
+        ));
+    }
+    let task = gate.store().load_task(task_id)?;
+    let staged = staged_from(Path::new(&task.repo), tree, base)?;
+    let verdict = parse_verdict(text).ok_or_else(|| {
+        GateError::Invalid("review text needs a `VERDICT: APPROVED|REJECTED` line".into())
+    })?;
+    gate.add_review(
+        &task,
+        ReviewInput {
+            tree: staged.tree,
+            base: staged.base,
+            verdict,
+            channel,
+            provider: channel.as_str().to_string(),
+            model: None,
+            family: if channel == Channel::Manual {
+                "human".into()
+            } else {
+                task.implementer_family.clone()
+            },
+            prompt_sha: String::new(),
+            text: text.to_string(),
+        },
+    )
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -298,6 +359,33 @@ mod tests {
     use crate::reviewer::tests::{cfg, mock_bridge};
     use crate::store::Store;
     use std::fs;
+
+    #[test]
+    fn staged_from_is_read_only_and_checks_inputs() {
+        let d = tempfile::tempdir().unwrap();
+        let (_gate, repo) = setup(d.path());
+        fs::write(repo.join("a.txt"), "changed\n").unwrap();
+        let (tree, base) = git::stage_all(&repo).unwrap();
+        let s = staged_from(&repo, &tree, &base).unwrap();
+        assert_eq!(s.per_file[0].0, "a.txt");
+        assert!(s.per_file[0].1.contains("+changed"));
+        assert!(matches!(
+            staged_from(&repo, "HEAD", &base),
+            Err(GateError::Invalid(_))
+        ));
+        assert!(
+            matches!(staged_from(&repo, &base, &base), Err(GateError::Invalid(_))),
+            "a commit id is not a tree"
+        );
+        git::git(&repo, &["commit", "-qm", "moved on"]).unwrap();
+        assert!(
+            matches!(
+                staged_from(&repo, &tree, &base),
+                Err(GateError::Mismatch(_))
+            ),
+            "stale base"
+        );
+    }
 
     #[test]
     fn verdicts() {
@@ -360,7 +448,8 @@ mod tests {
         let (gate, repo) = setup(d.path());
         fs::write(repo.join("a.txt"), "v1-change\n").unwrap();
         let (url, prompts) = mock_bridge(vec![Ok("VERDICT: APPROVED\n\n无")]).await;
-        let r = run(&gate, "t", "tests: ok", None, &cfg(&url))
+        let (tree, base) = git::stage_all(&repo).unwrap();
+        let r = run(&gate, "t", &tree, &base, "tests: ok", None, &cfg(&url))
             .await
             .unwrap();
         assert_eq!(
@@ -389,7 +478,10 @@ mod tests {
             Ok("VERDICT: REJECTED\n【阻断】b"),
         ])
         .await;
-        let r = run(&gate, "t", "", None, &cfg(&url)).await.unwrap();
+        let (tree, base) = git::stage_all(&repo).unwrap();
+        let r = run(&gate, "t", &tree, &base, "", None, &cfg(&url))
+            .await
+            .unwrap();
         assert_eq!(r.verdict, Verdict::Rejected);
         let p = prompts.lock().unwrap();
         assert_eq!(p.len(), 2);
@@ -412,9 +504,16 @@ mod tests {
             Ok("VERDICT: APPROVED"),
         ])
         .await;
-        assert!(run(&gate, "t", "", None, &cfg(&url)).await.is_err());
+        let (tree, base) = git::stage_all(&repo).unwrap();
+        assert!(
+            run(&gate, "t", &tree, &base, "", None, &cfg(&url))
+                .await
+                .is_err()
+        );
         assert_eq!(prompts.lock().unwrap().len(), 5);
-        let r = run(&gate, "t", "", None, &cfg(&url)).await.unwrap();
+        let r = run(&gate, "t", &tree, &base, "", None, &cfg(&url))
+            .await
+            .unwrap();
         assert_eq!(prompts.lock().unwrap().len(), 6, "chunk 1 reused");
         assert!(r.text.contains("复用先前对同一提示的审核"));
         assert_eq!(r.verdict, Verdict::Approved);

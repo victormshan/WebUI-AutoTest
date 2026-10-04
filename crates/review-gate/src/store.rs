@@ -29,6 +29,7 @@ impl Store {
         create_private_dir(&root)?;
         create_private_dir(&root.join("tasks"))?;
         create_private_dir(&root.join("reviews"))?;
+        create_private_dir(&root.join("cache"))?;
         Ok(Self { root })
     }
 
@@ -197,7 +198,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let s = Store::open(d.path().join("state")).unwrap();
-        for sub in ["", "tasks", "reviews"] {
+        s.cache_put("t", "k", &1u8).unwrap();
+        for sub in ["", "tasks", "reviews", "cache", "cache/t"] {
             let mode = fs::metadata(s.root().join(sub))
                 .unwrap()
                 .permissions()
