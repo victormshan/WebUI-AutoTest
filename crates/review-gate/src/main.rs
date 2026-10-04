@@ -2,7 +2,7 @@
 //!
 //! Service side (runs as the `reviewgate` system user): `serve`, `admin manual`.
 //! Implementer side (talks to the service over HTTP): `task`, `stage`, `review`, `record`.
-//! Standalone: `ask` (one question to an external AI).
+//! Standalone: `ask` (one question to an external AI), `verify`/`verify-range` (attestations, for CI).
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -12,9 +12,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use review_gate::attest::{self, Keypair};
 use review_gate::client::Client;
 use review_gate::gate::Gate;
 use review_gate::model::{Channel, Task};
+use review_gate::relay::RelayTrace;
 use review_gate::reviewer::{self, AskError, ReviewerConfig};
 use review_gate::service::{self, AppState, Job};
 use review_gate::store::Store;
@@ -44,6 +46,32 @@ enum Cmd {
         /// File with the bearer token clients must present
         #[arg(long, default_value = "/etc/review-gate/client.token")]
         token_file: PathBuf,
+        /// claude-step-relay data dir: the gate writes `traces/<exprId>.gate.md` there
+        #[arg(long)]
+        relay_dir: Option<PathBuf>,
+    },
+    /// Print the gate's attestation public key (pin it in CI)
+    Pubkey,
+    /// Verify the attestation note on one commit (no service needed)
+    Verify {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Base64 ed25519 public key, or a file containing it
+        #[arg(long)]
+        pubkey: String,
+        #[arg(default_value = "HEAD")]
+        rev: String,
+    },
+    /// Verify every commit in a range such as `origin/main..HEAD` (exit 1 if any fails)
+    VerifyRange {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long)]
+        pubkey: String,
+        /// Skip merge commits instead of failing them
+        #[arg(long)]
+        allow_merges: bool,
+        range: String,
     },
     /// Manage auto-iterate tasks
     Task {
@@ -163,6 +191,9 @@ enum AdminCmd {
         /// The human's review; must contain `VERDICT: APPROVED|REJECTED`
         #[arg(long)]
         file: PathBuf,
+        /// Same as `serve --relay-dir`, so the verdict also appears in the relay trace
+        #[arg(long)]
+        relay_dir: Option<PathBuf>,
     },
 }
 
@@ -187,6 +218,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             state,
             listen,
             token_file,
+            relay_dir,
         } => {
             let token = std::fs::read_to_string(&token_file)
                 .with_context(|| format!("reading token {}", token_file.display()))?
@@ -197,7 +229,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 "token in {} is too short (need >= 32 chars)",
                 token_file.display()
             );
-            let gate = Gate::new(Store::open(&state)?);
+            let mut gate =
+                Gate::new(Store::open(&state)?).with_signer(Keypair::load_or_create(&state)?);
+            if let Some(dir) = relay_dir {
+                gate = gate.with_relay(RelayTrace::new(dir));
+            }
             let app = Arc::new(AppState::new(gate, ReviewerConfig::from_env(), token));
             let listener = tokio::net::TcpListener::bind(&listen)
                 .await
@@ -307,8 +343,81 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     json!({ "review": review, "commit": commit, "tag": tag }),
                 )
                 .await?;
+            // Attach the gate's signed attestation to the commit for CI to verify.
+            if let (Some(note), Some(commit)) = (
+                v["attestation"].as_str(),
+                v["task"]["history"]
+                    .as_array()
+                    .and_then(|h| h.last())
+                    .and_then(|h| h["commit"].as_str()),
+            ) {
+                let repo = v["task"]["repo"].as_str().unwrap_or(".");
+                git::git(
+                    std::path::Path::new(repo),
+                    &[
+                        "notes",
+                        &format!("--ref={}", attest::NOTES_REF),
+                        "add",
+                        "-f",
+                        "-m",
+                        note,
+                        commit,
+                    ],
+                )
+                .context("attaching the attestation note")?;
+                eprintln!(
+                    "attestation attached as git note ({}) on {commit}; push it with: git push origin {}",
+                    attest::NOTES_REF,
+                    attest::NOTES_REF
+                );
+            }
             print(&v);
             Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Pubkey => {
+            let v: Value = Client::from_env()?.get("/pubkey").await?;
+            println!("{}", v["key"].as_str().unwrap_or_default());
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Verify { repo, pubkey, rev } => {
+            let key = load_pubkey(&pubkey)?;
+            match attest::verify_commit(&repo, &rev, &key) {
+                Ok(st) => {
+                    println!(
+                        "ok {} task {} version {} review {} by {}",
+                        st.commit, st.task, st.version, st.review, st.reviewer
+                    );
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(e) => {
+                    eprintln!("FAIL {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            }
+        }
+        Cmd::VerifyRange {
+            repo,
+            pubkey,
+            allow_merges,
+            range,
+        } => {
+            let key = load_pubkey(&pubkey)?;
+            let (ok, bad) = attest::verify_range(&repo, &range, &key, allow_merges)?;
+            for st in &ok {
+                println!(
+                    "ok {} task {} version {} review {} by {}",
+                    st.commit, st.task, st.version, st.review, st.reviewer
+                );
+            }
+            for e in &bad {
+                println!("FAIL {e}");
+            }
+            println!("{} verified, {} failed", ok.len(), bad.len());
+            Ok(if bad.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
         }
         Cmd::Admin {
             cmd:
@@ -318,9 +427,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     tree,
                     base,
                     file,
+                    relay_dir,
                 },
         } => {
-            let gate = Gate::new(Store::open(&state)?);
+            let mut gate = Gate::new(Store::open(&state)?);
+            if let Some(dir) = relay_dir {
+                gate = gate.with_relay(RelayTrace::new(dir));
+            }
             let text = std::fs::read_to_string(&file)
                 .with_context(|| format!("reading {}", file.display()))?;
             print(&review::submit(
@@ -339,6 +452,16 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             probe,
         } => Ok(ask(&provider, json, probe).await),
     }
+}
+
+fn load_pubkey(arg: &str) -> Result<ed25519_dalek::VerifyingKey> {
+    let p = std::path::Path::new(arg);
+    let text = if p.is_file() {
+        std::fs::read_to_string(p)?
+    } else {
+        arg.to_string()
+    };
+    attest::parse_public_key(&text)
 }
 
 /// Stages the task's repository locally (the implementer owns it) and returns (tree, base).

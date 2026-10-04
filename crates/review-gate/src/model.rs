@@ -104,6 +104,9 @@ pub struct HistoryEntry {
     pub commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+    /// Signed attestation text (approved versions, when the gate has a signing key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<String>,
     pub at: DateTime<Utc>,
 }
 

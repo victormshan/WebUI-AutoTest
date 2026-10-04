@@ -8,7 +8,9 @@ use std::path::Path;
 
 use chrono::Utc;
 
+use crate::attest::{self, Keypair, Statement};
 use crate::model::{Action, Channel, HistoryEntry, Outcome, ReviewRecord, Status, Task, Verdict};
+use crate::relay::RelayTrace;
 use crate::store::{Store, valid_id};
 use crate::{GateError, git};
 
@@ -47,11 +49,42 @@ pub struct Recorded {
 
 pub struct Gate {
     store: Store,
+    signer: Option<Keypair>,
+    relay: Option<RelayTrace>,
 }
 
 impl Gate {
     pub fn new(store: Store) -> Self {
-        Self { store }
+        Self {
+            store,
+            signer: None,
+            relay: None,
+        }
+    }
+
+    /// Sign an attestation for every approved version.
+    pub fn with_signer(mut self, signer: Keypair) -> Self {
+        self.signer = Some(signer);
+        self
+    }
+
+    /// Write the gate's own entries into claude-step-relay's trace for linked tasks.
+    pub fn with_relay(mut self, relay: RelayTrace) -> Self {
+        self.relay = Some(relay);
+        self
+    }
+
+    pub fn public_key(&self) -> Option<String> {
+        self.signer.as_ref().map(Keypair::public_b64)
+    }
+
+    /// Best effort: the trace is a record for humans, never a reason to fail a gate decision.
+    fn trace(&self, task: &Task, text: &str) {
+        if let (Some(relay), Some(expr)) = (&self.relay, &task.expr_id)
+            && let Err(e) = relay.append(expr, text)
+        {
+            eprintln!("review-gate: relay trace for {expr}: {e:#}");
+        }
     }
 
     pub fn store(&self) -> &Store {
@@ -142,6 +175,22 @@ impl Gate {
             at: Utc::now(),
         };
         self.store.save_review(&r)?;
+        self.trace(
+            task,
+            &format!(
+                "第 {}/{} 版审核记录 {}（{} · {}{}）\n\n{}",
+                task.current_iteration,
+                task.iterations,
+                r.id,
+                r.channel,
+                r.provider,
+                r.model
+                    .as_deref()
+                    .map(|m| format!(" · {m}"))
+                    .unwrap_or_default(),
+                r.text.trim()
+            ),
+        );
         Ok(r)
     }
 
@@ -178,6 +227,7 @@ impl Gate {
             channel: r.channel,
             commit,
             tag,
+            attestation: None,
             at: now,
         };
 
@@ -192,6 +242,7 @@ impl Gate {
             ));
             task.updated_at = now;
             self.store.save_task(&task)?;
+            self.trace(&task, task.stop_reason.as_deref().unwrap_or_default());
             return Ok(Recorded {
                 action: Action::Pause,
                 task,
@@ -238,11 +289,40 @@ impl Gate {
                         "tag {tag} 没有指向 {commit_id}"
                     )));
                 }
-                task.history.push(entry(
+                let mut e = entry(
                     Outcome::Approved,
-                    Some(commit_id),
+                    Some(commit_id.clone()),
                     Some(tag.to_string()),
-                ));
+                );
+                e.attestation = self.signer.as_ref().map(|kp| {
+                    attest::sign(
+                        kp,
+                        &Statement {
+                            task: task.id.clone(),
+                            version: format!("{}/{}", task.current_iteration, task.iterations),
+                            commit: commit_id.clone(),
+                            tree: tree.clone(),
+                            parent: parents[0].clone(),
+                            review: r.id.clone(),
+                            reviewer: format!("{}/{}", r.channel.as_str(), r.provider),
+                            verdict: "approved".into(),
+                            at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        },
+                    )
+                });
+                let note = format!(
+                    "第 {}/{} 版通过：commit {commit_id} · tag {tag} · 审核 {} {}{}",
+                    task.current_iteration,
+                    task.iterations,
+                    r.channel,
+                    r.id,
+                    if e.attestation.is_some() {
+                        " · 已签名证明"
+                    } else {
+                        ""
+                    }
+                );
+                task.history.push(e);
                 task.reject_streak = 0;
                 task.current_iteration += 1;
                 let action = if task.current_iteration > task.iterations {
@@ -253,6 +333,7 @@ impl Gate {
                 };
                 task.updated_at = now;
                 self.store.save_task(&task)?;
+                self.trace(&task, &note);
                 Ok(Recorded { action, task })
             }
             Verdict::Rejected => {
@@ -270,6 +351,19 @@ impl Gate {
                 };
                 task.updated_at = now;
                 self.store.save_task(&task)?;
+                self.trace(
+                    &task,
+                    &format!(
+                        "第 {} 版打回（{}，连续第 {} 次）{}",
+                        task.current_iteration,
+                        r.id,
+                        task.reject_streak,
+                        task.stop_reason
+                            .as_deref()
+                            .map(|s| format!("——{s}"))
+                            .unwrap_or_default()
+                    ),
+                );
                 Ok(Recorded { action, task })
             }
         }

@@ -99,6 +99,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(middleware::from_fn_with_state(state.clone(), auth));
     Router::new()
         .route("/health", get(health))
+        .route("/pubkey", get(pubkey))
         .merge(api)
         .with_state(state)
 }
@@ -297,6 +298,17 @@ async fn submit_review(
     )?))
 }
 
+/// The attestation verification key (public; pin it in CI).
+async fn pubkey(State(s): State<Arc<AppState>>) -> ApiResult<Value> {
+    match s.gate.public_key() {
+        Some(k) => Ok(Json(json!({ "algorithm": "ed25519", "key": k }))),
+        None => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "this gate does not sign attestations".into(),
+        )),
+    }
+}
+
 #[derive(Deserialize)]
 struct RecordBody {
     review: String,
@@ -315,7 +327,10 @@ async fn record(
     let out = s
         .gate
         .record(&id, &b.review, b.commit.as_deref(), b.tag.as_deref())?;
-    Ok(Json(json!({ "action": out.action, "task": out.task })))
+    let attestation = out.task.history.last().and_then(|h| h.attestation.clone());
+    Ok(Json(
+        json!({ "action": out.action, "task": out.task, "attestation": attestation }),
+    ))
 }
 
 pub async fn serve(state: Arc<AppState>, listener: tokio::net::TcpListener) -> std::io::Result<()> {
@@ -355,7 +370,9 @@ mod tests {
         fs::write(repo.join("a.txt"), "v0\n").unwrap();
         git::git(&repo, &["add", "-A"]).unwrap();
         git::git(&repo, &["commit", "-qm", "base"]).unwrap();
-        let gate = Gate::new(Store::open(dir.path().join("state")).unwrap());
+        let gate = Gate::new(Store::open(dir.path().join("state")).unwrap())
+            .with_signer(crate::attest::Keypair::load_or_create(&dir.path().join("state")).unwrap())
+            .with_relay(crate::relay::RelayTrace::new(dir.path().join("relay")));
         let state = Arc::new(AppState::new(gate, cfg(bridge), TOKEN.into()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -398,6 +415,10 @@ mod tests {
     async fn full_flow_over_http_external_review_then_record() {
         let (bridge, prompts) = mock_bridge(vec![Ok("VERDICT: APPROVED\n\n无")]).await;
         let e = start(&bridge).await;
+        e.client
+            .post::<Value>("/tasks/t/link", json!({ "expr_id": "x1" }))
+            .await
+            .unwrap();
         fs::write(e.repo.join("a.txt"), "v1\n").unwrap();
         let (tree, base) = git::stage_all(&e.repo).unwrap();
         let job = e
@@ -430,6 +451,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["action"], "finalize");
+
+        // The attestation verifies against /pubkey once attached as a note, and only for this commit.
+        let pk: Value = reqwest::get(format!("{}/pubkey", e.url))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let key = crate::attest::parse_public_key(pk["key"].as_str().unwrap()).unwrap();
+        let note = out["attestation"]
+            .as_str()
+            .expect("approved record is attested");
+        assert!(
+            crate::attest::verify_commit(&e.repo, "HEAD", &key).is_err(),
+            "no note yet"
+        );
+        git::git(
+            &e.repo,
+            &["notes", "--ref=review-gate", "add", "-m", note, "HEAD"],
+        )
+        .unwrap();
+        let st = crate::attest::verify_commit(&e.repo, "HEAD", &key).unwrap();
+        assert_eq!(
+            (st.version.as_str(), st.review.as_str()),
+            ("1/1", rec.id.as_str())
+        );
+        let (ok, bad) = crate::attest::verify_range(&e.repo, "HEAD~1..HEAD", &key, false).unwrap();
+        assert_eq!((ok.len(), bad.len()), (1, 0));
+        // An unreviewed commit on top fails the range check.
+        fs::write(e.repo.join("a.txt"), "sneaky\n").unwrap();
+        git::git(&e.repo, &["commit", "-qam", "sneaky"]).unwrap();
+        let (_, bad) = crate::attest::verify_range(&e.repo, "HEAD~2..HEAD", &key, false).unwrap();
+        assert_eq!(bad.len(), 1, "{bad:?}");
+        // Copying the note onto an amended commit does not help.
+        git::git(
+            &e.repo,
+            &["notes", "--ref=review-gate", "add", "-m", note, "HEAD"],
+        )
+        .unwrap();
+        assert!(crate::attest::verify_commit(&e.repo, "HEAD", &key).is_err());
+
+        let trace = fs::read_to_string(e._dir.path().join("relay/traces/x1.gate.md")).unwrap();
+        assert!(
+            trace.contains("审核记录 v1-1") && trace.contains("第 1/1 版通过"),
+            "{trace}"
+        );
     }
 
     #[tokio::test]
