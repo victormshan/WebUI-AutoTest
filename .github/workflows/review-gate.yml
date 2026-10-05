@@ -19,10 +19,10 @@ on:
     branches: [main]
 
 env:
-  REVIEW_GATE_PUBKEY: "PASTE-PUBLIC-KEY"
-  REVIEW_GATE_SINCE: "PASTE-COMMIT-SHA"
-  VERIFIER_REF: "PASTE-COMMIT-SHA"
-
+  REVIEW_GATE_PUBKEY: "ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw="
+  REVIEW_GATE_SINCE: "2ec2c9ec73abe19b88f1d522a283c5e869485bb4"
+  VERIFIER_REF: "2ec2c9ec73abe19b88f1d522a283c5e869485bb4"
+  
 jobs:
   attestations:
     runs-on: ubuntu-latest
