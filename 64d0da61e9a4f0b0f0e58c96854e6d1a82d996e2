@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: ci-workflow-fix
+version: 1/1
+commit: 64d0da61e9a4f0b0f0e58c96854e6d1a82d996e2
+tree: c105039e22b5e530d0640a305942d30539a29487
+parent: d1c145c15c6b4f77509a2984ea19a0ef1c03ad9e
+review: v1-2
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-05T02:22:58Z
+signature: VMbdOr78sP6aU2IRml7Z1L2jkF61SZ7OFe03hM7+Kee+K3gY9Li3tf5+yj6AEboL5X8m0jAXsvGJ7lzsRvt8Bg==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
