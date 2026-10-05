@@ -215,6 +215,38 @@ enum Transport {
     CurlExe,
 }
 
+/// Windows `curl.exe`: `REVIEW_GATE_CURL_EXE`, else on PATH, else the WSL mount of System32 —
+/// services (systemd) do not inherit the interactive PATH that includes `/mnt/c/...`.
+fn curl_exe() -> std::path::PathBuf {
+    curl_exe_from(
+        std::env::var_os("REVIEW_GATE_CURL_EXE"),
+        std::env::var_os("PATH"),
+        std::path::Path::new("/mnt/c/Windows/System32/curl.exe"),
+    )
+}
+
+fn curl_exe_from(
+    explicit: Option<std::ffi::OsString>,
+    path: Option<std::ffi::OsString>,
+    fallback: &std::path::Path,
+) -> std::path::PathBuf {
+    if let Some(p) = explicit.filter(|p| !p.is_empty()) {
+        return p.into();
+    }
+    let on_path = path
+        .iter()
+        .flat_map(std::env::split_paths)
+        .map(|d| d.join("curl.exe"))
+        .find(|p| p.is_file());
+    on_path.unwrap_or_else(|| {
+        if fallback.is_file() {
+            fallback.to_path_buf()
+        } else {
+            "curl.exe".into()
+        }
+    })
+}
+
 struct Bridge {
     base: String,
     transport: Transport,
@@ -285,7 +317,7 @@ impl Bridge {
                 args.push(url);
                 let out = tokio::task::spawn_blocking(move || {
                     use std::io::Write;
-                    let mut child = Command::new("curl.exe")
+                    let mut child = Command::new(curl_exe())
                         .args(&args)
                         .stdin(std::process::Stdio::piped())
                         .stdout(std::process::Stdio::piped())
@@ -520,5 +552,37 @@ pub(crate) mod tests {
             Err(AskError::Unavailable(_))
         ));
         assert!(probe(&c).await.iter().all(|(_, ok)| !ok));
+    }
+
+    #[test]
+    fn curl_exe_is_found_without_the_interactive_path() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let fallback = d.path().join("System32-curl.exe");
+        std::fs::write(&fallback, "").unwrap();
+        let none = d.path().join("missing.exe");
+        // explicit override wins
+        assert_eq!(
+            curl_exe_from(Some("/x/curl.exe".into()), None, &fallback),
+            std::path::PathBuf::from("/x/curl.exe")
+        );
+        // systemd-like PATH without /mnt/c: falls back to the System32 mount
+        assert_eq!(
+            curl_exe_from(None, Some("/usr/bin:/bin".into()), &fallback),
+            fallback
+        );
+        // on PATH: that one
+        std::fs::write(bin.join("curl.exe"), "").unwrap();
+        let path = std::env::join_paths([std::path::Path::new("/usr/bin"), &bin]).unwrap();
+        assert_eq!(
+            curl_exe_from(None, Some(path), &fallback),
+            bin.join("curl.exe")
+        );
+        // nothing anywhere: bare name (spawn reports the error)
+        assert_eq!(
+            curl_exe_from(None, None, &none),
+            std::path::PathBuf::from("curl.exe")
+        );
     }
 }

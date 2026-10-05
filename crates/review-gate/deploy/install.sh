@@ -63,6 +63,8 @@ if [ ! -e /etc/review-gate/env ]; then
 #REVIEW_GATE_BASE_URL= / REVIEW_GATE_API_KEY= / REVIEW_GATE_MODEL=
 # web-gemini bridge (dsh-web-gemini-ext), default http://localhost:8899
 #DSH_RELAY_BRIDGE=http://localhost:8899
+# WSL: Windows curl.exe reaches the bridge on Windows loopback (also found without this).
+PATH=/usr/local/bin:/usr/bin:/bin:/mnt/c/Windows/System32
 ENV
 fi
 chown root:reviewgate /etc/review-gate/env
