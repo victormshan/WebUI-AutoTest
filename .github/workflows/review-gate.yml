@@ -1,15 +1,5 @@
-# Verifies that every commit pushed to the protected branches carries a review-gate attestation
-# signed by the gate's key. Copy to .github/workflows/review-gate.yml (needs a human with the
-# `workflow` scope — the implementer cannot change this file, which is the point).
-#
-# Merge commits fail the check (an "evil merge" could carry unreviewed content): integrate with
-# fast-forward / rebase only, or add --allow-merges if you accept that risk.
-#
-# Fill in:
-#   REVIEW_GATE_PUBKEY  output of `review-gate pubkey` (or `curl http://127.0.0.1:7878/pubkey`)
-#   REVIEW_GATE_SINCE   the last commit NOT under the gate; everything after it must be attested
-#   VERIFIER_REF        a commit of victormshan/WebUI-AutoTest whose review-gate you trust.
-#                       The verifier is never built from the commits being verified.
+# Verifies that every commit pushed to main carries a review-gate attestation signed by the gate's key.
+# Merge commits fail the check: integrate with fast-forward / rebase only.
 name: review-gate
 
 on:
@@ -19,7 +9,7 @@ on:
     branches: [main]
 
 env:
-  REVIEW_GATE_PUBKEY: "{"algorithm":"ed25519","key":"ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw="}"
+  REVIEW_GATE_PUBKEY: "ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw="
   REVIEW_GATE_SINCE: "2ec2c9ec73abe19b88f1d522a283c5e869485bb4"
   VERIFIER_REF: "2ec2c9ec73abe19b88f1d522a283c5e869485bb4"
 
@@ -32,7 +22,10 @@ jobs:
           fetch-depth: 0
           path: repo
       - name: Fetch attestation notes
-        run: git -C repo fetch origin "refs/notes/review-gate:refs/notes/review-gate"
+        # Missing before the first attested push; unattested commits then fail the Verify step.
+        run: |
+          git -C repo fetch origin "+refs/notes/review-gate:refs/notes/review-gate" \
+            || echo "no refs/notes/review-gate on the remote yet"
       - name: Check out the pinned verifier
         uses: actions/checkout@v4
         with:
@@ -43,7 +36,18 @@ jobs:
       - name: Build verifier
         run: cargo build --release --locked -p review-gate --manifest-path verifier/Cargo.toml
       - name: Verify
+        # Commits that only touch .github/workflows/ are skipped: they can only be pushed with the
+        # `workflow` scope, which the implementer does not have (this file is how a human pins
+        # the key). Every other commit, merges included, must carry a valid attestation.
         run: |
           head=${{ github.event.pull_request.head.sha || github.sha }}
-          verifier/target/release/review-gate verify-range --repo repo \
-            --pubkey "$REVIEW_GATE_PUBKEY" "$REVIEW_GATE_SINCE..$head"
+          fail=0
+          for c in $(git -C repo rev-list --reverse "$REVIEW_GATE_SINCE..$head"); do
+            if [ "$(git -C repo rev-list --no-walk --parents "$c" | wc -w)" -eq 2 ] \
+              && ! git -C repo diff-tree --no-commit-id --name-only -r "$c" | grep -qv '^\.github/workflows/'; then
+              echo "skip $c (workflow-only change)"
+              continue
+            fi
+            verifier/target/release/review-gate verify --repo repo --pubkey "$REVIEW_GATE_PUBKEY" "$c" || fail=1
+          done
+          exit $fail
