@@ -7,7 +7,9 @@
 //! decided by each side's own review gate.
 
 pub mod bridge;
+pub mod inbox;
 pub mod model;
+pub mod service;
 pub mod store;
 
 /// Message protocol spoken by this service. The file protocol it replaces was "0".

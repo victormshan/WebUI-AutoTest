@@ -96,6 +96,11 @@ impl Bridge {
         })
     }
 
+    /// The store's directory (other state, such as read cursors, lives next to the tasks).
+    pub fn root(&self) -> &std::path::Path {
+        self.store.root()
+    }
+
     pub fn agents(&self) -> impl Iterator<Item = &str> {
         self.agents.iter().map(String::as_str)
     }

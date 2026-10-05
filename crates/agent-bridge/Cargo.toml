@@ -7,12 +7,21 @@ edition.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "agent-bridge"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
+axum = "0.8.9"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { workspace = true, features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.11.0"
 thiserror = "2"
+tokio.workspace = true
 
 [dev-dependencies]
+reqwest.workspace = true
 tempfile = "3"
