@@ -1,5 +1,15 @@
-# Verifies that every commit pushed to main carries a review-gate attestation signed by the gate's key.
-# Merge commits fail the check: integrate with fast-forward / rebase only.
+# Verifies that every commit pushed to the protected branches carries a review-gate attestation
+# signed by the gate's key. Copy to .github/workflows/review-gate.yml (needs a human with the
+# `workflow` scope — the implementer cannot change this file, which is the point).
+#
+# Merge commits fail the check (an "evil merge" could carry unreviewed content): integrate with
+# fast-forward / rebase only.
+#
+# Fill in:
+#   REVIEW_GATE_PUBKEY  output of `review-gate pubkey` (or `curl http://127.0.0.1:7878/pubkey`)
+#   REVIEW_GATE_SINCE   the last commit NOT under the gate; everything after it must be attested
+#   VERIFIER_REF        a commit of victormshan/WebUI-AutoTest whose review-gate you trust.
+#                       The verifier is never built from the commits being verified.
 name: review-gate
 
 on:
@@ -9,9 +19,9 @@ on:
     branches: [main]
 
 env:
-  REVIEW_GATE_PUBKEY: "ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw="
-  REVIEW_GATE_SINCE: "2ec2c9ec73abe19b88f1d522a283c5e869485bb4"
-  VERIFIER_REF: "2ec2c9ec73abe19b88f1d522a283c5e869485bb4"
+  REVIEW_GATE_PUBKEY: "PASTE-PUBLIC-KEY"
+  REVIEW_GATE_SINCE: "PASTE-COMMIT-SHA"
+  VERIFIER_REF: "PASTE-COMMIT-SHA"
 
 jobs:
   attestations:
@@ -41,8 +51,13 @@ jobs:
         # the key). Every other commit, merges included, must carry a valid attestation.
         run: |
           head=${{ github.event.pull_request.head.sha || github.sha }}
+          # A bad SINCE must fail loudly: a failing $(...) in a for list would just mean "no commits".
+          git -C repo merge-base --is-ancestor "$REVIEW_GATE_SINCE" "$head" \
+            || { echo "REVIEW_GATE_SINCE $REVIEW_GATE_SINCE is not an ancestor of $head"; exit 1; }
+          commits=$(git -C repo rev-list --reverse "$REVIEW_GATE_SINCE..$head")
+          echo "checking $(echo "$commits" | grep -c .) commit(s) after $REVIEW_GATE_SINCE"
           fail=0
-          for c in $(git -C repo rev-list --reverse "$REVIEW_GATE_SINCE..$head"); do
+          for c in $commits; do
             if [ "$(git -C repo rev-list --no-walk --parents "$c" | wc -w)" -eq 2 ] \
               && ! git -C repo diff-tree --no-commit-id --name-only -r "$c" | grep -qv '^\.github/workflows/'; then
               echo "skip $c (workflow-only change)"
