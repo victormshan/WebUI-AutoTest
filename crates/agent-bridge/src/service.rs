@@ -3,10 +3,18 @@
 //! The service keeps only SHA-256 hashes of the tokens.
 //!
 //! Long polling (`GET /v1/inbox?wait=…`) is for agents that keep a waiter running (Claude Code in
-//! the background); an agent without one (the DSH main agent) is pushed a wake-up instead (V4).
+//! the background); an agent without one (the DSH main agent) is pushed a wake-up instead
+//! (`notify.rs`). A monitor re-wakes an agent that has not read a blocking message after 15
+//! minutes, and marks a task stalled after a day without progress. Every push attempt, woken or
+//! not, is appended to `wakes.jsonl` and summarised in `/v1/health`.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use chrono::{DateTime, Utc};
 
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{StatusCode, header};
@@ -22,6 +30,8 @@ use tokio::sync::Notify;
 use crate::bridge::{Bridge, Draft};
 use crate::inbox::Cursors;
 use crate::model::{Message, State as TaskState};
+use crate::notify::{self, Target};
+use crate::user::{self, Decisions, ItemStatus};
 use crate::{BridgeError, PROTOCOL};
 
 /// Longest a single long poll may wait.
@@ -29,9 +39,49 @@ pub const MAX_WAIT_SECS: u64 = 120;
 /// Most messages returned by one inbox call.
 pub const INBOX_BATCH: usize = 100;
 
+/// When the monitor acts (shortened in tests).
+#[derive(Debug, Clone, Copy)]
+pub struct Timing {
+    pub tick: Duration,
+    /// Re-wake once if a blocking message is still unread after this long.
+    pub rewake_after: chrono::Duration,
+    /// A task without progress for this long is stalled.
+    pub stall_after: chrono::Duration,
+    /// At most one stall notice per task per this long.
+    pub stall_cooldown: chrono::Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self {
+            tick: Duration::from_secs(60),
+            rewake_after: chrono::Duration::minutes(15),
+            stall_after: chrono::Duration::hours(24),
+            stall_cooldown: chrono::Duration::hours(24),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, serde::Serialize)]
+struct WakeStats {
+    count: u64,
+    woken: u64,
+    failed: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last: Option<Value>,
+}
+
 struct Inner {
     bridge: Bridge,
     cursors: Cursors,
+    decisions: Decisions,
+    /// (task, n) already re-woken once (in memory: after a restart one more re-wake is allowed).
+    rewoken: BTreeSet<(String, u32)>,
+    stalled: BTreeSet<String>,
+    stall_notice: BTreeMap<String, DateTime<Utc>>,
+    /// Long polls currently waiting, per agent.
+    waiters: BTreeMap<String, usize>,
+    wakes: WakeStats,
 }
 
 pub struct AppState {
@@ -40,6 +90,20 @@ pub struct AppState {
     tokens: Vec<(String, [u8; 32])>,
     /// Woken whenever a message is stored.
     news: Notify,
+    /// Agents woken by push (agent → notify target).
+    targets: BTreeMap<String, Target>,
+    timing: Timing,
+    ledger: PathBuf,
+}
+
+/// One push to make, prepared under the lock and sent outside it.
+struct Push {
+    agent: String,
+    task: String,
+    n: u32,
+    kind: String,
+    why: &'static str,
+    summary: String,
 }
 
 pub fn sha256(s: &str) -> [u8; 32] {
@@ -72,11 +136,177 @@ impl AppState {
             );
         }
         let cursors = Cursors::open(bridge.root(), bridge.agents().map(str::to_string))?;
+        let decisions = Decisions::open(bridge.root())?;
+        let ledger = bridge.root().join("wakes.jsonl");
         Ok(Self {
-            inner: Mutex::new(Inner { bridge, cursors }),
+            inner: Mutex::new(Inner {
+                bridge,
+                cursors,
+                decisions,
+                rewoken: BTreeSet::new(),
+                stalled: BTreeSet::new(),
+                stall_notice: BTreeMap::new(),
+                waiters: BTreeMap::new(),
+                wakes: WakeStats::default(),
+            }),
             tokens,
             news: Notify::new(),
+            targets: BTreeMap::new(),
+            timing: Timing::default(),
+            ledger,
         })
+    }
+
+    /// Agents without a waiter of their own are woken by push.
+    pub fn with_push(mut self, targets: BTreeMap<String, Target>) -> Self {
+        self.targets = targets;
+        self
+    }
+
+    pub fn with_timing(mut self, timing: Timing) -> Self {
+        self.timing = timing;
+        self
+    }
+
+    /// Runs the monitor (re-wakes, stalls) until the process ends.
+    pub fn spawn_monitor(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let s = self.clone();
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(s.timing.tick);
+            iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                iv.tick().await;
+                s.tick(Utc::now());
+            }
+        })
+    }
+
+    /// One monitor pass at `now`.
+    pub fn tick(self: &Arc<Self>, now: DateTime<Utc>) {
+        let mut pushes = Vec::new();
+        {
+            let mut g = self.lock();
+            let mut stalled_now = BTreeSet::new();
+            let tasks: Vec<crate::model::Task> = g
+                .bridge
+                .list(None)
+                .into_iter()
+                .filter(|t| !t.state.terminal())
+                .cloned()
+                .collect();
+            for t in tasks {
+                let Some(last) = g
+                    .bridge
+                    .messages(&t.id)
+                    .ok()
+                    .and_then(|ms| ms.last().cloned())
+                else {
+                    continue;
+                };
+                let to = if last.from == t.from {
+                    t.to.clone()
+                } else {
+                    t.from.clone()
+                };
+                if last.kind.wakes()
+                    && g.cursors.get(&to, &t.id) < last.n
+                    && now - last.at >= self.timing.rewake_after
+                    && self.targets.contains_key(&to)
+                    && g.rewoken.insert((t.id.clone(), last.n))
+                {
+                    pushes.push(push_for(&t, &last, &to, "rewake"));
+                }
+                if now - t.updated_at >= self.timing.stall_after {
+                    stalled_now.insert(t.id.clone());
+                    let due = g
+                        .stall_notice
+                        .get(&t.id)
+                        .is_none_or(|at| now - *at >= self.timing.stall_cooldown);
+                    if due {
+                        g.stall_notice.insert(t.id.clone(), now);
+                        for party in [&t.from, &t.to] {
+                            if self.targets.contains_key(party) {
+                                let mut p = push_for(&t, &last, party, "stalled");
+                                p.kind = "stalled".into();
+                                pushes.push(p);
+                            }
+                        }
+                    }
+                }
+            }
+            g.stalled = stalled_now;
+        }
+        for p in pushes {
+            self.send_push(p);
+        }
+    }
+
+    /// After a message is stored: wake long polls, and push to the recipient if it needs one.
+    fn stored(self: &Arc<Self>, m: &Message) {
+        self.news.notify_waiters();
+        if !m.kind.wakes() {
+            return;
+        }
+        let push = {
+            let g = self.lock();
+            g.bridge.task(&m.task).map(|t| {
+                let to = if m.from == t.from {
+                    t.to.clone()
+                } else {
+                    t.from.clone()
+                };
+                push_for(t, m, &to, "new")
+            })
+        };
+        if let Some(p) = push.filter(|p| self.targets.contains_key(&p.agent)) {
+            self.send_push(p);
+        }
+    }
+
+    fn send_push(self: &Arc<Self>, p: Push) {
+        let Some(target) = self.targets.get(&p.agent).cloned() else {
+            return;
+        };
+        let s = self.clone();
+        tokio::spawn(async move {
+            let o = notify::wake(&target, &p.task, p.n, &p.kind, &p.summary).await;
+            let entry = json!({
+                "at": Utc::now(), "agent": p.agent, "task": p.task, "n": p.n, "kind": p.kind, "why": p.why,
+                "agentWoken": o.agent_woken, "coalesced": o.coalesced, "status": o.status,
+                "transport": o.transport, "reason": o.reason,
+            });
+            if let Err(e) = s.append_ledger(&entry) {
+                eprintln!("agent-bridge: wake ledger write failed: {e:#}");
+            }
+            if !o.agent_woken {
+                eprintln!(
+                    "agent-bridge: wake {} for {}#{} not delivered: {}",
+                    p.agent, p.task, p.n, o.reason
+                );
+            }
+            let mut g = s.lock();
+            g.wakes.count += 1;
+            if o.agent_woken {
+                g.wakes.woken += 1
+            } else {
+                g.wakes.failed += 1
+            }
+            g.wakes.last = Some(entry);
+        });
+    }
+
+    fn append_ledger(&self, entry: &Value) -> anyhow::Result<()> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.append(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&self.ledger)?;
+        f.write_all(format!("{entry}\n").as_bytes())?;
+        f.sync_all()?;
+        Ok(())
     }
 
     /// Constant-time over all configured tokens.
@@ -97,6 +327,22 @@ impl AppState {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+fn push_for(t: &crate::model::Task, m: &Message, to: &str, why: &'static str) -> Push {
+    let body: String = m.body.chars().take(200).collect();
+    let summary = format!(
+        "{}｜{} 来自 {}：{}｜读取：GET /v1/tasks/{}（agent-bridge 127.0.0.1:7879）",
+        t.title, m.kind, m.from, body, t.id
+    );
+    Push {
+        agent: to.into(),
+        task: t.id.clone(),
+        n: m.n,
+        kind: m.kind.to_string(),
+        why,
+        summary,
     }
 }
 
@@ -135,6 +381,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks/{id}/messages", post(post_message))
         .route("/v1/inbox", get(inbox))
         .route("/v1/inbox/ack", post(ack))
+        .route("/v1/user/pending", get(user_pending))
+        .route("/v1/user/decisions", post(user_decision))
         .layer(middleware::from_fn_with_state(state.clone(), auth));
     Router::new()
         .route("/v1/health", get(health))
@@ -173,9 +421,17 @@ async fn health(State(s): State<Arc<AppState>>) -> Json<Value> {
         .iter()
         .filter(|t| !t.state.terminal())
         .count();
+    let agents: Vec<String> = g.bridge.agents().map(str::to_string).collect();
+    let unread_by: BTreeMap<&str, usize> = agents
+        .iter()
+        .map(|a| (a.as_str(), unread(&g, a).len()))
+        .collect();
+    let pending = user::pending(&g.bridge, &g.decisions, &g.stalled, false).len();
     Json(json!({
         "ok": true, "service": "agent-bridge", "version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL,
-        "agents": g.bridge.agents().collect::<Vec<_>>(), "openTasks": open, "badLines": g.bridge.bad_lines,
+        "agents": agents, "openTasks": open, "badLines": g.bridge.bad_lines + g.decisions.bad_lines,
+        "waiters": g.waiters, "unread": unread_by, "pendingForUser": pending, "stalled": g.stalled,
+        "push": s.targets.keys().collect::<Vec<_>>(), "wakes": g.wakes,
     }))
 }
 
@@ -236,8 +492,11 @@ async fn create_task(
     Extension(Caller(me)): Extension<Caller>,
     Json(b): Json<CreateBody>,
 ) -> ApiResult<Message> {
+    let fresh = !s.lock().bridge.task(&b.id).is_some();
     let m = s.lock().bridge.create_task(&b.id, &me, b.draft)?;
-    s.news.notify_waiters();
+    if fresh {
+        s.stored(&m);
+    }
     Ok(Json(m))
 }
 
@@ -247,8 +506,12 @@ async fn post_message(
     Path(id): Path<String>,
     Json(d): Json<Draft>,
 ) -> ApiResult<Message> {
+    let before = s.lock().bridge.task(&id).map(|t| t.last_n);
     let m = s.lock().bridge.post(&id, &me, d)?;
-    s.news.notify_waiters();
+    // A retried post returns the stored message: no second wake for it.
+    if before.is_some_and(|n| m.n > n) {
+        s.stored(&m);
+    }
     Ok(Json(m))
 }
 
@@ -281,6 +544,19 @@ async fn inbox(
     Query(q): Query<InboxQuery>,
 ) -> Json<Value> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(q.wait.min(MAX_WAIT_SECS));
+    // Count this agent's live waiters while we wait (visible in /v1/health).
+    struct Waiting(Arc<AppState>, String);
+    impl Drop for Waiting {
+        fn drop(&mut self) {
+            if let Some(c) = self.0.lock().waiters.get_mut(&self.1) {
+                *c = c.saturating_sub(1);
+            }
+        }
+    }
+    let _waiting = (q.wait > 0).then(|| {
+        *s.lock().waiters.entry(me.clone()).or_default() += 1;
+        Waiting(s.clone(), me.clone())
+    });
     loop {
         // Register interest before looking, so a message stored in between is not missed.
         let news = s.news.notified();
@@ -329,6 +605,113 @@ async fn ack(
     ))
 }
 
+#[derive(Deserialize)]
+struct PendingQuery {
+    #[serde(default)]
+    all: bool,
+}
+
+/// What only the user may decide, across all tasks (either agent relays it to the user).
+async fn user_pending(
+    State(s): State<Arc<AppState>>,
+    Query(q): Query<PendingQuery>,
+) -> Json<Value> {
+    let g = s.lock();
+    Json(json!({ "items": user::pending(&g.bridge, &g.decisions, &g.stalled, q.all) }))
+}
+
+#[derive(Deserialize)]
+struct DecisionBody {
+    item: String,
+    /// The user's own words, verbatim.
+    verbatim: String,
+}
+
+/// Records the user's decision as relayed by the caller; a paused task resumes on it.
+async fn user_decision(
+    State(s): State<Arc<AppState>>,
+    Extension(Caller(me)): Extension<Caller>,
+    Json(b): Json<DecisionBody>,
+) -> Result<Response, ApiError> {
+    if b.verbatim.trim().is_empty() {
+        return Err(BridgeError::Invalid(
+            "a decision is the user's own words; verbatim cannot be empty".into(),
+        )
+        .into());
+    }
+    let (status, decision, resumed, task) = {
+        let mut g = s.lock();
+        let all = user::pending(&g.bridge, &g.decisions, &g.stalled, true);
+        let Some(item) = all.into_iter().find(|i| i.item == b.item) else {
+            return Err(BridgeError::Invalid(format!(
+                "no pending item {:?} (see GET /v1/user/pending?all=true)",
+                b.item
+            ))
+            .into());
+        };
+        let t = g
+            .bridge
+            .task(&item.task)
+            .cloned()
+            .ok_or_else(|| BridgeError::NoSuchTask(item.task.clone()))?;
+        if t.from != me && t.to != me {
+            return Err(
+                BridgeError::Forbidden(format!("{me} is not a party to task {}", t.id)).into(),
+            );
+        }
+        let (status, decision) = g
+            .decisions
+            .record(&b.item, &b.verbatim, &me)
+            .map_err(BridgeError::Io)?;
+        let resumed = if item.source == "paused"
+            && status == ItemStatus::Decided
+            && t.state == TaskState::PausedForUser
+        {
+            Some(g.bridge.resume(&t.id, &me, decision.verbatim.as_str())?)
+        } else {
+            None
+        };
+        (status, decision, resumed, t)
+    };
+    if let Some(m) = &resumed {
+        s.stored(m);
+    } else {
+        // Tell the other party a decision exists (push if it has a target; long polls see /v1/user/pending).
+        let other = if me == task.from {
+            task.to.clone()
+        } else {
+            task.from.clone()
+        };
+        let last = s
+            .lock()
+            .bridge
+            .messages(&task.id)
+            .ok()
+            .and_then(|ms| ms.last().cloned());
+        if let Some(last) = last {
+            let mut p = push_for(&task, &last, &other, "decision");
+            p.kind = "user_decision".into();
+            p.summary = format!(
+                "用户对 {} 做了决定（{}转达）：{}",
+                b.item,
+                me,
+                decision.verbatim.chars().take(200).collect::<String>()
+            );
+            s.send_push(p);
+        }
+    }
+    let code = if status == ItemStatus::Conflict {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::OK
+    };
+    Ok((
+        code,
+        Json(json!({ "item": b.item, "status": status, "decision": decision, "resumed": resumed })),
+    )
+        .into_response())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -366,6 +749,78 @@ pub(crate) mod tests {
 
     pub(crate) async fn start() -> Env {
         start_at(tempfile::tempdir().unwrap()).await
+    }
+
+    /// A stand-in for dsh-web-relay's notify endpoint: records each call, answers `woken`.
+    pub(crate) async fn mock_notify(woken: bool) -> (String, Arc<Mutex<Vec<(String, Value)>>>) {
+        let calls: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
+        let c = calls.clone();
+        let app = Router::new().route(
+            "/notify",
+            post(
+                move |headers: axum::http::HeaderMap, Json(v): Json<Value>| {
+                    let c = c.clone();
+                    async move {
+                        let auth = headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|h| h.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        c.lock().unwrap().push((auth, v));
+                        Json(json!({ "ok": true, "agentWoken": woken, "coalesced": false,
+                                 "reason": if woken { "woke" } else { "sessionId 缺失" } }))
+                    }
+                },
+            ),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/notify", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (url, calls)
+    }
+
+    /// Service with DSH woken by push at `notify_url`, and the given timing; returns the state
+    /// too so tests can drive the monitor with `tick`.
+    pub(crate) async fn start_push(notify_url: &str, timing: Timing) -> (Env, Arc<AppState>) {
+        let dir = tempfile::tempdir().unwrap();
+        let token_file = dir.path().join("dsh-notify.token");
+        std::fs::write(&token_file, "notify-token-0123456789abcdef0123456789\n").unwrap();
+        let bridge = Bridge::open(dir.path().join("state"), &["claude", "dsh"]).unwrap();
+        let targets = BTreeMap::from([(
+            "dsh".to_string(),
+            Target {
+                url: notify_url.into(),
+                token_file,
+                transport: notify::Transport::Native,
+            },
+        )]);
+        let state = Arc::new(
+            AppState::new(
+                bridge,
+                vec![
+                    ("claude".into(), sha256(CLAUDE)),
+                    ("dsh".into(), sha256(DSH)),
+                ],
+            )
+            .unwrap()
+            .with_push(targets)
+            .with_timing(timing),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(serve(state.clone(), listener));
+        (
+            Env {
+                _dir: dir,
+                url,
+                http: reqwest::Client::new(),
+            },
+            state,
+        )
+    }
+
+    pub(crate) async fn settle() {
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
     impl Env {
@@ -611,5 +1066,319 @@ pub(crate) mod tests {
             "ack survived"
         );
         assert_eq!(e2.get(DSH, "/v1/tasks/t").await.1["task"]["state"], "open");
+    }
+
+    fn q() -> Value {
+        json!({ "kind": "question", "protocol": PROTOCOL, "questions": [{ "id": "q", "text": "?", "blocking": true }] })
+    }
+    fn k(kind: &str) -> Value {
+        json!({ "kind": kind, "protocol": PROTOCOL })
+    }
+
+    #[tokio::test]
+    async fn new_messages_push_dsh_and_every_attempt_is_recorded() {
+        let (notify_url, calls) = mock_notify(true).await;
+        let (e, _s) = start_push(&notify_url, Timing::default()).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await; // ack does not wake anyone
+        e.post(DSH, "/v1/tasks/t/messages", q()).await; // to claude: long poll, not push
+        e.post(CLAUDE, "/v1/tasks/t/messages", k("answer")).await; // to dsh: push
+        settle().await;
+        let c = calls.lock().unwrap().clone();
+        assert_eq!(c.len(), 2, "task and answer were pushed to dsh: {c:?}");
+        assert_eq!(c[0].0, "Bearer notify-token-0123456789abcdef0123456789");
+        assert_eq!(
+            (
+                c[0].1["taskId"].as_str(),
+                c[0].1["n"].as_u64(),
+                c[0].1["kind"].as_str()
+            ),
+            (Some("t"), Some(1), Some("task"))
+        );
+        assert!(
+            c[0].1["summary"]
+                .as_str()
+                .unwrap()
+                .contains("GET /v1/tasks/t")
+        );
+        assert_eq!(c[1].1["kind"], "answer");
+        let h = e.get(CLAUDE, "/v1/health").await.1;
+        assert_eq!(
+            (h["wakes"]["count"].as_u64(), h["wakes"]["woken"].as_u64()),
+            (Some(2), Some(2))
+        );
+        let ledger = std::fs::read_to_string(e._dir.path().join("state/wakes.jsonl")).unwrap();
+        assert_eq!(ledger.lines().count(), 2);
+        // A retried post (same client_msg_id) is not pushed again.
+        let body = json!({ "kind": "progress", "protocol": PROTOCOL, "client_msg_id": "p1" });
+        e.post(DSH, "/v1/tasks/t/messages", body.clone()).await;
+        e.post(DSH, "/v1/tasks/t/messages", body).await;
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "result", "protocol": PROTOCOL, "outcome": "done" }),
+        )
+        .await;
+        e.post(
+            CLAUDE,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "verdict", "protocol": PROTOCOL, "judgement": "pass" }),
+        )
+        .await;
+        settle().await;
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            3,
+            "only the verdict added a push"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_wake_is_reported_not_counted_as_woken() {
+        let (notify_url, _calls) = mock_notify(false).await;
+        let (e, _s) = start_push(&notify_url, Timing::default()).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        settle().await;
+        let h = e.get(CLAUDE, "/v1/health").await.1;
+        assert_eq!(
+            (h["wakes"]["woken"].as_u64(), h["wakes"]["failed"].as_u64()),
+            (Some(0), Some(1))
+        );
+        assert_eq!(h["wakes"]["last"]["reason"], "sessionId 缺失");
+        let (e2, _s2) = start_push("http://127.0.0.1:9/notify", Timing::default()).await;
+        e2.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        settle().await;
+        let h = e2.get(CLAUDE, "/v1/health").await.1;
+        assert_eq!(
+            h["wakes"]["failed"].as_u64(),
+            Some(1),
+            "unreachable endpoint is a failed wake"
+        );
+        assert!(h["wakes"]["last"]["status"].is_null());
+    }
+
+    #[tokio::test]
+    async fn monitor_rewakes_once_and_marks_stalls() {
+        let (notify_url, calls) = mock_notify(true).await;
+        let timing = Timing {
+            tick: Duration::from_secs(3600),
+            rewake_after: chrono::Duration::minutes(15),
+            stall_after: chrono::Duration::hours(24),
+            stall_cooldown: chrono::Duration::hours(24),
+        };
+        let (e, s) = start_push(&notify_url, timing).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        settle().await;
+        let now = Utc::now();
+        s.tick(now + chrono::Duration::minutes(5));
+        settle().await;
+        assert_eq!(calls.lock().unwrap().len(), 1, "too early to re-wake");
+        s.tick(now + chrono::Duration::minutes(16));
+        s.tick(now + chrono::Duration::minutes(30));
+        settle().await;
+        assert_eq!(calls.lock().unwrap().len(), 2, "re-woken exactly once");
+        assert_eq!(calls.lock().unwrap()[1].1["n"], 1);
+
+        // Read (acked) messages are not re-woken.
+        e.post(CLAUDE, "/v1/tasks", json!({ "id": "u", "kind": "task", "protocol": PROTOCOL, "meta": { "to": "dsh", "title": "u" } })).await;
+        e.post(DSH, "/v1/inbox/ack", json!({ "task": "u", "n": 1 }))
+            .await;
+        settle().await;
+        let before = calls.lock().unwrap().len();
+        s.tick(now + chrono::Duration::minutes(20));
+        settle().await;
+        assert_eq!(calls.lock().unwrap().len(), before);
+
+        // A day without progress: stalled, the user sees it, and DSH is told once per cooldown.
+        s.tick(now + chrono::Duration::hours(25));
+        s.tick(now + chrono::Duration::hours(26));
+        settle().await;
+        let stalled: Vec<Value> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.1["kind"] == "stalled")
+            .map(|c| c.1.clone())
+            .collect();
+        assert_eq!(
+            stalled.len(),
+            2,
+            "one notice for each stalled task: {stalled:?}"
+        );
+        let pending = e.get(CLAUDE, "/v1/user/pending").await.1;
+        let items: Vec<&str> = pending["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["source"].as_str().unwrap())
+            .collect();
+        assert_eq!(items, ["stalled", "stalled"]);
+        assert_eq!(
+            e.get(CLAUDE, "/v1/health").await.1["stalled"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        // Stalls are re-evaluated on every pass: at the real present nothing is a day old.
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        s.tick(Utc::now());
+        assert_eq!(
+            e.get(CLAUDE, "/v1/health").await.1["stalled"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            e.get(CLAUDE, "/v1/user/pending").await.1["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn the_users_decision_is_recorded_verbatim_and_resumes_a_paused_task() {
+        let e = start().await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        for _ in 0..3 {
+            e.post(DSH, "/v1/tasks/t/messages", q()).await;
+            e.post(CLAUDE, "/v1/tasks/t/messages", k("answer")).await;
+        }
+        e.post(DSH, "/v1/tasks/t/messages", json!({ "kind": "question", "protocol": PROTOCOL,
+            "questions": [{ "id": "q4", "text": "?", "blocking": true }], "needs_user": ["要不要重启宿主？"] })).await;
+        assert_eq!(
+            e.get(CLAUDE, "/v1/tasks/t").await.1["task"]["state"],
+            "paused_for_user"
+        );
+        let pending = e.get(CLAUDE, "/v1/user/pending").await.1["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let ids: Vec<&str> = pending
+            .iter()
+            .map(|i| i["item"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["t#9#1", "t#paused#9"]);
+        assert!(
+            pending[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("[dsh] 要不要重启宿主")
+        );
+
+        // Agents cannot resume on their own.
+        assert_eq!(
+            e.post(
+                CLAUDE,
+                "/v1/tasks/t/messages",
+                json!({ "kind": "resume", "protocol": PROTOCOL, "body": "ok" })
+            )
+            .await
+            .0,
+            403
+        );
+        assert_eq!(
+            e.post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": "t#nope", "verbatim": "x" })
+            )
+            .await
+            .0,
+            400
+        );
+        assert_eq!(
+            e.post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": "t#paused#9", "verbatim": "  " })
+            )
+            .await
+            .0,
+            400,
+            "empty words refused"
+        );
+
+        let (st, r) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": "t#paused#9", "verbatim": "可以，继续问" }),
+            )
+            .await;
+        assert_eq!((st, r["status"].as_str()), (200, Some("decided")));
+        assert_eq!(r["resumed"]["kind"], "resume");
+        assert!(
+            r["resumed"]["body"]
+                .as_str()
+                .unwrap()
+                .contains("可以，继续问")
+        );
+        let t = e.get(DSH, "/v1/tasks/t").await.1["task"].clone();
+        assert_eq!(
+            (t["state"].as_str(), t["paused_reason"].is_null()),
+            (Some("working"), true)
+        );
+        // Limits count afresh: three more rounds are possible.
+        for _ in 0..3 {
+            assert_eq!(e.post(DSH, "/v1/tasks/t/messages", q()).await.0, 200);
+            e.post(CLAUDE, "/v1/tasks/t/messages", k("answer")).await;
+        }
+
+        // A different text for an already decided item is kept and flagged.
+        let (st, r) = e
+            .post(
+                DSH,
+                "/v1/user/decisions",
+                json!({ "item": "t#9#1", "verbatim": "不要重启" }),
+            )
+            .await;
+        assert_eq!((st, r["status"].as_str()), (200, Some("decided")));
+        let (st, r) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": "t#9#1", "verbatim": "现在重启" }),
+            )
+            .await;
+        assert_eq!((st, r["status"].as_str()), (409, Some("conflict")));
+        let all = e.get(CLAUDE, "/v1/user/pending?all=true").await.1;
+        let item = all["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["item"] == "t#9#1")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (
+                item["status"].as_str(),
+                item["decisions"].as_array().unwrap().len()
+            ),
+            (Some("conflict"), 2)
+        );
+        assert_eq!(item["decisions"][0]["relayed_by"], "dsh");
+    }
+
+    #[tokio::test]
+    async fn health_counts_live_waiters() {
+        let e = start().await;
+        let (url, http) = (e.url.clone(), e.http.clone());
+        let w = tokio::spawn(async move {
+            http.get(format!("{url}/v1/inbox?wait=3"))
+                .bearer_auth(CLAUDE)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(e.get(DSH, "/v1/health").await.1["waiters"]["claude"], 1);
+        w.await.unwrap();
+        assert_eq!(e.get(DSH, "/v1/health").await.1["waiters"]["claude"], 0);
     }
 }

@@ -206,6 +206,46 @@ impl Bridge {
         let kind = d
             .kind
             .ok_or_else(|| BridgeError::Invalid("kind is required".into()))?;
+        if kind == Kind::Resume {
+            return Err(BridgeError::Forbidden(
+                "resume is written by the service from a recorded user decision".into(),
+            ));
+        }
+        self.append_checked(id, from, kind, d)
+    }
+
+    /// Resumes a task paused for the user, carrying the user's verbatim decision as relayed by
+    /// `by`. Called by the service after it has recorded the decision.
+    pub fn resume(&mut self, id: &str, by: &str, verbatim: &str) -> Result<Message, BridgeError> {
+        self.check_agent(by)?;
+        let e = self
+            .tasks
+            .get(id)
+            .ok_or_else(|| BridgeError::NoSuchTask(id.into()))?;
+        if by != e.task.from && by != e.task.to {
+            return Err(BridgeError::Forbidden(format!(
+                "{by} is not a party to task {id}"
+            )));
+        }
+        let d = Draft {
+            body: format!("用户决定（由 {by} 转达，原话）：{verbatim}"),
+            protocol: Some(PROTOCOL.into()),
+            ..Default::default()
+        };
+        self.append_checked(id, by, Kind::Resume, d)
+    }
+
+    fn append_checked(
+        &mut self,
+        id: &str,
+        from: &str,
+        kind: Kind,
+        d: Draft,
+    ) -> Result<Message, BridgeError> {
+        let e = self
+            .tasks
+            .get(id)
+            .ok_or_else(|| BridgeError::NoSuchTask(id.into()))?;
         let msg = build(id, e.task.last_n + 1, from, kind, d);
         let mut next = e.task.clone();
         apply(&mut next, &e.messages, &msg)?;
@@ -271,6 +311,8 @@ fn open_task(m: &Message, agents: &BTreeSet<String>) -> Result<Task, BridgeError
         state: State::Open,
         paused_reason: None,
         question_rounds: 0,
+        limit_base_rounds: 0,
+        limit_base_messages: 0,
         messages: 1,
         last_n: 1,
         created_at: m.at,
@@ -291,17 +333,24 @@ fn apply(t: &mut Task, earlier: &[Message], m: &Message) -> Result<(), BridgeErr
             "a task is opened once; use answer/progress/… afterwards".into(),
         ));
     }
-    // Roles: the receiver works the task, the requester steers and closes it.
-    let (role, must) = if m.kind.from_receiver() {
-        ("receiver", &t.to)
-    } else {
-        ("requester", &t.from)
-    };
-    if &m.from != must {
-        return Err(BridgeError::Forbidden(format!(
-            "{} may only be sent by the {role} ({must})",
-            m.kind
-        )));
+    // Roles: the receiver works the task, the requester steers and closes it. Either party may
+    // relay the user's decision that resumes a paused task.
+    if m.kind != Kind::Resume {
+        let (role, must) = if m.kind.from_receiver() {
+            ("receiver", &t.to)
+        } else {
+            ("requester", &t.from)
+        };
+        if &m.from != must {
+            return Err(BridgeError::Forbidden(format!(
+                "{} may only be sent by the {role} ({must})",
+                m.kind
+            )));
+        }
+    } else if m.body.trim().is_empty() {
+        return Err(BridgeError::Invalid(
+            "resume carries the user's verbatim decision".into(),
+        ));
     }
     if m.meta.is_some() {
         return Err(BridgeError::Invalid(
@@ -351,6 +400,8 @@ fn apply(t: &mut Task, earlier: &[Message], m: &Message) -> Result<(), BridgeErr
     let next = match (s, m.kind) {
         (_, Kind::Cancel) => Cancelled,
         (PausedForUser, Kind::Close) => Closed,
+        (PausedForUser, Kind::Resume) => Working,
+        (_, Kind::Resume) => return Err(deny("only a task paused for the user can be resumed")),
         (PausedForUser, _) => {
             return Err(deny(
                 "paused for the user: only the user can move it on (requester may close or cancel)",
@@ -373,7 +424,7 @@ fn apply(t: &mut Task, earlier: &[Message], m: &Message) -> Result<(), BridgeErr
     t.state = next;
     if m.kind == Kind::Question {
         t.question_rounds += 1;
-        if t.question_rounds > MAX_QUESTION_ROUNDS {
+        if t.question_rounds - t.limit_base_rounds > MAX_QUESTION_ROUNDS {
             t.state = PausedForUser;
             t.paused_reason = Some(format!("超过 {MAX_QUESTION_ROUNDS} 轮问答，交给用户"));
         }
@@ -384,7 +435,16 @@ fn apply(t: &mut Task, earlier: &[Message], m: &Message) -> Result<(), BridgeErr
     t.messages += 1;
     t.last_n = m.n;
     t.updated_at = m.at;
-    if t.messages >= MAX_MESSAGES && !t.state.terminal() && t.state != PausedForUser {
+    if m.kind == Kind::Resume {
+        // The user moved it on: limits count afresh from here.
+        t.limit_base_rounds = t.question_rounds;
+        t.limit_base_messages = t.messages;
+        t.paused_reason = None;
+    }
+    if t.messages - t.limit_base_messages >= MAX_MESSAGES
+        && !t.state.terminal()
+        && t.state != PausedForUser
+    {
         t.state = PausedForUser;
         t.paused_reason = Some(format!("消息数达到 {MAX_MESSAGES} 条上限，交给用户"));
     }

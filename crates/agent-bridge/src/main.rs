@@ -41,6 +41,10 @@ enum Cmd {
         /// JSON object agent → sha256 of its token (see hash-token). Default: ~/.config/agent-bridge/agents.json
         #[arg(long)]
         agents: Option<PathBuf>,
+        /// Push wake-ups: JSON object agent → {url, token_file, transport: auto|native|curl-exe}.
+        /// Default: ~/.config/agent-bridge/notify.json if it exists (agents not listed long-poll)
+        #[arg(long)]
+        notify: Option<PathBuf>,
     },
     /// Read a token on stdin and print the hash to put in agents.json
     HashToken,
@@ -267,6 +271,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             state,
             listen,
             agents,
+            notify,
         } => {
             let state = state.unwrap_or_else(|| home().join(".local/state/agent-bridge"));
             let agents_file =
@@ -294,7 +299,27 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     bridge.bad_lines
                 );
             }
-            let app = Arc::new(AppState::new(bridge, tokens)?);
+            let notify_file = notify
+                .clone()
+                .unwrap_or_else(|| home().join(".config/agent-bridge/notify.json"));
+            let targets: BTreeMap<String, agent_bridge::notify::Target> = if notify_file.exists() {
+                let raw = std::fs::read_to_string(&notify_file)
+                    .with_context(|| format!("reading {}", notify_file.display()))?;
+                serde_json::from_str(&raw)
+                    .with_context(|| format!("parsing {}", notify_file.display()))?
+            } else {
+                anyhow::ensure!(notify.is_none(), "{} does not exist", notify_file.display());
+                BTreeMap::new()
+            };
+            for a in targets.keys() {
+                anyhow::ensure!(map.contains_key(a), "notify.json names unknown agent {a}");
+            }
+            eprintln!(
+                "agent-bridge: push wake-ups for {:?}",
+                targets.keys().collect::<Vec<_>>()
+            );
+            let app = Arc::new(AppState::new(bridge, tokens)?.with_push(targets));
+            app.spawn_monitor();
             let listener = tokio::net::TcpListener::bind(&listen)
                 .await
                 .with_context(|| format!("binding {listen}"))?;

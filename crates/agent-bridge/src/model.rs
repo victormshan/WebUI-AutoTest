@@ -26,6 +26,9 @@ pub enum Kind {
     Close,
     /// Requester withdraws the task.
     Cancel,
+    /// A task paused for the user resumes after the user's recorded decision. Only the service
+    /// writes it (from `POST /v1/user/decisions`), never an agent directly.
+    Resume,
 }
 
 impl Kind {
@@ -40,7 +43,10 @@ impl Kind {
     /// Kinds the other side has to act on, and therefore wake it. Acks, progress and closing are
     /// informational and never wake anyone (design §5: no wake storms).
     pub fn wakes(self) -> bool {
-        !matches!(self, Kind::Ack | Kind::Progress | Kind::Close)
+        !matches!(
+            self,
+            Kind::Ack | Kind::Progress | Kind::Close | Kind::Resume
+        )
     }
 }
 
@@ -198,6 +204,11 @@ pub struct Task {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paused_reason: Option<String>,
     pub question_rounds: u32,
+    /// Rounds and messages counted from here on (moved forward when the user resumes the task).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub limit_base_rounds: u32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub limit_base_messages: u32,
     pub messages: u32,
     pub last_n: u32,
     pub created_at: DateTime<Utc>,
@@ -205,4 +216,8 @@ pub struct Task {
     /// Message numbers replaced by a later `supersedes`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub superseded: Vec<u32>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }

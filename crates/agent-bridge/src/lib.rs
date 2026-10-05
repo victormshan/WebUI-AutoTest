@@ -11,8 +11,10 @@ pub mod client;
 pub mod inbox;
 pub mod mcp;
 pub mod model;
+pub mod notify;
 pub mod service;
 pub mod store;
+pub mod user;
 
 /// Message protocol spoken by this service. The file protocol it replaces was "0".
 pub const PROTOCOL: &str = "1";
