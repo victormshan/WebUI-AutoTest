@@ -76,6 +76,15 @@ impl Bridge {
                 bad_lines += 1;
                 continue;
             };
+            if first.imported {
+                // An archived file-protocol task: kept as a record, not replayed by the rules.
+                let rest: Vec<Message> = iter.collect();
+                task = archived(task, &rest);
+                let mut messages = vec![first];
+                messages.extend(rest);
+                tasks.insert(id, Entry { task, messages });
+                continue;
+            }
             let mut messages = vec![first];
             for m in iter {
                 let mut next = task.clone();
@@ -94,6 +103,53 @@ impl Bridge {
             tasks,
             bad_lines,
         })
+    }
+
+    /// Whether the store holds message `n` of `task` from `from` (mirror self-check).
+    pub fn knows(&self, task: &str, n: u32, from: &str) -> bool {
+        self.tasks
+            .get(task)
+            .is_some_and(|e| e.messages.iter().any(|m| m.n == n && m.from == from))
+    }
+
+    /// Stores a finished file-protocol task as a closed archive (see `import.rs`). Idempotent:
+    /// importing the same messages again is a no-op; different content under an existing id is
+    /// refused.
+    pub fn import_task(&mut self, msgs: Vec<Message>) -> Result<bool, BridgeError> {
+        let first = msgs
+            .first()
+            .ok_or_else(|| BridgeError::Invalid("nothing to import".into()))?;
+        let id = first.task.clone();
+        if let Some(e) = self.tasks.get(&id) {
+            let same = e.messages.len() == msgs.len()
+                && e.messages
+                    .iter()
+                    .zip(&msgs)
+                    .all(|(a, b)| a.n == b.n && a.from == b.from && a.body == b.body);
+            return if same {
+                Ok(false)
+            } else {
+                Err(BridgeError::Exists(id))
+            };
+        }
+        if !msgs.iter().all(|m| m.imported && m.task == id) {
+            return Err(BridgeError::Invalid(
+                "only imported messages of one task".into(),
+            ));
+        }
+        let task = open_task(first, &self.agents)?;
+        let task = archived(task, &msgs[1..]);
+        for (i, m) in msgs.iter().enumerate() {
+            self.store.append(m, i == 0)?;
+        }
+        self.tasks.insert(
+            id,
+            Entry {
+                task,
+                messages: msgs,
+            },
+        );
+        Ok(true)
     }
 
     /// The store's directory (other state, such as read cursors, lives next to the tasks).
@@ -276,7 +332,20 @@ fn build(task: &str, n: u32, from: &str, kind: Kind, d: Draft) -> Message {
         session_epoch: d.session_epoch,
         protocol: d.protocol.unwrap_or_else(|| PROTOCOL.into()),
         at: Utc::now(),
+        imported: false,
     }
+}
+
+/// The derived view of an imported (closed) task.
+fn archived(mut t: Task, rest: &[Message]) -> Task {
+    t.state = State::Closed;
+    t.messages = 1 + rest.len() as u32;
+    t.question_rounds = rest.iter().filter(|m| m.kind == Kind::Question).count() as u32;
+    if let Some(last) = rest.last() {
+        t.last_n = last.n;
+        t.updated_at = last.at;
+    }
+    t
 }
 
 /// Validates message 1 and derives the task it opens.

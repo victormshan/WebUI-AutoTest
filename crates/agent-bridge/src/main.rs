@@ -45,6 +45,22 @@ enum Cmd {
         /// Default: ~/.config/agent-bridge/notify.json if it exists (agents not listed long-poll)
         #[arg(long)]
         notify: Option<PathBuf>,
+        /// Read-only mirror of every message (e.g. /mnt/d/cc-tasks/claude-bridge/tasks)
+        #[arg(long)]
+        mirror: Option<PathBuf>,
+        /// claude-step-relay data dir: messages of tasks with an exprId are noted in its trace
+        #[arg(long)]
+        step_relay_dir: Option<PathBuf>,
+    },
+    /// Import finished tasks of the old file protocol (run while the service is stopped)
+    Import {
+        #[arg(long)]
+        state: Option<PathBuf>,
+        #[arg(long)]
+        agents: Option<PathBuf>,
+        /// Directory holding <taskId>/msg-<n>-(claude.md|dsh.json)
+        #[arg(long)]
+        dir: PathBuf,
     },
     /// Read a token on stdin and print the hash to put in agents.json
     HashToken,
@@ -263,6 +279,51 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             print(&json!({ "messages": m }));
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Import { state, agents, dir } => {
+            let state = state.unwrap_or_else(|| home().join(".local/state/agent-bridge"));
+            let agents_file =
+                agents.unwrap_or_else(|| home().join(".config/agent-bridge/agents.json"));
+            let raw = std::fs::read_to_string(&agents_file)
+                .with_context(|| format!("reading {}", agents_file.display()))?;
+            let map: BTreeMap<String, String> = serde_json::from_str(&raw)?;
+            let names: Vec<&str> = map.keys().map(String::as_str).collect();
+            let mut bridge = Bridge::open(&state, &names)?;
+            let mut refused = 0;
+            let mut dirs: Vec<PathBuf> = std::fs::read_dir(&dir)
+                .with_context(|| format!("reading {}", dir.display()))?
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            dirs.sort();
+            for d in dirs {
+                let name = d
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                match agent_bridge::import::read_task(&d)
+                    .map_err(|e| format!("{e:#}"))
+                    .and_then(|m| {
+                        let n = m.len();
+                        bridge
+                            .import_task(m)
+                            .map(|fresh| (fresh, n))
+                            .map_err(|e| format!("{e:#}"))
+                    }) {
+                    Ok((true, n)) => println!("imported {name}: {n} messages"),
+                    Ok((false, _)) => println!("unchanged {name}: already imported"),
+                    Err(e) => {
+                        refused += 1;
+                        println!("refused {name}: {e}");
+                    }
+                }
+            }
+            Ok(if refused == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
         Cmd::Mcp => {
             agent_bridge::mcp::serve_stdio(Client::from_env()?).await?;
             Ok(ExitCode::SUCCESS)
@@ -272,6 +333,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             listen,
             agents,
             notify,
+            mirror,
+            step_relay_dir,
         } => {
             let state = state.unwrap_or_else(|| home().join(".local/state/agent-bridge"));
             let agents_file =
@@ -318,7 +381,19 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 "agent-bridge: push wake-ups for {:?}",
                 targets.keys().collect::<Vec<_>>()
             );
-            let app = Arc::new(AppState::new(bridge, tokens)?.with_push(targets));
+            let mut app = AppState::new(bridge, tokens)?.with_push(targets);
+            if let Some(m) = mirror {
+                eprintln!("agent-bridge: read-only mirror at {}", m.display());
+                app = app.with_mirror(m);
+            }
+            if let Some(d) = step_relay_dir {
+                app = app.with_step_relay(d);
+            }
+            let app = Arc::new(app);
+            // Wait for the start-up mirror sync so drift is known before serving.
+            let _ = app
+                .sync_mirror()
+                .recv_timeout(std::time::Duration::from_secs(60));
             app.spawn_monitor();
             let listener = tokio::net::TcpListener::bind(&listen)
                 .await

@@ -186,6 +186,10 @@ pub struct Message {
     pub session_epoch: Option<String>,
     pub protocol: String,
     pub at: DateTime<Utc>,
+    /// Imported from the old file protocol: kept as a record, never replayed through the
+    /// state machine (those tasks were not run under its rules).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
 }
 
 /// Derived view of a task.

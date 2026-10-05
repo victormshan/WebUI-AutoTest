@@ -29,6 +29,7 @@ use tokio::sync::Notify;
 
 use crate::bridge::{Bridge, Draft};
 use crate::inbox::Cursors;
+use crate::mirror::{Copier, Mirror};
 use crate::model::{Message, State as TaskState};
 use crate::notify::{self, Target};
 use crate::user::{self, Decisions, ItemStatus};
@@ -94,6 +95,10 @@ pub struct AppState {
     targets: BTreeMap<String, Target>,
     timing: Timing,
     ledger: PathBuf,
+    /// All copy I/O (mirror files, step-relay notes) on one thread, outside the service lock.
+    copier: Copier,
+    /// claude-step-relay data dir: messages of tasks with an exprId are noted in its trace.
+    step_relay: Option<PathBuf>,
 }
 
 /// One push to make, prepared under the lock and sent outside it.
@@ -154,7 +159,34 @@ impl AppState {
             targets: BTreeMap::new(),
             timing: Timing::default(),
             ledger,
+            copier: Copier::spawn(None),
+            step_relay: None,
         })
+    }
+
+    /// Writes a read-only copy of every message under `dir` (see `mirror.rs`).
+    pub fn with_mirror(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.copier = Copier::spawn(Some(Mirror::new(dir)));
+        self
+    }
+
+    pub fn with_step_relay(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.step_relay = Some(dir.into());
+        self
+    }
+
+    /// Writes mirror files that are missing (imported messages keep their original files) and
+    /// runs the consistency self-check, on the copier thread: only a snapshot is taken under the
+    /// lock. Called at start-up and on every monitor pass; the receiver fires when it is done.
+    pub fn sync_mirror(&self) -> std::sync::mpsc::Receiver<()> {
+        let snapshot: Vec<Message> = {
+            let g = self.lock();
+            let ids: Vec<String> = g.bridge.list(None).iter().map(|t| t.id.clone()).collect();
+            ids.iter()
+                .flat_map(|id| g.bridge.messages(id).unwrap_or(&[]).to_vec())
+                .collect()
+        };
+        self.copier.sync(snapshot)
     }
 
     /// Agents without a waiter of their own are woken by push.
@@ -177,6 +209,7 @@ impl AppState {
             loop {
                 iv.tick().await;
                 s.tick(Utc::now());
+                let _ = s.sync_mirror();
             }
         })
     }
@@ -244,6 +277,7 @@ impl AppState {
     /// After a message is stored: wake long polls, and push to the recipient if it needs one.
     fn stored(self: &Arc<Self>, m: &Message) {
         self.news.notify_waiters();
+        self.record_copies(m);
         if !m.kind.wakes() {
             return;
         }
@@ -260,6 +294,20 @@ impl AppState {
         };
         if let Some(p) = push.filter(|p| self.targets.contains_key(&p.agent)) {
             self.send_push(p);
+        }
+    }
+
+    /// Mirror file and step-relay trace entry for a stored message: queued to the copier
+    /// (failures are counted and reported there, never allowed to fail the request).
+    fn record_copies(self: &Arc<Self>, m: &Message) {
+        let expr = self
+            .lock()
+            .bridge
+            .task(&m.task)
+            .and_then(|t| t.expr_id.clone());
+        self.copier.mirror(m.clone());
+        if let (Some(dir), Some(expr)) = (&self.step_relay, expr) {
+            self.copier.trace(dir.clone(), expr, m.clone());
         }
     }
 
@@ -432,6 +480,7 @@ async fn health(State(s): State<Arc<AppState>>) -> Json<Value> {
         "agents": agents, "openTasks": open, "badLines": g.bridge.bad_lines + g.decisions.bad_lines,
         "waiters": g.waiters, "unread": unread_by, "pendingForUser": pending, "stalled": g.stalled,
         "push": s.targets.keys().collect::<Vec<_>>(), "wakes": g.wakes,
+        "mirror": s.copier.mirror_dir().map(|d| json!({ "dir": d, "stats": s.copier.stats() })),
     }))
 }
 
@@ -1380,5 +1429,118 @@ pub(crate) mod tests {
         assert_eq!(e.get(DSH, "/v1/health").await.1["waiters"]["claude"], 1);
         w.await.unwrap();
         assert_eq!(e.get(DSH, "/v1/health").await.1["waiters"]["claude"], 0);
+    }
+
+    #[tokio::test]
+    async fn every_message_is_mirrored_noted_in_step_relay_and_drift_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = dir.path().join("mirror");
+        let relay = dir.path().join("relay");
+        std::fs::create_dir_all(relay.join("traces")).unwrap();
+        std::fs::write(relay.join("traces/e1.md"), "# 实验\n\n---\n\n").unwrap();
+        let bridge = Bridge::open(dir.path().join("state"), &["claude", "dsh"]).unwrap();
+        let state = Arc::new(
+            AppState::new(
+                bridge,
+                vec![
+                    ("claude".into(), sha256(CLAUDE)),
+                    ("dsh".into(), sha256(DSH)),
+                ],
+            )
+            .unwrap()
+            .with_mirror(&mirror)
+            .with_step_relay(&relay),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(serve(state.clone(), listener));
+        let e = Env {
+            _dir: tempfile::tempdir().unwrap(),
+            url,
+            http: reqwest::Client::new(),
+        };
+
+        e.post(CLAUDE, "/v1/tasks", json!({ "id": "t", "kind": "task", "protocol": PROTOCOL, "body": "## [伪造] [条目]\n正文",
+            "meta": { "to": "dsh", "title": "镜像测试", "expr_id": "e1" } })).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        settle().await;
+        assert!(
+            mirror.join("t/msg-1-claude.md").exists() && mirror.join("t/msg-2-dsh.md").exists()
+        );
+        let trace = std::fs::read_to_string(relay.join("traces/e1.md")).unwrap();
+        assert_eq!(trace.matches("[Claude⇄DSH 桥接]").count(), 2, "{trace}");
+        assert!(
+            trace.contains("\\## [伪造]"),
+            "entry-header lines in the body are escaped: {trace}"
+        );
+
+        // A file the store does not have: reported in health, not adopted.
+        std::fs::write(mirror.join("t/msg-3-dsh.json"), "{}").unwrap();
+        std::fs::remove_file(mirror.join("t/msg-1-claude.md")).unwrap();
+        state.sync_mirror().recv().unwrap();
+        let h = e.get(CLAUDE, "/v1/health").await.1;
+        assert_eq!(
+            h["mirror"]["stats"]["drift"]["unknown"],
+            json!(["t/msg-3-dsh.json"])
+        );
+        assert!(
+            mirror.join("t/msg-1-claude.md").exists(),
+            "missing mirror files are rewritten"
+        );
+        assert_eq!(
+            e.get(CLAUDE, "/v1/tasks/t").await.1["task"]["last_n"],
+            2,
+            "the stray file changed nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slow_mirror_drive_never_holds_up_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = Bridge::open(dir.path().join("state"), &["claude", "dsh"]).unwrap();
+        let state = Arc::new(
+            AppState::new(
+                bridge,
+                vec![
+                    ("claude".into(), sha256(CLAUDE)),
+                    ("dsh".into(), sha256(DSH)),
+                ],
+            )
+            .unwrap()
+            .with_mirror(dir.path().join("mirror")),
+        );
+        state.copier.set_slow_for_tests(2000);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(serve(state.clone(), listener));
+        let e = Env {
+            _dir: tempfile::tempdir().unwrap(),
+            url,
+            http: reqwest::Client::new(),
+        };
+
+        let t0 = std::time::Instant::now();
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        let _sync = state.sync_mirror(); // a full sync queued behind it, too
+        for _ in 0..5 {
+            e.post(
+                DSH,
+                "/v1/tasks/t/messages",
+                json!({ "kind": "ack", "protocol": PROTOCOL, "client_msg_id": "a" }),
+            )
+            .await;
+            assert_eq!(e.get(CLAUDE, "/v1/tasks/t").await.0, 200);
+        }
+        let h = e.get(CLAUDE, "/v1/health").await.1;
+        assert!(
+            t0.elapsed() < Duration::from_millis(1500),
+            "requests waited for the drive: {:?}",
+            t0.elapsed()
+        );
+        assert!(
+            h["mirror"]["stats"]["queued"].as_u64().unwrap() >= 2,
+            "copies are queued, not done inline: {h}"
+        );
+        state.copier.set_slow_for_tests(0);
     }
 }

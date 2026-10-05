@@ -167,6 +167,7 @@ mod tests {
             session_epoch: None,
             protocol: crate::PROTOCOL.into(),
             at: chrono::Utc::now(),
+            imported: false,
         }
     }
 

@@ -8,8 +8,10 @@
 
 pub mod bridge;
 pub mod client;
+pub mod import;
 pub mod inbox;
 pub mod mcp;
+pub mod mirror;
 pub mod model;
 pub mod notify;
 pub mod service;
