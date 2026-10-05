@@ -3,7 +3,7 @@
 # `workflow` scope — the implementer cannot change this file, which is the point).
 #
 # Merge commits fail the check (an "evil merge" could carry unreviewed content): integrate with
-# fast-forward / rebase only, or add --allow-merges if you accept that risk.
+# fast-forward / rebase only.
 #
 # Fill in:
 #   REVIEW_GATE_PUBKEY  output of `review-gate pubkey` (or `curl http://127.0.0.1:7878/pubkey`)
@@ -32,7 +32,10 @@ jobs:
           fetch-depth: 0
           path: repo
       - name: Fetch attestation notes
-        run: git -C repo fetch origin "refs/notes/review-gate:refs/notes/review-gate"
+        # Missing before the first attested push; unattested commits then fail the Verify step.
+        run: |
+          git -C repo fetch origin "+refs/notes/review-gate:refs/notes/review-gate" \
+            || echo "no refs/notes/review-gate on the remote yet"
       - name: Check out the pinned verifier
         uses: actions/checkout@v4
         with:
@@ -43,7 +46,23 @@ jobs:
       - name: Build verifier
         run: cargo build --release --locked -p review-gate --manifest-path verifier/Cargo.toml
       - name: Verify
+        # Commits that only touch .github/workflows/ are skipped: they can only be pushed with the
+        # `workflow` scope, which the implementer does not have (this file is how a human pins
+        # the key). Every other commit, merges included, must carry a valid attestation.
         run: |
           head=${{ github.event.pull_request.head.sha || github.sha }}
-          verifier/target/release/review-gate verify-range --repo repo \
-            --pubkey "$REVIEW_GATE_PUBKEY" "$REVIEW_GATE_SINCE..$head"
+          # A bad SINCE must fail loudly: a failing $(...) in a for list would just mean "no commits".
+          git -C repo merge-base --is-ancestor "$REVIEW_GATE_SINCE" "$head" \
+            || { echo "REVIEW_GATE_SINCE $REVIEW_GATE_SINCE is not an ancestor of $head"; exit 1; }
+          commits=$(git -C repo rev-list --reverse "$REVIEW_GATE_SINCE..$head")
+          echo "checking $(echo "$commits" | grep -c .) commit(s) after $REVIEW_GATE_SINCE"
+          fail=0
+          for c in $commits; do
+            if [ "$(git -C repo rev-list --no-walk --parents "$c" | wc -w)" -eq 2 ] \
+              && ! git -C repo diff-tree --no-commit-id --name-only -r "$c" | grep -qv '^\.github/workflows/'; then
+              echo "skip $c (workflow-only change)"
+              continue
+            fi
+            verifier/target/release/review-gate verify --repo repo --pubkey "$REVIEW_GATE_PUBKEY" "$c" || fail=1
+          done
+          exit $fail
