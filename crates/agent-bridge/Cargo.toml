@@ -16,6 +16,8 @@ anyhow.workspace = true
 axum = "0.8.9"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { workspace = true, features = ["derive"] }
+reqwest.workspace = true
+rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.0"
@@ -23,5 +25,4 @@ thiserror = "2"
 tokio.workspace = true
 
 [dev-dependencies]
-reqwest.workspace = true
 tempfile = "3"

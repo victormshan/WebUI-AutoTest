@@ -7,7 +7,9 @@
 //! decided by each side's own review gate.
 
 pub mod bridge;
+pub mod client;
 pub mod inbox;
+pub mod mcp;
 pub mod model;
 pub mod service;
 pub mod store;
