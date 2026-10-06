@@ -6,7 +6,7 @@
 //! edit or remove it; a second, different text for the same item is kept too and marks the item
 //! as a conflict for the user to settle — an agent cannot quietly "correct" what the user said.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -26,6 +26,10 @@ pub struct Decision {
     pub sha256: String,
     pub relayed_by: String,
     pub at: DateTime<Utc>,
+    /// `verbatim` (the user's own words) or `paraphrase` (a retelling): a paraphrase must never
+    /// pass as the user's words (P3). Older records carry none and were recorded as verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -47,6 +51,70 @@ pub struct PendingItem {
     pub status: ItemStatus,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<Decision>,
+    /// Who is to ask the user (Q5): the relay named in the message, else whoever raised it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asked_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asked_at: Option<DateTime<Utc>>,
+    /// Undecided and nobody has asked the user for longer than allowed (Q5).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub overdue: bool,
+}
+
+impl PendingItem {
+    pub fn new(item: String, task: &str, source: &'static str, text: String) -> Self {
+        PendingItem {
+            item,
+            task: task.into(),
+            source,
+            text,
+            status: ItemStatus::Open,
+            decisions: vec![],
+            relay: None,
+            asked_by: None,
+            asked_at: None,
+            overdue: false,
+        }
+    }
+}
+
+/// Who asked the user about which item (`asked.jsonl`, append-only).
+pub fn load_asked(root: &Path) -> Result<BTreeMap<String, (String, DateTime<Utc>)>> {
+    let mut out = BTreeMap::new();
+    if let Ok(f) = File::open(root.join("asked.jsonl")) {
+        for line in BufReader::new(f).lines().map_while(|l| l.ok()) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
+                && let (Some(item), Some(by), Some(at)) =
+                    (v["item"].as_str(), v["by"].as_str(), v["at"].as_str())
+                && let Ok(at) = DateTime::parse_from_rfc3339(at)
+            {
+                out.insert(item.to_string(), (by.to_string(), at.with_timezone(&Utc)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub fn record_asked(root: &Path, item: &str, by: &str, at: DateTime<Utc>) -> Result<()> {
+    let mut opts = OpenOptions::new();
+    opts.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(root.join("asked.jsonl"))?;
+    f.write_all(
+        format!(
+            "{}\n",
+            serde_json::json!({ "item": item, "by": by, "at": at })
+        )
+        .as_bytes(),
+    )?;
+    f.sync_all()?;
+    Ok(())
 }
 
 pub struct Decisions {
@@ -79,6 +147,23 @@ impl Decisions {
         })
     }
 
+    pub fn items(&self) -> impl Iterator<Item = &str> {
+        self.list.iter().map(|d| d.item.as_str())
+    }
+
+    /// Next free `<task>#direct#<k>`.
+    pub fn next_direct(&self, task: &str) -> String {
+        let k = self
+            .list
+            .iter()
+            .filter(|d| d.item.starts_with(&format!("{task}#direct#")))
+            .map(|d| d.item.clone())
+            .collect::<BTreeSet<_>>()
+            .len()
+            + 1;
+        format!("{task}#direct#{k}")
+    }
+
     pub fn for_item(&self, item: &str) -> Vec<Decision> {
         self.list
             .iter()
@@ -107,6 +192,7 @@ impl Decisions {
         item: &str,
         verbatim: &str,
         by: &str,
+        form: Option<&str>,
     ) -> Result<(ItemStatus, Decision)> {
         let verbatim = verbatim.trim();
         anyhow::ensure!(
@@ -119,6 +205,7 @@ impl Decisions {
             sha256: hex(&sha256(verbatim)),
             relayed_by: by.into(),
             at: Utc::now(),
+            form: form.map(str::to_string),
         };
         if let Some(same) = self
             .list
@@ -148,57 +235,92 @@ impl Decisions {
     }
 }
 
+/// Inputs for `pending` beyond the store itself.
+pub struct PendingCtx<'a> {
+    pub stalled: &'a BTreeSet<String>,
+    pub asked: &'a BTreeMap<String, (String, DateTime<Utc>)>,
+    pub now: DateTime<Utc>,
+    pub ask_overdue_after: chrono::Duration,
+}
+
 /// Everything waiting for the user (decided items too when `all`).
 pub fn pending(
     bridge: &Bridge,
     decisions: &Decisions,
-    stalled: &BTreeSet<String>,
+    ctx: &PendingCtx,
     all: bool,
 ) -> Vec<PendingItem> {
     let mut out = Vec::new();
-    let mut push = |item: String, task: &str, source: &'static str, text: String| {
-        let status = decisions.status(&item);
-        if all || status != ItemStatus::Decided {
-            out.push(PendingItem {
-                decisions: decisions.for_item(&item),
-                item,
-                task: task.into(),
-                source,
-                text,
-                status,
-            });
+    let mut push = |mut p: PendingItem| {
+        p.status = decisions.status(&p.item);
+        p.decisions = decisions.for_item(&p.item);
+        if let Some((by, at)) = ctx.asked.get(&p.item) {
+            p.asked_by = Some(by.clone());
+            p.asked_at = Some(*at);
+        }
+        if all || p.status != ItemStatus::Decided {
+            out.push(p);
         }
     };
     for t in bridge.list(None) {
         if let Ok(ms) = bridge.messages(&t.id) {
             // Archived file-protocol messages are history: their items were handled back then.
             for m in ms.iter().filter(|m| !m.imported) {
-                for (i, text) in m.needs_user.iter().enumerate() {
-                    push(
+                for (i, nu) in m.needs_user.iter().enumerate() {
+                    let mut p = PendingItem::new(
                         format!("{}#{}#{}", t.id, m.n, i + 1),
                         &t.id,
                         "needs_user",
-                        format!("[{}] {}", m.from, text.text),
+                        format!("[{}] {}", m.from, nu.text),
                     );
+                    p.relay = Some(match nu.relay {
+                        Some(crate::model::Relay::Claude) => "claude".into(),
+                        Some(crate::model::Relay::Dsh) => "dsh".into(),
+                        Some(crate::model::Relay::Either) => "either".into(),
+                        None => m.from.clone(),
+                    });
+                    p.overdue = !ctx.asked.contains_key(&p.item)
+                        && decisions.status(&p.item) == ItemStatus::Open
+                        && ctx.now - m.at >= ctx.ask_overdue_after;
+                    push(p);
                 }
             }
         }
         if t.state == State::PausedForUser {
-            push(
+            push(PendingItem::new(
                 format!("{}#paused#{}", t.id, t.last_n),
                 &t.id,
                 "paused",
                 t.paused_reason.clone().unwrap_or_default(),
-            );
+            ));
         }
-        if stalled.contains(&t.id) && !t.state.terminal() {
-            push(
+        if ctx.stalled.contains(&t.id) && !t.state.terminal() {
+            push(PendingItem::new(
                 format!("{}#stalled#{}", t.id, t.last_n),
                 &t.id,
                 "stalled",
                 format!("任务 {} 超过一天没有进展（状态 {}）", t.id, t.state),
-            );
+            ));
         }
+    }
+    // Decisions the user gave directly to one side, recorded against a task (P3).
+    let direct: BTreeSet<String> = decisions
+        .items()
+        .filter(|i| i.contains("#direct#"))
+        .map(str::to_string)
+        .collect();
+    for item in direct {
+        let task = item
+            .split("#direct#")
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        push(PendingItem::new(
+            item,
+            &task,
+            "direct",
+            "用户直接给出的决定".into(),
+        ));
     }
     out
 }
@@ -212,19 +334,19 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut ds = Decisions::open(d.path()).unwrap();
         assert_eq!(ds.status("t#1#1"), ItemStatus::Open);
-        assert!(ds.record("t#1#1", "  ", "claude").is_err());
-        let (s, first) = ds.record("t#1#1", "保留 Windows", "claude").unwrap();
+        assert!(ds.record("t#1#1", "  ", "claude", None).is_err());
+        let (s, first) = ds.record("t#1#1", "保留 Windows", "claude", None).unwrap();
         assert_eq!(
             (s, first.relayed_by.as_str()),
             (ItemStatus::Decided, "claude")
         );
         assert_eq!(
-            ds.record("t#1#1", "保留 Windows", "dsh").unwrap().0,
+            ds.record("t#1#1", "保留 Windows", "dsh", None).unwrap().0,
             ItemStatus::Decided,
             "same words: no-op"
         );
         assert_eq!(
-            ds.record("t#1#1", "保留 WSL", "dsh").unwrap().0,
+            ds.record("t#1#1", "保留 WSL", "dsh", None).unwrap().0,
             ItemStatus::Conflict
         );
         drop(ds);

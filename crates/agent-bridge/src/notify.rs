@@ -159,7 +159,15 @@ async fn curl(url: &str, token: &str, body: &Value) -> Result<Outcome, String> {
 
 /// Wakes the agent behind `t` about message `n` of `task`. Never fails: problems are reported
 /// in the outcome so they end up in the ledger instead of disappearing.
-pub async fn wake(t: &Target, task: &str, n: u32, kind: &str, summary: &str) -> Outcome {
+/// `urgent` asks the endpoint to wake at once rather than coalesce (Q2).
+pub async fn wake(
+    t: &Target,
+    task: &str,
+    n: u32,
+    kind: &str,
+    summary: &str,
+    urgent: bool,
+) -> Outcome {
     let token = match read_token(&t.token_file) {
         Ok(tok) => tok,
         Err(reason) => {
@@ -173,7 +181,7 @@ pub async fn wake(t: &Target, task: &str, n: u32, kind: &str, summary: &str) -> 
         }
     };
     let summary: String = summary.chars().take(480).collect();
-    let body = json!({ "taskId": task, "n": n, "kind": kind, "summary": summary, "source": "agent-bridge" });
+    let body = json!({ "taskId": task, "n": n, "kind": kind, "summary": summary, "source": "agent-bridge", "urgent": urgent });
     let attempt = match t.transport {
         Transport::Native => native(&t.url, &token, &body).await,
         Transport::CurlExe => curl(&t.url, &token, &body).await,
@@ -228,7 +236,7 @@ mod tests {
             token_file: d.path().join("none"),
             transport: Transport::Native,
         };
-        let o = wake(&t, "t", 1, "task", "s").await;
+        let o = wake(&t, "t", 1, "task", "s", false).await;
         assert!(!o.agent_woken && o.status.is_none() && o.reason.contains("token file"));
         std::fs::write(d.path().join("short"), "abc").unwrap();
         let t = Target {
@@ -236,7 +244,7 @@ mod tests {
             ..t
         };
         assert!(
-            wake(&t, "t", 1, "task", "s")
+            wake(&t, "t", 1, "task", "s", false)
                 .await
                 .reason
                 .contains("too short")

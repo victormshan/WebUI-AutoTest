@@ -32,7 +32,7 @@ use crate::inbox::Cursors;
 use crate::mirror::{Copier, Mirror};
 use crate::model::{Message, State as TaskState};
 use crate::notify::{self, Target};
-use crate::user::{self, Decisions, ItemStatus};
+use crate::user::{self, Decisions, ItemStatus, PendingItem};
 use crate::{BridgeError, PROTOCOL};
 
 /// Longest a single long poll may wait.
@@ -50,6 +50,15 @@ pub struct Timing {
     pub stall_after: chrono::Duration,
     /// At most one stall notice per task per this long.
     pub stall_cooldown: chrono::Duration,
+    /// Nudge the receiver of an unfinished task after this long without a message from it (P2).
+    pub nudge_after: chrono::Duration,
+    /// Nudges per stretch of silence; after that the user is told instead (P2).
+    pub nudge_max: u32,
+    /// Unread messages for an agent without push and without a waiter go to the user after this
+    /// long (P5: only the user can bring Claude back).
+    pub unread_alert_after: chrono::Duration,
+    /// An undecided needs_user item nobody has asked the user about is overdue after this (Q5).
+    pub ask_overdue_after: chrono::Duration,
 }
 
 impl Default for Timing {
@@ -59,6 +68,10 @@ impl Default for Timing {
             rewake_after: chrono::Duration::minutes(15),
             stall_after: chrono::Duration::hours(24),
             stall_cooldown: chrono::Duration::hours(24),
+            nudge_after: chrono::Duration::hours(2),
+            nudge_max: 1,
+            unread_alert_after: chrono::Duration::minutes(30),
+            ask_overdue_after: chrono::Duration::hours(12),
         }
     }
 }
@@ -72,6 +85,33 @@ struct WakeStats {
     last: Option<Value>,
 }
 
+/// What each agent's side looks like from here (P9, Q4).
+#[derive(Debug, Default, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Presence {
+    /// Last authenticated request from the agent itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_request_at: Option<DateTime<Utc>>,
+    /// Last push to the agent and what came of it — a push reaching it is not the agent being up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_push_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_push_result: Option<String>,
+    /// What the agent declares about its platform (declared, not verified).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    platform: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    platform_at: Option<DateTime<Utc>>,
+}
+
+/// Nudges sent for a task during the receiver's current silence (keyed by its last message).
+#[derive(Debug, Clone)]
+struct Nudges {
+    since_n: u32,
+    count: u32,
+    last_at: DateTime<Utc>,
+}
+
 struct Inner {
     bridge: Bridge,
     cursors: Cursors,
@@ -83,6 +123,16 @@ struct Inner {
     /// Long polls currently waiting, per agent.
     waiters: BTreeMap<String, usize>,
     wakes: WakeStats,
+    presence: BTreeMap<String, Presence>,
+    /// Outcome of the push made for (task, n): true = the agent was woken. A message whose
+    /// push woke the agent is never pushed again (dedup by identity, bridge-wake-dedup B).
+    pushed: BTreeMap<(String, u32), bool>,
+    nudges: BTreeMap<String, Nudges>,
+    /// Who asked the user about which needs_user item, and when (Q5).
+    asked: BTreeMap<String, (String, DateTime<Utc>)>,
+    /// Items the monitor raised for the user on its last pass: unread messages nobody can be
+    /// woken for (P5) and receivers still silent after their nudges (P2).
+    alerts: Vec<PendingItem>,
 }
 
 pub struct AppState {
@@ -109,6 +159,11 @@ struct Push {
     kind: String,
     why: &'static str,
     summary: String,
+    urgent: bool,
+}
+
+fn bridge_root_for_asked(ledger: &std::path::Path) -> &std::path::Path {
+    ledger.parent().unwrap_or(std::path::Path::new("."))
 }
 
 pub fn sha256(s: &str) -> [u8; 32] {
@@ -153,6 +208,11 @@ impl AppState {
                 stall_notice: BTreeMap::new(),
                 waiters: BTreeMap::new(),
                 wakes: WakeStats::default(),
+                presence: BTreeMap::new(),
+                pushed: BTreeMap::new(),
+                nudges: BTreeMap::new(),
+                asked: user::load_asked(bridge_root_for_asked(&ledger))?,
+                alerts: Vec::new(),
             }),
             tokens,
             news: Notify::new(),
@@ -220,6 +280,7 @@ impl AppState {
         {
             let mut g = self.lock();
             let mut stalled_now = BTreeSet::new();
+            let mut alerts = Vec::new();
             let tasks: Vec<crate::model::Task> = g
                 .bridge
                 .list(None)
@@ -245,9 +306,64 @@ impl AppState {
                     && g.cursors.get(&to, &t.id) < last.n
                     && now - last.at >= self.timing.rewake_after
                     && self.targets.contains_key(&to)
+                    && g.pushed.get(&(t.id.clone(), last.n)) != Some(&true)
                     && g.rewoken.insert((t.id.clone(), last.n))
                 {
                     pushes.push(push_for(&t, &last, &to, "rewake"));
+                }
+                // P2: the receiver went quiet on work it took on — nudge it, tell the requester;
+                // once the nudges are spent, the user hears of it.
+                if matches!(t.state, TaskState::Acked | TaskState::Working)
+                    && last.from == t.to
+                    && now - last.at >= self.timing.nudge_after
+                {
+                    let n = g.nudges.get(&t.id).filter(|x| x.since_n == last.n).cloned();
+                    let due = n
+                        .as_ref()
+                        .is_none_or(|x| now - x.last_at >= self.timing.nudge_after);
+                    let count = n.as_ref().map_or(0, |x| x.count);
+                    if count < self.timing.nudge_max && self.targets.contains_key(&t.to) {
+                        if due {
+                            g.nudges.insert(
+                                t.id.clone(),
+                                Nudges {
+                                    since_n: last.n,
+                                    count: count + 1,
+                                    last_at: now,
+                                },
+                            );
+                            let mins = (now - last.at).num_minutes();
+                            let mut p = push_for(&t, &last, &t.to, "nudge");
+                            p.kind = "nudge".into();
+                            p.summary = format!(
+                                "任务 {}（{}）你上次发言后 {} 分钟没有新消息：请继续，或发 progress / result 说明情况｜读取：GET /v1/tasks/{}",
+                                t.id, t.title, mins, t.id
+                            );
+                            pushes.push(p);
+                            if self.targets.contains_key(&t.from) {
+                                let mut q = push_for(&t, &last, &t.from, "nudge");
+                                q.kind = "nudge_notice".into();
+                                q.summary = format!(
+                                    "已提醒 {} 继续任务 {}（{} 分钟无新消息）",
+                                    t.to, t.id, mins
+                                );
+                                pushes.push(q);
+                            }
+                        }
+                    } else if due {
+                        alerts.push(PendingItem::new(
+                            format!("{}#silent#{}", t.id, last.n),
+                            &t.id,
+                            "silent",
+                            format!(
+                                "{} 在任务 {} 上 {} 分钟没有新消息（已提醒 {} 次）：需要你叫它继续",
+                                t.to,
+                                t.id,
+                                (now - last.at).num_minutes(),
+                                count
+                            ),
+                        ));
+                    }
                 }
                 if now - t.updated_at >= self.timing.stall_after {
                     stalled_now.insert(t.id.clone());
@@ -268,18 +384,64 @@ impl AppState {
                 }
             }
             g.stalled = stalled_now;
+            // P5: messages for an agent that cannot be pushed to and is not listening.
+            let agents: Vec<String> = g.bridge.agents().map(str::to_string).collect();
+            for a in agents {
+                if self.targets.contains_key(&a) || g.waiters.get(&a).copied().unwrap_or(0) > 0 {
+                    continue;
+                }
+                let mut seen = BTreeSet::new();
+                for m in unread(&g, &a) {
+                    if !m.effective_wake().pushes()
+                        || now - m.at < self.timing.unread_alert_after
+                        || !seen.insert(m.task.clone())
+                    {
+                        continue;
+                    }
+                    let Some(t) = g.bridge.task(&m.task) else {
+                        continue;
+                    };
+                    if t.state == TaskState::AwaitingRestart {
+                        continue;
+                    }
+                    let busy = g.bridge.messages(&t.id).is_ok_and(|ms| {
+                        ms.iter().any(|x| {
+                            x.from == a
+                                && x.kind == crate::model::Kind::Progress
+                                && now - x.at < chrono::Duration::hours(2)
+                        })
+                    });
+                    if busy {
+                        continue;
+                    }
+                    alerts.push(PendingItem::new(
+                        format!("{}#unread#{}", t.id, m.n),
+                        &t.id,
+                        "unread",
+                        format!(
+                            "发给 {a} 的 {}（{}#{}）已 {} 分钟未读，{a} 不在线也无法推送：请唤起 {a}",
+                            m.kind,
+                            t.id,
+                            m.n,
+                            (now - m.at).num_minutes()
+                        ),
+                    ));
+                }
+            }
+            g.alerts = alerts;
         }
         for p in pushes {
-            self.send_push(p);
+            drop(self.send_push(p));
         }
     }
 
     /// After a message is stored: wake long polls, and push to the recipient if it needs one.
-    fn stored(self: &Arc<Self>, m: &Message) {
+    /// Returns the push in flight (true = recipient woken), if one was made.
+    fn stored(self: &Arc<Self>, m: &Message) -> Option<tokio::task::JoinHandle<bool>> {
         self.news.notify_waiters();
         self.record_copies(m);
         if !m.effective_wake().pushes() {
-            return;
+            return None;
         }
         let push = {
             let g = self.lock();
@@ -292,9 +454,67 @@ impl AppState {
                 push_for(t, m, &to, "new")
             })
         };
-        if let Some(p) = push.filter(|p| self.targets.contains_key(&p.agent)) {
-            self.send_push(p);
+        push.filter(|p| self.targets.contains_key(&p.agent))
+            .map(|p| self.send_push(p))
+    }
+
+    /// P5: how a just-stored message reached its recipient — kept apart from the task's own
+    /// state ("woken" is not "working on it").
+    async fn delivery(
+        self: &Arc<Self>,
+        m: &Message,
+        fresh: bool,
+        push: Option<tokio::task::JoinHandle<bool>>,
+    ) -> Value {
+        let (to, waiters, last_request_at) = {
+            let g = self.lock();
+            let to = g.bridge.task(&m.task).map_or(String::new(), |t| {
+                if m.from == t.from {
+                    t.to.clone()
+                } else {
+                    t.from.clone()
+                }
+            });
+            let w = g.waiters.get(&to).copied().unwrap_or(0);
+            let l = g.presence.get(&to).and_then(|p| p.last_request_at);
+            (to, w, l)
+        };
+        let push_state = if !fresh {
+            "duplicate"
+        } else if !m.effective_wake().pushes() {
+            "quiet"
+        } else if !self.targets.contains_key(&to) {
+            "no-push-target"
+        } else {
+            "sent"
+        };
+        let woken = match push {
+            Some(h) => tokio::time::timeout(Duration::from_secs(5), h)
+                .await
+                .ok()
+                .and_then(|r| r.ok()),
+            None => None,
+        };
+        json!({ "to": to, "waiters": waiters, "push": push_state, "woken": woken, "recipientLastRequestAt": last_request_at })
+    }
+
+    fn pending_items(&self, g: &Inner, all: bool) -> Vec<PendingItem> {
+        let ctx = user::PendingCtx {
+            stalled: &g.stalled,
+            asked: &g.asked,
+            now: Utc::now(),
+            ask_overdue_after: self.timing.ask_overdue_after,
+        };
+        let mut v = user::pending(&g.bridge, &g.decisions, &ctx, all);
+        for a in &g.alerts {
+            let mut p = a.clone();
+            p.status = g.decisions.status(&p.item);
+            p.decisions = g.decisions.for_item(&p.item);
+            if all || p.status != ItemStatus::Decided {
+                v.push(p);
+            }
         }
+        v
     }
 
     /// Mirror file and step-relay trace entry for a stored message: queued to the copier
@@ -311,13 +531,13 @@ impl AppState {
         }
     }
 
-    fn send_push(self: &Arc<Self>, p: Push) {
+    fn send_push(self: &Arc<Self>, p: Push) -> tokio::task::JoinHandle<bool> {
         let Some(target) = self.targets.get(&p.agent).cloned() else {
-            return;
+            return tokio::spawn(async { false });
         };
         let s = self.clone();
         tokio::spawn(async move {
-            let o = notify::wake(&target, &p.task, p.n, &p.kind, &p.summary).await;
+            let o = notify::wake(&target, &p.task, p.n, &p.kind, &p.summary, p.urgent).await;
             let entry = json!({
                 "at": Utc::now(), "agent": p.agent, "task": p.task, "n": p.n, "kind": p.kind, "why": p.why,
                 "agentWoken": o.agent_woken, "coalesced": o.coalesced, "status": o.status,
@@ -333,6 +553,17 @@ impl AppState {
                 );
             }
             let mut g = s.lock();
+            if matches!(p.why, "new" | "rewake") {
+                let e = g.pushed.entry((p.task.clone(), p.n)).or_insert(false);
+                *e = *e || o.agent_woken;
+            }
+            let pr = g.presence.entry(p.agent.clone()).or_default();
+            pr.last_push_at = Some(Utc::now());
+            pr.last_push_result = Some(if o.agent_woken {
+                "woken".into()
+            } else {
+                format!("not woken: {}", o.reason)
+            });
             g.wakes.count += 1;
             if o.agent_woken {
                 g.wakes.woken += 1
@@ -340,7 +571,8 @@ impl AppState {
                 g.wakes.failed += 1
             }
             g.wakes.last = Some(entry);
-        });
+            o.agent_woken
+        })
     }
 
     fn append_ledger(&self, entry: &Value) -> anyhow::Result<()> {
@@ -391,6 +623,7 @@ fn push_for(t: &crate::model::Task, m: &Message, to: &str, why: &'static str) ->
         kind: m.kind.to_string(),
         why,
         summary,
+        urgent: m.effective_wake() == crate::model::WakeLevel::Urgent,
     }
 }
 
@@ -431,6 +664,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/inbox/ack", post(ack))
         .route("/v1/user/pending", get(user_pending))
         .route("/v1/user/decisions", post(user_decision))
+        .route("/v1/user/asked", post(user_asked))
+        .route("/v1/presence", post(presence))
         .layer(middleware::from_fn_with_state(state.clone(), auth));
     Router::new()
         .route("/v1/health", get(health))
@@ -450,6 +685,11 @@ async fn auth(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -> R
         .and_then(|v| v.to_str().ok());
     match s.agent_for(h) {
         Some(agent) => {
+            s.lock()
+                .presence
+                .entry(agent.clone())
+                .or_default()
+                .last_request_at = Some(Utc::now());
             req.extensions_mut().insert(Caller(agent));
             next.run(req).await
         }
@@ -474,12 +714,19 @@ async fn health(State(s): State<Arc<AppState>>) -> Json<Value> {
         .iter()
         .map(|a| (a.as_str(), unread(&g, a).len()))
         .collect();
-    let pending = user::pending(&g.bridge, &g.decisions, &g.stalled, false).len();
+    let pending = s.pending_items(&g, false).len();
+    let derived = g
+        .bridge
+        .list(None)
+        .iter()
+        .filter(|t| t.parent.is_some())
+        .count();
     Json(json!({
         "ok": true, "service": "agent-bridge", "version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL,
         "agents": agents, "openTasks": open, "badLines": g.bridge.bad_lines + g.decisions.bad_lines,
         "waiters": g.waiters, "unread": unread_by, "pendingForUser": pending, "stalled": g.stalled,
         "push": s.targets.keys().collect::<Vec<_>>(), "wakes": g.wakes,
+        "presence": g.presence, "derivedTasks": derived,
         "mirror": s.copier.mirror_dir().map(|d| json!({ "dir": d, "stats": s.copier.stats() })),
     }))
 }
@@ -540,13 +787,13 @@ async fn create_task(
     State(s): State<Arc<AppState>>,
     Extension(Caller(me)): Extension<Caller>,
     Json(b): Json<CreateBody>,
-) -> ApiResult<Message> {
-    let fresh = !s.lock().bridge.task(&b.id).is_some();
+) -> ApiResult<Value> {
+    let fresh = s.lock().bridge.task(&b.id).is_none();
     let m = s.lock().bridge.create_task(&b.id, &me, b.draft)?;
-    if fresh {
-        s.stored(&m);
-    }
-    Ok(Json(m))
+    let push = if fresh { s.stored(&m) } else { None };
+    let mut v = serde_json::to_value(&m).expect("serializable");
+    v["delivery"] = s.delivery(&m, fresh, push).await;
+    Ok(Json(v))
 }
 
 async fn post_message(
@@ -558,9 +805,8 @@ async fn post_message(
     let before = s.lock().bridge.task(&id).map(|t| t.last_n);
     let m = s.lock().bridge.post(&id, &me, d)?;
     // A retried post returns the stored message: no second wake for it.
-    if before.is_some_and(|n| m.n > n) {
-        s.stored(&m);
-    }
+    let fresh = before.is_some_and(|n| m.n > n);
+    let push = if fresh { s.stored(&m) } else { None };
     // P4: posting in a task means having read it — the sender's cursor for this task (and only
     // this task) moves up to its own message; the response says which messages that covered.
     let (from, to) = {
@@ -573,6 +819,7 @@ async fn post_message(
     if from <= to {
         v["implicit_read"] = json!({ "task": id, "from": from, "to": to });
     }
+    v["delivery"] = s.delivery(&m, fresh, push).await;
     Ok(Json(v))
 }
 
@@ -683,14 +930,21 @@ async fn user_pending(
     Query(q): Query<PendingQuery>,
 ) -> Json<Value> {
     let g = s.lock();
-    Json(json!({ "items": user::pending(&g.bridge, &g.decisions, &g.stalled, q.all) }))
+    Json(json!({ "items": s.pending_items(&g, q.all) }))
 }
 
 #[derive(Deserialize)]
 struct DecisionBody {
-    item: String,
-    /// The user's own words, verbatim.
+    /// A pending item — or none, with `task`, for a decision the user gave directly (P3).
+    #[serde(default)]
+    item: Option<String>,
+    #[serde(default)]
+    task: Option<String>,
+    /// The user's words.
     verbatim: String,
+    /// `verbatim` (default: the user's own words) or `paraphrase` (a retelling).
+    #[serde(default)]
+    form: Option<String>,
 }
 
 /// Records the user's decision as relayed by the caller; a paused task resumes on it.
@@ -705,15 +959,38 @@ async fn user_decision(
         )
         .into());
     }
-    let (status, decision, resumed, task) = {
+    let form = b.form.as_deref().unwrap_or("verbatim");
+    if !matches!(form, "verbatim" | "paraphrase") {
+        return Err(BridgeError::Invalid(format!(
+            "form must be verbatim or paraphrase, not {form:?}"
+        ))
+        .into());
+    }
+    let (status, decision, resumed, task, item_id) = {
         let mut g = s.lock();
-        let all = user::pending(&g.bridge, &g.decisions, &g.stalled, true);
-        let Some(item) = all.into_iter().find(|i| i.item == b.item) else {
-            return Err(BridgeError::Invalid(format!(
-                "no pending item {:?} (see GET /v1/user/pending?all=true)",
-                b.item
-            ))
-            .into());
+        let item = match (&b.item, &b.task) {
+            (Some(id), None) => {
+                let all = s.pending_items(&g, true);
+                let Some(item) = all.into_iter().find(|i| &i.item == id) else {
+                    return Err(BridgeError::Invalid(format!(
+                        "no pending item {id:?} (see GET /v1/user/pending?all=true)"
+                    ))
+                    .into());
+                };
+                item
+            }
+            (None, Some(task)) => {
+                if g.bridge.task(task).is_none() {
+                    return Err(BridgeError::NoSuchTask(task.clone()).into());
+                }
+                PendingItem::new(g.decisions.next_direct(task), task, "direct", String::new())
+            }
+            _ => {
+                return Err(BridgeError::Invalid(
+                    "give either item (a pending item) or task (a decision given directly)".into(),
+                )
+                .into());
+            }
         };
         let t = g
             .bridge
@@ -727,7 +1004,7 @@ async fn user_decision(
         }
         let (status, decision) = g
             .decisions
-            .record(&b.item, &b.verbatim, &me)
+            .record(&item.item, &b.verbatim, &me, Some(form))
             .map_err(BridgeError::Io)?;
         let resumed = if item.source == "paused"
             && status == ItemStatus::Decided
@@ -737,7 +1014,7 @@ async fn user_decision(
         } else {
             None
         };
-        (status, decision, resumed, t)
+        (status, decision, resumed, t, item.item)
     };
     if let Some(m) = &resumed {
         s.stored(m);
@@ -758,12 +1035,17 @@ async fn user_decision(
             let mut p = push_for(&task, &last, &other, "decision");
             p.kind = "user_decision".into();
             p.summary = format!(
-                "用户对 {} 做了决定（{}转达）：{}",
-                b.item,
+                "用户对 {} 做了决定（{}转达{}）：{}",
+                item_id,
                 me,
+                if form == "paraphrase" {
+                    "，转述"
+                } else {
+                    ""
+                },
                 decision.verbatim.chars().take(200).collect::<String>()
             );
-            s.send_push(p);
+            drop(s.send_push(p));
         }
     }
     let code = if status == ItemStatus::Conflict {
@@ -773,9 +1055,71 @@ async fn user_decision(
     };
     Ok((
         code,
-        Json(json!({ "item": b.item, "status": status, "decision": decision, "resumed": resumed })),
+        Json(
+            json!({ "item": item_id, "status": status, "decision": decision, "resumed": resumed }),
+        ),
     )
         .into_response())
+}
+
+#[derive(Deserialize)]
+struct AskedBody {
+    item: String,
+}
+
+/// Q5: the caller has put a needs_user item to the user (it stops counting toward overdue).
+async fn user_asked(
+    State(s): State<Arc<AppState>>,
+    Extension(Caller(me)): Extension<Caller>,
+    Json(b): Json<AskedBody>,
+) -> ApiResult<Value> {
+    let mut g = s.lock();
+    let Some(item) = s
+        .pending_items(&g, true)
+        .into_iter()
+        .find(|i| i.item == b.item)
+    else {
+        return Err(BridgeError::Invalid(format!("no pending item {:?}", b.item)).into());
+    };
+    let t = g
+        .bridge
+        .task(&item.task)
+        .ok_or_else(|| BridgeError::NoSuchTask(item.task.clone()))?;
+    if t.from != me && t.to != me {
+        return Err(BridgeError::Forbidden(format!("{me} is not a party to task {}", t.id)).into());
+    }
+    if let Some((by, at)) = g.asked.get(&b.item) {
+        return Ok(Json(
+            json!({ "item": b.item, "askedBy": by, "askedAt": at, "advanced": false }),
+        ));
+    }
+    let now = Utc::now();
+    user::record_asked(bridge_root_for_asked(&s.ledger), &b.item, &me, now)
+        .map_err(BridgeError::Io)?;
+    g.asked.insert(b.item.clone(), (me.clone(), now));
+    Ok(Json(
+        json!({ "item": b.item, "askedBy": me, "askedAt": now, "advanced": true }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct PresenceBody {
+    platform: Value,
+}
+
+/// Q4: what an agent declares about its own platform (shown in /v1/health as declared).
+async fn presence(
+    State(s): State<Arc<AppState>>,
+    Extension(Caller(me)): Extension<Caller>,
+    Json(b): Json<PresenceBody>,
+) -> ApiResult<Value> {
+    let mut g = s.lock();
+    let p = g.presence.entry(me.clone()).or_default();
+    p.platform = Some(b.platform);
+    p.platform_at = Some(Utc::now());
+    Ok(Json(
+        json!({ "agent": me, "presence": p.clone(), "declared": true }),
+    ))
 }
 
 #[cfg(test)]
@@ -1141,6 +1485,254 @@ pub(crate) mod tests {
         json!({ "kind": kind, "protocol": PROTOCOL })
     }
 
+    fn pending_sources(v: &Value) -> Vec<String> {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["source"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_message_whose_push_woke_the_agent_is_never_pushed_again() {
+        let (notify_url, calls) = mock_notify(true).await;
+        let (e, s) = start_push(&notify_url, Timing::default()).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        settle().await;
+        let now = Utc::now();
+        s.tick(now + chrono::Duration::minutes(16));
+        s.tick(now + chrono::Duration::minutes(40));
+        settle().await;
+        assert_eq!(calls.lock().unwrap().len(), 1, "woken once, unread or not");
+    }
+
+    #[tokio::test]
+    async fn posts_say_how_the_message_was_delivered() {
+        let (notify_url, _calls) = mock_notify(true).await;
+        let (e, _s) = start_push(&notify_url, Timing::default()).await;
+        let (_, v) = e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        assert_eq!(v["delivery"]["to"], "dsh");
+        assert_eq!(v["delivery"]["push"], "sent");
+        assert_eq!(v["delivery"]["woken"], true);
+        // Claude has no push target; DSH has asked something of the service, so it shows as seen.
+        let (_, v) = e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        assert_eq!(v["delivery"]["push"], "quiet");
+        let (_, v) = e
+            .post(
+                DSH,
+                "/v1/tasks/t/messages",
+                json!({ "kind": "question", "protocol": PROTOCOL,
+                "questions": [{ "id": "q1", "text": "?", "blocking": true }] }),
+            )
+            .await;
+        assert_eq!(v["delivery"]["to"], "claude");
+        assert_eq!(v["delivery"]["push"], "no-push-target");
+        assert!(v["delivery"]["woken"].is_null());
+        assert!(v["delivery"]["recipientLastRequestAt"].is_string());
+    }
+
+    #[tokio::test]
+    async fn a_silent_receiver_is_nudged_then_the_user_is_told() {
+        let (notify_url, calls) = mock_notify(true).await;
+        let (e, s) = start_push(&notify_url, Timing::default()).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        settle().await;
+        let now = Utc::now();
+        let nudges = || {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.1["kind"] == "nudge")
+                .count()
+        };
+        s.tick(now + chrono::Duration::minutes(90));
+        settle().await;
+        assert_eq!(nudges(), 0, "too early");
+        s.tick(now + chrono::Duration::minutes(130));
+        s.tick(now + chrono::Duration::minutes(140));
+        settle().await;
+        assert_eq!(nudges(), 1, "one nudge per silence");
+        assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+        s.tick(now + chrono::Duration::minutes(260));
+        settle().await;
+        assert_eq!(nudges(), 1);
+        assert_eq!(
+            pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1),
+            ["silent"]
+        );
+        // DSH speaks again: a new silence starts, the alert goes.
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "progress", "protocol": PROTOCOL, "body": "busy" }),
+        )
+        .await;
+        s.tick(Utc::now());
+        assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+        // A task waiting for a restart is not nagged.
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "progress", "protocol": PROTOCOL, "phase": "pending-restart" }),
+        )
+        .await;
+        s.tick(Utc::now() + chrono::Duration::hours(5));
+        settle().await;
+        assert_eq!(nudges(), 1);
+        assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+    }
+
+    #[tokio::test]
+    async fn unread_messages_for_an_unreachable_agent_reach_the_user() {
+        let (notify_url, _calls) = mock_notify(true).await;
+        let (e, s) = start_push(&notify_url, Timing::default()).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "question", "protocol": PROTOCOL,
+            "questions": [{ "id": "q1", "text": "?", "blocking": true }] }),
+        )
+        .await;
+        let now = Utc::now();
+        s.tick(now + chrono::Duration::minutes(20));
+        assert!(pending_sources(&e.get(DSH, "/v1/user/pending").await.1).is_empty());
+        s.tick(now + chrono::Duration::minutes(31));
+        let p = e.get(DSH, "/v1/user/pending").await.1;
+        assert_eq!(pending_sources(&p), ["unread"]);
+        assert_eq!(p["items"][0]["item"], "t#unread#3");
+        // Claude reads it: gone on the next pass.
+        e.post(CLAUDE, "/v1/inbox/ack", json!({ "task": "t", "n": 3 }))
+            .await;
+        s.tick(now + chrono::Duration::minutes(32));
+        assert!(pending_sources(&e.get(DSH, "/v1/user/pending").await.1).is_empty());
+    }
+
+    #[tokio::test]
+    async fn health_shows_who_was_seen_what_they_declare_and_derived_tasks() {
+        let e = start().await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(
+            CLAUDE,
+            "/v1/tasks",
+            json!({ "id": "t2", "kind": "task", "protocol": PROTOCOL,
+            "meta": { "to": "dsh", "title": "more", "parent": "t" } }),
+        )
+        .await;
+        let (c, _) = e
+            .post(
+                DSH,
+                "/v1/presence",
+                json!({ "platform": { "host": "4.14.6", "up": true } }),
+            )
+            .await;
+        assert_eq!(c, 200);
+        let h = e.get(CLAUDE, "/v1/health").await.1;
+        assert_eq!(h["derivedTasks"], 1);
+        assert!(h["presence"]["claude"]["lastRequestAt"].is_string());
+        assert_eq!(h["presence"]["dsh"]["platform"]["host"], "4.14.6");
+        assert!(h["presence"]["dsh"]["platformAt"].is_string());
+    }
+
+    #[tokio::test]
+    async fn decisions_given_directly_are_recorded_against_the_task_with_their_form() {
+        let e = start().await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        let (c, v) = e
+            .post(
+                DSH,
+                "/v1/user/decisions",
+                json!({ "task": "t", "verbatim": "重启吧" }),
+            )
+            .await;
+        assert_eq!(c, 200, "{v}");
+        assert_eq!(v["item"], "t#direct#1");
+        assert_eq!(v["decision"]["form"], "verbatim");
+        let (_, v) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "task": "t", "verbatim": "用户同意合并", "form": "paraphrase" }),
+            )
+            .await;
+        assert_eq!(v["item"], "t#direct#2");
+        assert_eq!(v["decision"]["form"], "paraphrase");
+        let all = e.get(CLAUDE, "/v1/user/pending?all=true").await.1;
+        assert_eq!(pending_sources(&all), ["direct", "direct"]);
+        assert!(
+            pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty(),
+            "already decided"
+        );
+        for bad in [
+            json!({ "task": "t", "verbatim": "x", "form": "summary" }),
+            json!({ "task": "t", "item": "t#direct#1", "verbatim": "x" }),
+            json!({ "verbatim": "x" }),
+        ] {
+            assert_eq!(
+                e.post(CLAUDE, "/v1/user/decisions", bad.clone()).await.0,
+                400,
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            e.post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "task": "nope", "verbatim": "x" })
+            )
+            .await
+            .0,
+            404
+        );
+    }
+
+    #[tokio::test]
+    async fn needs_user_items_name_who_asks_and_turn_overdue_until_asked() {
+        let (notify_url, _calls) = mock_notify(true).await;
+        let timing = Timing {
+            ask_overdue_after: chrono::Duration::zero(),
+            ..Timing::default()
+        };
+        let (e, _s) = start_push(&notify_url, timing).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "progress", "protocol": PROTOCOL,
+            "needs_user": ["要不要重启？", { "text": "合并吗？", "relay": "claude" }] }),
+        )
+        .await;
+        let p = e.get(CLAUDE, "/v1/user/pending").await.1;
+        let items = p["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["relay"], "dsh", "defaults to whoever raised it");
+        assert_eq!(items[1]["relay"], "claude");
+        assert!(items.iter().all(|i| i["overdue"] == true));
+        let id = items[1]["item"].as_str().unwrap().to_string();
+        let (c, v) = e
+            .post(CLAUDE, "/v1/user/asked", json!({ "item": id }))
+            .await;
+        assert_eq!(c, 200, "{v}");
+        assert_eq!(v["advanced"], true);
+        let (_, v) = e.post(DSH, "/v1/user/asked", json!({ "item": id })).await;
+        assert_eq!(v["advanced"], false, "first asker stays on record");
+        assert_eq!(v["askedBy"], "claude");
+        let p = e.get(DSH, "/v1/user/pending").await.1;
+        assert!(p["items"][1]["overdue"].is_null());
+        assert_eq!(p["items"][1]["asked_by"], "claude");
+        assert_eq!(
+            e.post(CLAUDE, "/v1/user/asked", json!({ "item": "t#9#9" }))
+                .await
+                .0,
+            400
+        );
+    }
+
     #[tokio::test]
     async fn new_messages_push_dsh_and_every_attempt_is_recorded() {
         let (notify_url, calls) = mock_notify(true).await;
@@ -1225,12 +1817,14 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn monitor_rewakes_once_and_marks_stalls() {
-        let (notify_url, calls) = mock_notify(true).await;
+        // The first push does not reach the agent, so a re-wake is due (see dedup B below).
+        let (notify_url, calls) = mock_notify(false).await;
         let timing = Timing {
             tick: Duration::from_secs(3600),
             rewake_after: chrono::Duration::minutes(15),
             stall_after: chrono::Duration::hours(24),
             stall_cooldown: chrono::Duration::hours(24),
+            ..Timing::default()
         };
         let (e, s) = start_push(&notify_url, timing).await;
         e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
