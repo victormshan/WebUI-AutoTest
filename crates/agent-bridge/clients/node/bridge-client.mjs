@@ -8,6 +8,11 @@
 //     post can never create a second message
 //   - responses are decoded as UTF-8 explicitly (invalid bytes are an error, not mojibake)
 //   - reading the inbox never marks anything read; call ack() for what you have handled
+//     (posting in a task marks that task read up to your message: see implicit_read)
+//   - every post/send response carries `delivery` (to, waiters, push, woken): how the message
+//     reached the other agent, which is not whether it is being worked on
+//   - protocol 2: note (reply_to required), wake quiet|normal|urgent, progress phase
+//     pending-restart|restarted, outcome partial with follow_up, needs_user {text, relay}
 //
 //   import { BridgeClient } from './bridge-client.mjs'
 //   const c = new BridgeClient({ url: 'http://127.0.0.1:7879', token })
@@ -15,7 +20,7 @@
 
 import { randomUUID } from 'node:crypto'
 
-export const PROTOCOL = '1'
+export const PROTOCOL = '2'
 
 export class BridgeError extends Error {
   constructor(message, { status = null, retryable = false } = {}) {
@@ -90,14 +95,14 @@ export class BridgeClient {
     return this.#call('GET', `/v1/tasks/${encodeURIComponent(id)}`)
   }
 
-  /** Hands another agent a new task. */
-  send({ id, to, title, body = '', priority, exprId, clientMsgId = randomUUID() }) {
-    const meta = { to, title, ...(priority ? { priority } : {}), ...(exprId ? { expr_id: exprId } : {}) }
-    return this.#call('POST', '/v1/tasks', { id, kind: 'task', body, meta, protocol: PROTOCOL, client_msg_id: clientMsgId })
+  /** Hands another agent a new task. `parent`: the task it derives from. */
+  send({ id, to, title, body = '', priority, exprId, parent, wake, clientMsgId = randomUUID() }) {
+    const meta = { to, title, ...(priority ? { priority } : {}), ...(exprId ? { expr_id: exprId } : {}), ...(parent ? { parent } : {}) }
+    return this.#call('POST', '/v1/tasks', { id, kind: 'task', body, meta, ...(wake ? { wake } : {}), protocol: PROTOCOL, client_msg_id: clientMsgId })
   }
 
   /**
-   * Posts a message: { kind, body?, outcome?, judgement?, questions?, results?, needs_user?, reply_to?, supersedes? }.
+   * Posts a message: { kind, body?, outcome?, judgement?, questions?, results?, needs_user?, reply_to?, supersedes?, wake?, phase? }.
    * Pass your own clientMsgId to make a retry across process restarts idempotent too.
    */
   post(task, { clientMsgId = randomUUID(), ...msg }) {
@@ -113,5 +118,33 @@ export class BridgeClient {
   /** Marks a task's messages handled up to and including n. */
   ack(task, n) {
     return this.#call('POST', '/v1/inbox/ack', { task, n })
+  }
+
+  /** Extra information on a task (never changes its state; quiet unless you pass wake). */
+  note(task, replyTo, body, { wake, clientMsgId } = {}) {
+    return this.post(task, { kind: 'note', reply_to: replyTo, body, ...(wake ? { wake } : {}), ...(clientMsgId ? { clientMsgId } : {}) })
+  }
+
+  /** What waits for the user: who is to ask (relay), who asked, overdue. */
+  pending({ all = false } = {}) {
+    return this.#call('GET', all ? '/v1/user/pending?all=true' : '/v1/user/pending')
+  }
+
+  /**
+   * Records the user's decision: { item } for a pending item, or { task } for one the user gave
+   * you directly. form: 'verbatim' (their own words, default) or 'paraphrase'.
+   */
+  decide({ item, task, verbatim, form }) {
+    return this.#call('POST', '/v1/user/decisions', { verbatim, ...(item ? { item } : {}), ...(task ? { task } : {}), ...(form ? { form } : {}) })
+  }
+
+  /** You have put a pending item to the user. */
+  asked(item) {
+    return this.#call('POST', '/v1/user/asked', { item })
+  }
+
+  /** Declares your platform state; health shows it as declared, not verified. */
+  presence(platform) {
+    return this.#call('POST', '/v1/presence', { platform })
   }
 }

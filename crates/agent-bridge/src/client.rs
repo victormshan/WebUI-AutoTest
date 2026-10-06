@@ -115,13 +115,16 @@ impl Client {
             .await
     }
 
-    /// Posts with a `clientMsgId` (added if missing) and the protocol, so retries are idempotent.
+    /// Posts; task messages get a `clientMsgId` (added if missing) and the protocol, so retries
+    /// are idempotent.
     pub async fn post(&self, path: &str, mut body: Value) -> Result<Value> {
-        if body.get("protocol").is_none() {
-            body["protocol"] = json!(PROTOCOL);
-        }
-        if path != "/v1/inbox/ack" && body.get("client_msg_id").is_none() {
-            body["client_msg_id"] = json!(new_msg_id());
+        if path.starts_with("/v1/tasks") {
+            if body.get("protocol").is_none() {
+                body["protocol"] = json!(PROTOCOL);
+            }
+            if body.get("client_msg_id").is_none() {
+                body["client_msg_id"] = json!(new_msg_id());
+            }
         }
         self.call(
             reqwest::Method::POST,

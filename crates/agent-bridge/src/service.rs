@@ -68,8 +68,9 @@ impl Default for Timing {
             rewake_after: chrono::Duration::minutes(15),
             stall_after: chrono::Duration::hours(24),
             stall_cooldown: chrono::Duration::hours(24),
-            nudge_after: chrono::Duration::hours(2),
-            nudge_max: 1,
+            // Agreed with DSH in dsh-auto-continue: 20 minutes, three times, then the user.
+            nudge_after: chrono::Duration::minutes(20),
+            nudge_max: 3,
             unread_alert_after: chrono::Duration::minutes(30),
             ask_overdue_after: chrono::Duration::hours(12),
         }
@@ -110,6 +111,14 @@ struct Nudges {
     since_n: u32,
     count: u32,
     last_at: DateTime<Utc>,
+}
+
+/// What a push adds to its ledger line besides the outcome.
+#[derive(Default)]
+struct PushExtra {
+    /// Dedup identity for the endpoint (see `notify::wake`).
+    key: Option<String>,
+    ledger: Option<Value>,
 }
 
 struct Inner {
@@ -160,6 +169,7 @@ struct Push {
     why: &'static str,
     summary: String,
     urgent: bool,
+    extra: PushExtra,
 }
 
 fn bridge_root_for_asked(ledger: &std::path::Path) -> &std::path::Path {
@@ -335,6 +345,13 @@ impl AppState {
                             let mins = (now - last.at).num_minutes();
                             let mut p = push_for(&t, &last, &t.to, "nudge");
                             p.kind = "nudge".into();
+                            // Measurable (dsh-auto-continue): which nudge, and since when silent.
+                            p.extra = PushExtra {
+                                key: Some(format!("nudge:{}:{}", t.id, count + 1)),
+                                ledger: Some(
+                                    json!({ "nudges": count + 1, "lastMessageAt": last.at }),
+                                ),
+                            };
                             p.summary = format!(
                                 "任务 {}（{}）你上次发言后 {} 分钟没有新消息：请继续，或发 progress / result 说明情况｜读取：GET /v1/tasks/{}",
                                 t.id, t.title, mins, t.id
@@ -343,6 +360,7 @@ impl AppState {
                             if self.targets.contains_key(&t.from) {
                                 let mut q = push_for(&t, &last, &t.from, "nudge");
                                 q.kind = "nudge_notice".into();
+                                q.extra.key = Some(format!("nudge-notice:{}:{}", t.id, count + 1));
                                 q.summary = format!(
                                     "已提醒 {} 继续任务 {}（{} 分钟无新消息）",
                                     t.to, t.id, mins
@@ -537,12 +555,29 @@ impl AppState {
         };
         let s = self.clone();
         tokio::spawn(async move {
-            let o = notify::wake(&target, &p.task, p.n, &p.kind, &p.summary, p.urgent).await;
-            let entry = json!({
+            let o = notify::wake(
+                &target,
+                &p.task,
+                p.n,
+                &p.kind,
+                &p.summary,
+                p.urgent,
+                p.extra.key.as_deref(),
+            )
+            .await;
+            let mut entry = json!({
                 "at": Utc::now(), "agent": p.agent, "task": p.task, "n": p.n, "kind": p.kind, "why": p.why,
                 "agentWoken": o.agent_woken, "coalesced": o.coalesced, "status": o.status,
                 "transport": o.transport, "reason": o.reason,
             });
+            if let Some(k) = &p.extra.key {
+                entry["key"] = json!(k);
+            }
+            if let Some(Value::Object(m)) = &p.extra.ledger {
+                for (k, v) in m {
+                    entry[k] = v.clone();
+                }
+            }
             if let Err(e) = s.append_ledger(&entry) {
                 eprintln!("agent-bridge: wake ledger write failed: {e:#}");
             }
@@ -624,6 +659,7 @@ fn push_for(t: &crate::model::Task, m: &Message, to: &str, why: &'static str) ->
         why,
         summary,
         urgent: m.effective_wake() == crate::model::WakeLevel::Urgent,
+        extra: PushExtra::default(),
     }
 }
 
@@ -807,6 +843,28 @@ async fn post_message(
     // A retried post returns the stored message: no second wake for it.
     let fresh = before.is_some_and(|n| m.n > n);
     let push = if fresh { s.stored(&m) } else { None };
+    // A receiver speaking after a nudge: record how long that took (the nudge's measured effect).
+    if fresh {
+        let followed = {
+            let mut g = s.lock();
+            let is_receiver = g.bridge.task(&id).is_some_and(|t| t.to == me);
+            match g.nudges.get(&id) {
+                Some(x) if is_receiver && x.since_n < m.n => {
+                    let x = x.clone();
+                    g.nudges.remove(&id);
+                    Some(x)
+                }
+                _ => None,
+            }
+        };
+        if let Some(x) = followed {
+            let entry = json!({ "at": m.at, "agent": me, "task": id, "n": m.n, "kind": m.kind.to_string(),
+                "why": "nudge-followed", "nudges": x.count, "afterNudgeSecs": (m.at - x.last_at).num_seconds() });
+            if let Err(e) = s.append_ledger(&entry) {
+                eprintln!("agent-bridge: wake ledger write failed: {e:#}");
+            }
+        }
+    }
     // P4: posting in a task means having read it — the sender's cursor for this task (and only
     // this task) moves up to its own message; the response says which messages that covered.
     let (from, to) = {
@@ -1540,36 +1598,70 @@ pub(crate) mod tests {
         e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
         settle().await;
         let now = Utc::now();
-        let nudges = || {
+        let nudges = || -> Vec<Value> {
             calls
                 .lock()
                 .unwrap()
                 .iter()
                 .filter(|c| c.1["kind"] == "nudge")
-                .count()
+                .map(|c| c.1.clone())
+                .collect()
         };
-        s.tick(now + chrono::Duration::minutes(90));
+        let at = |m: i64| now + chrono::Duration::minutes(m);
+        s.tick(at(15));
         settle().await;
-        assert_eq!(nudges(), 0, "too early");
-        s.tick(now + chrono::Duration::minutes(130));
-        s.tick(now + chrono::Duration::minutes(140));
+        assert_eq!(nudges().len(), 0, "too early");
+        s.tick(at(21));
+        s.tick(at(30));
         settle().await;
-        assert_eq!(nudges(), 1, "one nudge per silence");
+        assert_eq!(nudges().len(), 1, "one nudge per 20 minutes");
+        assert_eq!(
+            nudges()[0]["key"],
+            "nudge:t:1",
+            "own key space, not bridge:t:<n>"
+        );
+        s.tick(at(42));
+        s.tick(at(63));
+        settle().await;
+        assert_eq!(nudges().len(), 3);
+        assert_eq!(nudges()[2]["key"], "nudge:t:3");
         assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
-        s.tick(now + chrono::Duration::minutes(260));
+        s.tick(at(84));
         settle().await;
-        assert_eq!(nudges(), 1);
+        assert_eq!(nudges().len(), 3, "three, then the user");
         assert_eq!(
             pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1),
             ["silent"]
         );
-        // DSH speaks again: a new silence starts, the alert goes.
+        // Every nudge is in the ledger with its number and the silence it answers.
+        let ledger: Vec<Value> = std::fs::read_to_string(&s.ledger)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let logged: Vec<&Value> = ledger
+            .iter()
+            .filter(|l| l["why"] == "nudge" && l["kind"] == "nudge")
+            .collect();
+        assert_eq!(logged.len(), 3);
+        assert_eq!(logged[1]["nudges"], 2);
+        assert!(logged[0]["lastMessageAt"].is_string());
+        // DSH speaks again: the follow-up is measured, a new silence starts, the alert goes.
         e.post(
             DSH,
             "/v1/tasks/t/messages",
             json!({ "kind": "progress", "protocol": PROTOCOL, "body": "busy" }),
         )
         .await;
+        let followed: Vec<Value> = std::fs::read_to_string(&s.ledger)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .filter(|l| l["why"] == "nudge-followed")
+            .collect();
+        assert_eq!(followed.len(), 1);
+        assert_eq!(followed[0]["nudges"], 3);
+        assert!(followed[0]["afterNudgeSecs"].is_i64());
         s.tick(Utc::now());
         assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
         // A task waiting for a restart is not nagged.
@@ -1581,7 +1673,7 @@ pub(crate) mod tests {
         .await;
         s.tick(Utc::now() + chrono::Duration::hours(5));
         settle().await;
-        assert_eq!(nudges(), 1);
+        assert_eq!(nudges().len(), 3);
         assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
     }
 

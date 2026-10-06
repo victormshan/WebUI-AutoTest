@@ -17,8 +17,11 @@ async function startService() {
   const claude = randomBytes(32).toString('hex')
   const dsh = randomBytes(32).toString('hex')
   writeFileSync(path.join(dir, 'agents.json'), JSON.stringify({ claude: hash(claude), dsh: hash(dsh) }))
+  // An explicit empty notify file: without it the service would use ~/.config/agent-bridge/notify.json
+  // and push test tasks to the real DSH.
+  writeFileSync(path.join(dir, 'notify.json'), '{}')
   const port = 20000 + Math.floor(Math.random() * 20000)
-  const proc = spawn(BIN, ['serve', '--state', path.join(dir, 'state'), '--listen', `127.0.0.1:${port}`, '--agents', path.join(dir, 'agents.json')], { stdio: 'ignore' })
+  const proc = spawn(BIN, ['serve', '--state', path.join(dir, 'state'), '--listen', `127.0.0.1:${port}`, '--agents', path.join(dir, 'agents.json'), '--notify', path.join(dir, 'notify.json')], { stdio: 'ignore' })
   const url = `http://127.0.0.1:${port}`
   for (let i = 0; i < 50; i++) {
     try {
@@ -55,6 +58,40 @@ test('reference client: send, long poll, reply, ack, verdict, close', async () =
     await claude.post('n1', { kind: 'verdict', judgement: 'pass' })
     await claude.post('n1', { kind: 'close' })
     assert.equal((await claude.task('n1')).task.state, 'closed')
+  } finally {
+    s.stop()
+  }
+})
+
+test('reference client: protocol 2 — note, restart phase, user decisions, presence', async () => {
+  const s = await startService()
+  try {
+    const claude = new BridgeClient({ url: s.url, token: s.claude })
+    const dsh = new BridgeClient({ url: s.url, token: s.dsh })
+    const sent = await claude.send({ id: 'p1', to: 'dsh', title: '交付', body: 'v4.15' })
+    assert.equal(sent.delivery.to, 'dsh')
+    assert.equal(sent.delivery.push, 'no-push-target')
+    const ack = await dsh.post('p1', { kind: 'ack' })
+    assert.deepEqual(ack.implicit_read, { task: 'p1', from: 1, to: 2 })
+    await claude.note('p1', 1, '补充：先跑 verify')
+    assert.equal((await claude.task('p1')).task.state, 'acked', 'a note never moves the task')
+    await dsh.post('p1', { kind: 'progress', phase: 'pending-restart', needs_user: [{ text: '可以重启宿主吗？', relay: 'claude' }] })
+    assert.equal((await claude.task('p1')).task.state, 'awaiting_restart')
+    const [item] = (await claude.pending()).items
+    assert.equal(item.relay, 'claude')
+    assert.equal((await claude.asked(item.item)).advanced, true)
+    assert.equal((await claude.decide({ item: item.item, verbatim: '可以' })).status, 'decided')
+    const direct = await dsh.decide({ task: 'p1', verbatim: '用户说今晚再合并', form: 'paraphrase' })
+    assert.equal(direct.item, 'p1#direct#1')
+    await dsh.post('p1', { kind: 'progress', phase: 'restarted', body: 'bootId 2' })
+    await dsh.post('p1', { kind: 'result', outcome: 'partial', results: [
+      { item: '交付', status: 'done', evidence: 'verify ok' },
+      { item: '手机链接', status: 'failed', evidence: '404', follow_up: 'p2' },
+    ] })
+    await dsh.presence({ host: '4.15.0', up: true })
+    const h = await claude.health()
+    assert.equal(h.protocol, '2')
+    assert.equal(h.presence.dsh.platform.host, '4.15.0')
   } finally {
     s.stop()
   }

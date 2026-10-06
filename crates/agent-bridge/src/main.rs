@@ -43,6 +43,7 @@ enum Cmd {
         agents: Option<PathBuf>,
         /// Push wake-ups: JSON object agent → {url, token_file, transport: auto|native|curl-exe}.
         /// Default: ~/.config/agent-bridge/notify.json if it exists (agents not listed long-poll)
+        /// — only with the default --state: any other state directory pushes only with --notify
         #[arg(long)]
         notify: Option<PathBuf>,
         /// Read-only mirror of every message (e.g. /mnt/d/cc-tasks/claude-bridge/tasks)
@@ -91,26 +92,70 @@ enum Cmd {
         priority: Option<String>,
         #[arg(long)]
         expr_id: Option<String>,
+        /// Task this one derives from
+        #[arg(long)]
+        parent: Option<String>,
+        /// quiet | normal | urgent
+        #[arg(long)]
+        wake: Option<String>,
     },
     /// Post a message to a task. --json takes a file with the full message (questions, results, …)
     Post {
         #[arg(long)]
         task: String,
-        /// ack | question | answer | progress | result | verdict | close | cancel
+        /// ack | question | answer | progress | result | verdict | close | cancel | note
         #[arg(long)]
         kind: Option<String>,
         #[arg(long, conflicts_with = "body_file")]
         body: Option<String>,
         #[arg(long)]
         body_file: Option<PathBuf>,
-        /// result: done | blocked | rejected
+        /// result: done | partial | blocked | rejected
         #[arg(long)]
         outcome: Option<String>,
         /// verdict: pass | rework
         #[arg(long)]
         judgement: Option<String>,
+        /// Message this answers (required for note)
+        #[arg(long)]
+        reply_to: Option<u32>,
+        /// quiet | normal | urgent
+        #[arg(long)]
+        wake: Option<String>,
+        /// progress: pending-restart | restarted
+        #[arg(long)]
+        phase: Option<String>,
         #[arg(long)]
         json: Option<PathBuf>,
+    },
+    /// What waits for the user's decision
+    Pending {
+        /// Include decided items
+        #[arg(long)]
+        all: bool,
+    },
+    /// Record the user's decision on a pending item, or (--task) one the user gave you directly
+    Decide {
+        #[arg(long, required_unless_present = "task", conflicts_with = "task")]
+        item: Option<String>,
+        #[arg(long)]
+        task: Option<String>,
+        /// The user's words
+        #[arg(long)]
+        verbatim: String,
+        /// verbatim | paraphrase
+        #[arg(long)]
+        form: Option<String>,
+    },
+    /// Say you have put a pending item to the user
+    Asked {
+        #[arg(long)]
+        item: String,
+    },
+    /// Declare your platform state (a JSON value), shown in health as declared
+    Presence {
+        #[arg(long)]
+        platform: String,
     },
     /// Unread messages addressed to you (does not mark them read)
     Inbox {
@@ -206,6 +251,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             body_file,
             priority,
             expr_id,
+            parent,
+            wake,
         } => {
             let mut meta = json!({ "to": to, "title": title });
             if let Some(p) = priority {
@@ -214,8 +261,14 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             if let Some(e) = expr_id {
                 meta["expr_id"] = json!(e);
             }
-            let b =
+            if let Some(p) = parent {
+                meta["parent"] = json!(p);
+            }
+            let mut b =
                 json!({ "id": id, "kind": "task", "body": text(body, body_file)?, "meta": meta });
+            if let Some(w) = wake {
+                b["wake"] = json!(w);
+            }
             print(&Client::from_env()?.post("/v1/tasks", b).await?);
             Ok(ExitCode::SUCCESS)
         }
@@ -226,6 +279,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             body_file,
             outcome,
             judgement,
+            reply_to,
+            wake,
+            phase,
             json: file,
         } => {
             let mut b: Value = match file {
@@ -247,6 +303,15 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             if let Some(j) = judgement {
                 b["judgement"] = json!(j);
             }
+            if let Some(r) = reply_to {
+                b["reply_to"] = json!(r);
+            }
+            if let Some(w) = wake {
+                b["wake"] = json!(w);
+            }
+            if let Some(p) = phase {
+                b["phase"] = json!(p);
+            }
             anyhow::ensure!(
                 b.get("kind").is_some(),
                 "--kind (or kind in --json) is required"
@@ -261,6 +326,47 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Inbox { wait } => {
             print(
                 &json!({ "messages": Client::from_env()?.inbox(wait.min(service::MAX_WAIT_SECS)).await? }),
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Pending { all } => {
+            let q = if all { "?all=true" } else { "" };
+            print(
+                &Client::from_env()?
+                    .get(&format!("/v1/user/pending{q}"))
+                    .await?,
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Decide {
+            item,
+            task,
+            verbatim,
+            form,
+        } => {
+            let mut b = json!({ "verbatim": verbatim });
+            for (k, v) in [("item", item), ("task", task), ("form", form)] {
+                if let Some(v) = v {
+                    b[k] = json!(v);
+                }
+            }
+            print(&Client::from_env()?.post("/v1/user/decisions", b).await?);
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Asked { item } => {
+            print(
+                &Client::from_env()?
+                    .post("/v1/user/asked", json!({ "item": item }))
+                    .await?,
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Presence { platform } => {
+            let p: Value = serde_json::from_str(&platform).unwrap_or(Value::String(platform));
+            print(
+                &Client::from_env()?
+                    .post("/v1/presence", json!({ "platform": p }))
+                    .await?,
             );
             Ok(ExitCode::SUCCESS)
         }
@@ -345,7 +451,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             mirror,
             step_relay_dir,
         } => {
-            let state = state.unwrap_or_else(|| home().join(".local/state/agent-bridge"));
+            let default_state = home().join(".local/state/agent-bridge");
+            // A service on another state directory (a test, a replay) never inherits the real
+            // push targets: it would wake the real agents about tasks they cannot see.
+            let isolated = state.as_ref().is_some_and(|s| *s != default_state);
+            let state = state.unwrap_or(default_state);
             let agents_file =
                 agents.unwrap_or_else(|| home().join(".config/agent-bridge/agents.json"));
             let raw = std::fs::read_to_string(&agents_file)
@@ -374,7 +484,14 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let notify_file = notify
                 .clone()
                 .unwrap_or_else(|| home().join(".config/agent-bridge/notify.json"));
-            let targets: BTreeMap<String, agent_bridge::notify::Target> = if notify_file.exists() {
+            let targets: BTreeMap<String, agent_bridge::notify::Target> = if isolated
+                && notify.is_none()
+            {
+                eprintln!(
+                    "agent-bridge: --state is not the default and no --notify given: no push wake-ups"
+                );
+                BTreeMap::new()
+            } else if notify_file.exists() {
                 let raw = std::fs::read_to_string(&notify_file)
                     .with_context(|| format!("reading {}", notify_file.display()))?;
                 serde_json::from_str(&raw)
