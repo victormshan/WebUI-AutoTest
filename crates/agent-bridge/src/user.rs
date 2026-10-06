@@ -178,7 +178,7 @@ pub fn pending(
                         format!("{}#{}#{}", t.id, m.n, i + 1),
                         &t.id,
                         "needs_user",
-                        format!("[{}] {text}", m.from),
+                        format!("[{}] {}", m.from, text.text),
                     );
                 }
             }

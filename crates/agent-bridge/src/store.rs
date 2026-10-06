@@ -168,6 +168,8 @@ mod tests {
             protocol: crate::PROTOCOL.into(),
             at: chrono::Utc::now(),
             imported: false,
+            wake: None,
+            phase: None,
         }
     }
 

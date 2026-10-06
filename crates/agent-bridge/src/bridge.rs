@@ -25,7 +25,7 @@ pub struct Draft {
     #[serde(default)]
     pub results: Vec<crate::model::ResultItem>,
     #[serde(default)]
-    pub needs_user: Vec<String>,
+    pub needs_user: Vec<crate::model::NeedsUser>,
     #[serde(default)]
     pub outcome: Option<Outcome>,
     #[serde(default)]
@@ -38,6 +38,10 @@ pub struct Draft {
     pub client_msg_id: Option<String>,
     #[serde(default)]
     pub session_epoch: Option<String>,
+    #[serde(default)]
+    pub wake: Option<crate::model::WakeLevel>,
+    #[serde(default)]
+    pub phase: Option<crate::model::Phase>,
     #[serde(default)]
     pub protocol: Option<String>,
 }
@@ -186,9 +190,10 @@ impl Bridge {
 
     fn check_protocol(d: &Draft) -> Result<(), BridgeError> {
         match d.protocol.as_deref() {
-            Some(PROTOCOL) => Ok(()),
+            Some(p) if crate::PROTOCOLS.contains(&p) => Ok(()),
             other => Err(BridgeError::Invalid(format!(
-                "protocol {other:?} not supported (this service speaks {PROTOCOL:?})"
+                "protocol {other:?} not supported (this service speaks {:?})",
+                crate::PROTOCOLS
             ))),
         }
     }
@@ -224,6 +229,18 @@ impl Bridge {
             return Err(BridgeError::Invalid(
                 "a new task starts with kind task".into(),
             ));
+        }
+        if let Some(parent) = d.meta.as_ref().and_then(|m| m.parent.as_deref()) {
+            let Some(p) = self.tasks.get(parent) else {
+                return Err(BridgeError::Invalid(format!(
+                    "parent task {parent:?} does not exist"
+                )));
+            };
+            if p.task.from != from && p.task.to != from {
+                return Err(BridgeError::Forbidden(format!(
+                    "{from} is not a party to parent task {parent}"
+                )));
+            }
         }
         let msg = build(id, 1, from, Kind::Task, d);
         let task = open_task(&msg, &self.agents)?;
@@ -303,6 +320,7 @@ impl Bridge {
             .get(id)
             .ok_or_else(|| BridgeError::NoSuchTask(id.into()))?;
         let msg = build(id, e.task.last_n + 1, from, kind, d);
+        check_new_rules(&msg)?;
         let mut next = e.task.clone();
         apply(&mut next, &e.messages, &msg)?;
         self.store.append(&msg, false)?;
@@ -330,6 +348,8 @@ fn build(task: &str, n: u32, from: &str, kind: Kind, d: Draft) -> Message {
         supersedes: d.supersedes,
         client_msg_id: d.client_msg_id,
         session_epoch: d.session_epoch,
+        wake: d.wake,
+        phase: d.phase,
         protocol: d.protocol.unwrap_or_else(|| PROTOCOL.into()),
         at: Utc::now(),
         imported: false,
@@ -377,6 +397,7 @@ fn open_task(m: &Message, agents: &BTreeSet<String>) -> Result<Task, BridgeError
         priority: meta.priority,
         deadline: meta.deadline,
         expr_id: meta.expr_id.clone(),
+        parent: meta.parent.clone(),
         state: State::Open,
         paused_reason: None,
         question_rounds: 0,
@@ -388,6 +409,44 @@ fn open_task(m: &Message, agents: &BTreeSet<String>) -> Result<Task, BridgeError
         updated_at: m.at,
         superseded: vec![],
     })
+}
+
+/// Rules for messages written from now on, which older logs did not follow (P7 came with
+/// protocol 2). They are checked when a message is posted, never when the log is replayed —
+/// history is not rewritten by later rules.
+fn check_new_rules(m: &Message) -> Result<(), BridgeError> {
+    if m.kind == Kind::Result {
+        let unfinished: Vec<&crate::model::ResultItem> =
+            m.results.iter().filter(|r| !r.finished()).collect();
+        match m.outcome {
+            Some(Outcome::Done) if !unfinished.is_empty() => {
+                return Err(BridgeError::Invalid(format!(
+                    "outcome done with unfinished items ({}): use partial with follow_up, or blocked",
+                    unfinished
+                        .iter()
+                        .map(|r| r.item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            Some(Outcome::Partial) if unfinished.is_empty() => {
+                return Err(BridgeError::Invalid(
+                    "outcome partial needs at least one unfinished item".into(),
+                ));
+            }
+            Some(Outcome::Partial)
+                if unfinished
+                    .iter()
+                    .any(|r| r.follow_up.as_deref().is_none_or(|f| f.trim().is_empty())) =>
+            {
+                return Err(BridgeError::Invalid(
+                    "every unfinished item of a partial result needs follow_up (a task id or a needs_user text)".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Applies message `m` (from a party to the task) to `t`, or explains why it is not allowed.
@@ -403,8 +462,23 @@ fn apply(t: &mut Task, earlier: &[Message], m: &Message) -> Result<(), BridgeErr
         ));
     }
     // Roles: the receiver works the task, the requester steers and closes it. Either party may
-    // relay the user's decision that resumes a paused task.
-    if m.kind != Kind::Resume {
+    // relay the user's decision that resumes a paused task, and either may add a note.
+    if m.kind == Kind::Note {
+        if m.reply_to.is_none() {
+            return Err(BridgeError::Invalid(
+                "a note replies to an earlier message (reply_to)".into(),
+            ));
+        }
+        if !m.questions.is_empty()
+            || !m.results.is_empty()
+            || m.outcome.is_some()
+            || m.judgement.is_some()
+        {
+            return Err(BridgeError::Invalid(
+                "a note only adds information; questions, results and verdicts have their own kinds".into(),
+            ));
+        }
+    } else if m.kind != Kind::Resume {
         let (role, must) = if m.kind.from_receiver() {
             ("receiver", &t.to)
         } else {
@@ -444,6 +518,11 @@ fn apply(t: &mut Task, earlier: &[Message], m: &Message) -> Result<(), BridgeErr
             }
         }
     }
+    if m.phase.is_some() && m.kind != Kind::Progress {
+        return Err(BridgeError::Invalid(
+            "phase is announced with a progress message".into(),
+        ));
+    }
     match m.kind {
         Kind::Question if m.questions.is_empty() => {
             return Err(BridgeError::Invalid("a question needs questions[]".into()));
@@ -468,6 +547,21 @@ fn apply(t: &mut Task, earlier: &[Message], m: &Message) -> Result<(), BridgeErr
     }
     let next = match (s, m.kind) {
         (_, Kind::Cancel) => Cancelled,
+        // A note never changes where the task stands, wherever it stands.
+        (_, Kind::Note) => s,
+        (Acked | Working | AwaitingAnswer, Kind::Progress)
+            if m.phase == Some(crate::model::Phase::PendingRestart) =>
+        {
+            AwaitingRestart
+        }
+        (AwaitingRestart, Kind::Progress) => match m.phase {
+            Some(crate::model::Phase::Restarted) => Working,
+            _ => AwaitingRestart,
+        },
+        (_, Kind::Progress) if m.phase == Some(crate::model::Phase::Restarted) => {
+            return Err(deny("restarted only follows pending-restart"));
+        }
+        (AwaitingRestart, Kind::Result) => AwaitingVerdict,
         (PausedForUser, Kind::Close) => Closed,
         (PausedForUser, Kind::Resume) => Working,
         (_, Kind::Resume) => return Err(deny("only a task paused for the user can be resumed")),
@@ -542,6 +636,7 @@ mod tests {
                 priority: Default::default(),
                 deadline: None,
                 expr_id: None,
+                parent: None,
             }),
             body: "please".into(),
             ..d(Kind::Task)
@@ -564,6 +659,7 @@ mod tests {
                 item: "x".into(),
                 status: "done".into(),
                 evidence: "cargo test: ok".into(),
+                follow_up: None,
             }],
             ..d(Kind::Result)
         }
@@ -892,5 +988,365 @@ mod tests {
         assert_eq!(p.n, 3, "numbering continues after the valid messages");
         assert_eq!(b.list(Some("dsh")).len(), 1);
         assert_eq!(b.list(Some("cc")).len(), 0);
+    }
+
+    fn draft_json(v: serde_json::Value) -> Draft {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn notes_add_information_anywhere_without_moving_the_task() {
+        let (_d, mut b) = open();
+        b.create_task("t", "claude", task_to("dsh")).unwrap();
+        b.post("t", "dsh", d(Kind::Ack)).unwrap();
+        // Either party, any state, never a state change.
+        let n = b
+            .post(
+                "t",
+                "claude",
+                Draft {
+                    reply_to: Some(2),
+                    body: "补充：注册表回退即可".into(),
+                    ..d(Kind::Note)
+                },
+            )
+            .unwrap();
+        assert_eq!((n.n, b.task("t").unwrap().state), (3, State::Acked));
+        b.post("t", "dsh", question()).unwrap();
+        b.post(
+            "t",
+            "dsh",
+            Draft {
+                reply_to: Some(4),
+                ..d(Kind::Note)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            b.task("t").unwrap().state,
+            State::AwaitingAnswer,
+            "a note is not an answer"
+        );
+        assert_eq!(
+            b.task("t").unwrap().question_rounds,
+            1,
+            "notes do not count as rounds"
+        );
+        // A note must point at what it adds to, and carries no question/result/verdict.
+        assert!(matches!(
+            b.post("t", "claude", d(Kind::Note)),
+            Err(BridgeError::Invalid(_))
+        ));
+        assert!(
+            b.post(
+                "t",
+                "claude",
+                Draft {
+                    reply_to: Some(9),
+                    ..d(Kind::Note)
+                }
+            )
+            .is_err()
+        );
+        let with_q = Draft {
+            reply_to: Some(2),
+            questions: question().questions,
+            ..d(Kind::Note)
+        };
+        assert!(matches!(
+            b.post("t", "claude", with_q),
+            Err(BridgeError::Invalid(_))
+        ));
+        // Default wake: notes are quiet unless the sender asks otherwise.
+        assert_eq!(n.effective_wake(), crate::model::WakeLevel::Quiet);
+        let loud = b
+            .post(
+                "t",
+                "claude",
+                Draft {
+                    reply_to: Some(2),
+                    wake: Some(crate::model::WakeLevel::Urgent),
+                    ..d(Kind::Note)
+                },
+            )
+            .unwrap();
+        assert_eq!(loud.effective_wake(), crate::model::WakeLevel::Urgent);
+        assert_eq!(
+            b.messages("t").unwrap()[0].effective_wake(),
+            crate::model::WakeLevel::Normal,
+            "a task wakes by default"
+        );
+    }
+
+    #[test]
+    fn a_restart_is_a_lifecycle_step_not_a_stall() {
+        use crate::model::Phase;
+        let (_d, mut b) = open();
+        b.create_task("t", "claude", task_to("dsh")).unwrap();
+        b.post("t", "dsh", d(Kind::Ack)).unwrap();
+        assert!(
+            b.post(
+                "t",
+                "dsh",
+                Draft {
+                    phase: Some(Phase::Restarted),
+                    ..d(Kind::Progress)
+                }
+            )
+            .is_err(),
+            "restarted needs a pending restart"
+        );
+        assert!(
+            matches!(
+                b.post(
+                    "t",
+                    "dsh",
+                    Draft {
+                        phase: Some(Phase::PendingRestart),
+                        ..d(Kind::Ack)
+                    }
+                ),
+                Err(BridgeError::Invalid(_))
+            ),
+            "phase only on progress"
+        );
+        b.post(
+            "t",
+            "dsh",
+            Draft {
+                phase: Some(Phase::PendingRestart),
+                ..d(Kind::Progress)
+            },
+        )
+        .unwrap();
+        assert_eq!(b.task("t").unwrap().state, State::AwaitingRestart);
+        b.post("t", "dsh", d(Kind::Progress)).unwrap();
+        assert_eq!(
+            b.task("t").unwrap().state,
+            State::AwaitingRestart,
+            "plain progress keeps waiting"
+        );
+        b.post(
+            "t",
+            "dsh",
+            Draft {
+                phase: Some(Phase::Restarted),
+                body: "bootId muwlusnj".into(),
+                ..d(Kind::Progress)
+            },
+        )
+        .unwrap();
+        assert_eq!(b.task("t").unwrap().state, State::Working);
+        // A result may also come straight after the restart.
+        b.post(
+            "t",
+            "dsh",
+            Draft {
+                phase: Some(Phase::PendingRestart),
+                ..d(Kind::Progress)
+            },
+        )
+        .unwrap();
+        b.post("t", "dsh", result(Outcome::Done)).unwrap();
+        assert_eq!(b.task("t").unwrap().state, State::AwaitingVerdict);
+    }
+
+    #[test]
+    fn done_means_done_and_partial_names_its_follow_ups() {
+        let (_d, mut b) = open();
+        b.create_task("t", "claude", task_to("dsh")).unwrap();
+        b.post("t", "dsh", d(Kind::Ack)).unwrap();
+        let item = |name: &str, status: &str, follow: Option<&str>| ResultItem {
+            item: name.into(),
+            status: status.into(),
+            evidence: "e".into(),
+            follow_up: follow.map(str::to_string),
+        };
+        let res = |o: Outcome, items: Vec<ResultItem>| Draft {
+            outcome: Some(o),
+            results: items,
+            ..d(Kind::Result)
+        };
+        let e = b
+            .post(
+                "t",
+                "dsh",
+                res(
+                    Outcome::Done,
+                    vec![item("a", "done", None), item("b", "failed", None)],
+                ),
+            )
+            .unwrap_err();
+        assert!(e.to_string().contains("unfinished items (b)"), "{e}");
+        assert!(
+            b.post(
+                "t",
+                "dsh",
+                res(Outcome::Partial, vec![item("a", "done", None)])
+            )
+            .is_err(),
+            "partial needs an unfinished item"
+        );
+        assert!(
+            b.post(
+                "t",
+                "dsh",
+                res(
+                    Outcome::Partial,
+                    vec![item("a", "done", None), item("b", "pending", None)]
+                )
+            )
+            .is_err(),
+            "follow_up required"
+        );
+        b.post(
+            "t",
+            "dsh",
+            res(
+                Outcome::Partial,
+                vec![
+                    item("a", "done", None),
+                    item("b", "pending", Some("t-followup")),
+                ],
+            ),
+        )
+        .unwrap();
+        assert_eq!(b.task("t").unwrap().state, State::AwaitingVerdict);
+        // blocked/rejected stay free-form.
+        b.post("t", "claude", verdict(Judgement::Rework)).unwrap();
+        b.post(
+            "t",
+            "dsh",
+            res(Outcome::Blocked, vec![item("b", "failed", None)]),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn parents_must_exist_and_belong_to_the_sender() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = Bridge::open(dir.path(), &["claude", "dsh", "cc"]).unwrap();
+        b.create_task("p", "claude", task_to("dsh")).unwrap();
+        let child = |parent: &str| Draft {
+            meta: Some(TaskMeta {
+                to: "dsh".into(),
+                title: "child".into(),
+                priority: Default::default(),
+                deadline: None,
+                expr_id: None,
+                parent: Some(parent.into()),
+            }),
+            ..d(Kind::Task)
+        };
+        assert!(matches!(
+            b.create_task("c0", "claude", child("missing")),
+            Err(BridgeError::Invalid(_))
+        ));
+        assert!(matches!(
+            b.create_task(
+                "c1",
+                "cc",
+                Draft {
+                    meta: Some(TaskMeta {
+                        to: "claude".into(),
+                        ..child("p").meta.unwrap()
+                    }),
+                    ..child("p")
+                }
+            ),
+            Err(BridgeError::Forbidden(_))
+        ));
+        b.create_task(
+            "c2",
+            "dsh",
+            Draft {
+                meta: Some(TaskMeta {
+                    to: "claude".into(),
+                    ..child("p").meta.unwrap()
+                }),
+                ..child("p")
+            },
+        )
+        .unwrap();
+        assert_eq!(b.task("c2").unwrap().parent.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn protocol_1_clients_keep_working_and_old_needs_user_strings_still_read() {
+        let (_d, mut b) = open();
+        let v1 = draft_json(
+            serde_json::json!({ "kind": "task", "protocol": "1", "meta": { "to": "dsh", "title": "old client" }, "needs_user": ["旧格式"] }),
+        );
+        let m = b.create_task("t", "claude", v1).unwrap();
+        assert_eq!(
+            (m.needs_user[0].text.as_str(), m.needs_user[0].relay),
+            ("旧格式", None)
+        );
+        let v2 = draft_json(
+            serde_json::json!({ "kind": "ack", "protocol": "2", "needs_user": [{ "text": "要不要重启", "relay": "dsh" }] }),
+        );
+        let m = b.post("t", "dsh", v2).unwrap();
+        assert_eq!(m.needs_user[0].relay, Some(crate::model::Relay::Dsh));
+        assert!(
+            b.post(
+                "t",
+                "dsh",
+                draft_json(serde_json::json!({ "kind": "progress", "protocol": "0" }))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn logs_written_under_older_rules_still_replay() {
+        // A result written before P7 existed: outcome done although an item failed.
+        let (dir, mut b) = open();
+        b.create_task("t", "claude", task_to("dsh")).unwrap();
+        b.post("t", "dsh", d(Kind::Ack)).unwrap();
+        drop(b);
+        let old = Message {
+            task: "t".into(),
+            n: 3,
+            from: "dsh".into(),
+            kind: Kind::Result,
+            body: "old".into(),
+            meta: None,
+            questions: vec![],
+            needs_user: vec![],
+            judgement: None,
+            reply_to: None,
+            supersedes: None,
+            client_msg_id: None,
+            session_epoch: None,
+            wake: None,
+            phase: None,
+            imported: false,
+            protocol: "1".into(),
+            at: chrono::Utc::now(),
+            outcome: Some(Outcome::Done),
+            results: vec![ResultItem {
+                item: "x".into(),
+                status: "failed".into(),
+                evidence: "e".into(),
+                follow_up: None,
+            }],
+        };
+        Store::open(dir.path().join("state"))
+            .unwrap()
+            .append(&old, false)
+            .unwrap();
+        let mut b = Bridge::open(dir.path().join("state"), AGENTS).unwrap();
+        assert_eq!(b.bad_lines, 0, "history is not rewritten by later rules");
+        assert_eq!(b.task("t").unwrap().state, State::AwaitingVerdict);
+        b.post("t", "claude", verdict(Judgement::Pass)).unwrap();
+        // …while the same message posted today is refused.
+        b.create_task("u", "claude", task_to("dsh")).unwrap();
+        b.post("u", "dsh", d(Kind::Ack)).unwrap();
+        let today = Draft {
+            outcome: Some(Outcome::Done),
+            results: old.results.clone(),
+            ..d(Kind::Result)
+        };
+        assert!(b.post("u", "dsh", today).is_err());
     }
 }

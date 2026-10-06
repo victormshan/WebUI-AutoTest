@@ -68,6 +68,8 @@ pub fn read_task(dir: &Path) -> Result<Vec<Message>> {
             protocol: "0".into(),
             at: mtime,
             imported: true,
+            wake: None,
+            phase: None,
         };
         if name.ends_with(".md") {
             let (header, body) = raw.split_once('\n').unwrap_or((raw.as_str(), ""));
@@ -97,6 +99,7 @@ pub fn read_task(dir: &Path) -> Result<Vec<Message>> {
                     priority: Default::default(),
                     deadline: None,
                     expr_id: None,
+                    parent: None,
                 });
             }
         } else {
@@ -123,7 +126,7 @@ pub fn read_task(dir: &Path) -> Result<Vec<Message>> {
                 .as_array()
                 .map(|a| {
                     a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .filter_map(|x| x.as_str().map(crate::model::NeedsUser::from))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -230,7 +233,7 @@ mod tests {
             msgs[1].body.contains("收到") && msgs[1].body.contains("\"needsUser\""),
             "original JSON kept"
         );
-        assert_eq!(msgs[1].needs_user, ["要用户定"]);
+        assert_eq!(msgs[1].needs_user[0].text, "要用户定");
 
         let state = d.path().join("state");
         let mut b = Bridge::open(&state, &["claude", "dsh"]).unwrap();

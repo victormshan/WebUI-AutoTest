@@ -29,6 +29,9 @@ pub enum Kind {
     /// A task paused for the user resumes after the user's recorded decision. Only the service
     /// writes it (from `POST /v1/user/decisions`), never an agent directly.
     Resume,
+    /// Either party adds information without changing the task's state (P1). It must reply to an
+    /// earlier message of the task and cannot carry a new instruction (that is a new task).
+    Note,
 }
 
 impl Kind {
@@ -40,13 +43,92 @@ impl Kind {
         )
     }
 
-    /// Kinds the other side has to act on, and therefore wake it. Acks, progress and closing are
-    /// informational and never wake anyone (design §5: no wake storms).
-    pub fn wakes(self) -> bool {
-        !matches!(
-            self,
-            Kind::Ack | Kind::Progress | Kind::Close | Kind::Resume
-        )
+    /// Default wake level when the sender does not choose one (Q2): kinds the other side has to
+    /// act on wake it; acks, progress, closing and notes are informational.
+    pub fn default_wake(self) -> WakeLevel {
+        match self {
+            Kind::Ack | Kind::Progress | Kind::Close | Kind::Resume | Kind::Note => {
+                WakeLevel::Quiet
+            }
+            _ => WakeLevel::Normal,
+        }
+    }
+}
+
+/// How hard to wake the recipient (Q2). The DSH main agent is interrupted by a wake (a turn is
+/// appended), Claude only stops waiting, so the sender decides how much a message warrants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeLevel {
+    /// Stored only; the recipient sees it when it next reads.
+    Quiet,
+    /// Pushed; the recipient may coalesce it with others under its cooldown.
+    Normal,
+    /// Pushed and meant to wake the recipient at once.
+    Urgent,
+}
+
+impl WakeLevel {
+    pub fn pushes(self) -> bool {
+        self != WakeLevel::Quiet
+    }
+}
+
+/// Lifecycle phases a receiver can announce in a progress message (Q1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Phase {
+    /// About to restart (deliver + restart): the channel may be unreachable for a while.
+    PendingRestart,
+    /// Back after the restart.
+    Restarted,
+}
+
+/// Who asks the user about a needs_user item (Q5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Relay {
+    Claude,
+    Dsh,
+    Either,
+}
+
+/// Something only the user may decide. Older messages carry a bare string; that is still read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "NeedsUserRepr")]
+pub struct NeedsUser {
+    pub text: String,
+    /// Who is responsible for asking the user; unset means whoever raised it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<Relay>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum NeedsUserRepr {
+    Text(String),
+    Full {
+        text: String,
+        #[serde(default)]
+        relay: Option<Relay>,
+    },
+}
+
+impl From<NeedsUserRepr> for NeedsUser {
+    fn from(r: NeedsUserRepr) -> Self {
+        match r {
+            NeedsUserRepr::Text(text) => NeedsUser { text, relay: None },
+            NeedsUserRepr::Full { text, relay } => NeedsUser { text, relay },
+        }
+    }
+}
+
+impl From<&str> for NeedsUser {
+    fn from(s: &str) -> Self {
+        NeedsUser {
+            text: s.into(),
+            relay: None,
+        }
     }
 }
 
@@ -73,6 +155,8 @@ pub enum State {
     Verified,
     /// Over a limit (rounds or messages): only the user can move it on; requester may close/cancel.
     PausedForUser,
+    /// The receiver announced a restart (Q1): not stalled, no reminders until it is back.
+    AwaitingRestart,
     Closed,
     Cancelled,
 }
@@ -108,6 +192,8 @@ pub enum Priority {
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Done,
+    /// Some items delivered, the rest have follow-ups (P7).
+    Partial,
     Blocked,
     Rejected,
 }
@@ -134,6 +220,16 @@ pub struct ResultItem {
     pub status: String,
     /// Re-runnable evidence: command, output, file:line. The receiver verifies it independently.
     pub evidence: String,
+    /// For an unfinished item of a partial result: the follow-up task id or needs_user text (P7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<String>,
+}
+
+impl ResultItem {
+    /// done and skipped are finished; anything else (failed, needs-user, pending …) is not.
+    pub fn finished(&self) -> bool {
+        matches!(self.status.as_str(), "done" | "skipped")
+    }
 }
 
 /// Metadata carried by message 1.
@@ -148,6 +244,9 @@ pub struct TaskMeta {
     /// claude-step-relay experiment this task belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expr_id: Option<String>,
+    /// The task this one was derived from (P6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 /// One appended message, as stored (one JSON line) and served.
@@ -168,7 +267,7 @@ pub struct Message {
     pub results: Vec<ResultItem>,
     /// Things only the user may decide; neither agent decides them for the user.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub needs_user: Vec<String>,
+    pub needs_user: Vec<NeedsUser>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<Outcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,12 +283,42 @@ pub struct Message {
     /// Sender's session generation; a change means "new session resending the same intent".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_epoch: Option<String>,
+    /// How hard to wake the recipient; unset means the kind's default (Q2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake: Option<WakeLevel>,
+    /// Lifecycle phase announced with a progress message (Q1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<Phase>,
     pub protocol: String,
     pub at: DateTime<Utc>,
     /// Imported from the old file protocol: kept as a record, never replayed through the
     /// state machine (those tasks were not run under its rules).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub imported: bool,
+}
+
+impl Message {
+    /// The wake level that applies: the sender's choice, else the kind's default.
+    pub fn effective_wake(&self) -> WakeLevel {
+        self.wake.unwrap_or(self.kind.default_wake())
+    }
+}
+
+impl std::fmt::Display for NeedsUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.relay {
+            Some(r) => write!(
+                f,
+                "{}（由 {} 去问用户）",
+                self.text,
+                serde_json::to_value(r)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default()
+            ),
+            None => f.write_str(&self.text),
+        }
+    }
 }
 
 /// Derived view of a task.
@@ -204,6 +333,8 @@ pub struct Task {
     pub deadline: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expr_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     pub state: State,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paused_reason: Option<String>,

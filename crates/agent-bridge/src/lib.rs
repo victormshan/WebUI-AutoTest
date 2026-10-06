@@ -19,11 +19,14 @@ pub mod store;
 pub mod user;
 
 /// Message protocol spoken by this service. The file protocol it replaces was "0".
-pub const PROTOCOL: &str = "1";
+pub const PROTOCOL: &str = "2";
+/// Protocols accepted: "1" (first release) stays valid while clients move to "2".
+pub const PROTOCOLS: &[&str] = &["1", "2"];
 /// Question/answer rounds per task before it is handed to the user.
 pub const MAX_QUESTION_ROUNDS: u32 = 3;
 /// Messages per task before it is handed to the user.
-pub const MAX_MESSAGES: u32 = 12;
+/// Safety cap on all messages of a task (Q6: the real limit is on question rounds).
+pub const MAX_MESSAGES: u32 = 50;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {

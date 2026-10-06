@@ -428,6 +428,7 @@ mod tests {
                 priority: Default::default(),
                 deadline: None,
                 expr_id: None,
+                parent: None,
             }),
             questions: if n == 1 {
                 vec![]
@@ -449,6 +450,8 @@ mod tests {
             protocol: crate::PROTOCOL.into(),
             at: chrono::Utc::now(),
             imported: false,
+            wake: None,
+            phase: None,
         }
     }
 

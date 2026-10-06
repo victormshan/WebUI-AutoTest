@@ -241,7 +241,7 @@ impl AppState {
                 } else {
                     t.from.clone()
                 };
-                if last.kind.wakes()
+                if last.effective_wake().pushes()
                     && g.cursors.get(&to, &t.id) < last.n
                     && now - last.at >= self.timing.rewake_after
                     && self.targets.contains_key(&to)
@@ -278,7 +278,7 @@ impl AppState {
     fn stored(self: &Arc<Self>, m: &Message) {
         self.news.notify_waiters();
         self.record_copies(m);
-        if !m.kind.wakes() {
+        if !m.effective_wake().pushes() {
             return;
         }
         let push = {
@@ -554,14 +554,26 @@ async fn post_message(
     Extension(Caller(me)): Extension<Caller>,
     Path(id): Path<String>,
     Json(d): Json<Draft>,
-) -> ApiResult<Message> {
+) -> ApiResult<Value> {
     let before = s.lock().bridge.task(&id).map(|t| t.last_n);
     let m = s.lock().bridge.post(&id, &me, d)?;
     // A retried post returns the stored message: no second wake for it.
     if before.is_some_and(|n| m.n > n) {
         s.stored(&m);
     }
-    Ok(Json(m))
+    // P4: posting in a task means having read it — the sender's cursor for this task (and only
+    // this task) moves up to its own message; the response says which messages that covered.
+    let (from, to) = {
+        let mut g = s.lock();
+        let from = g.cursors.get(&me, &id) + 1;
+        g.cursors.ack(&me, &id, m.n).map_err(BridgeError::Io)?;
+        (from, m.n)
+    };
+    let mut v = serde_json::to_value(&m).expect("serializable");
+    if from <= to {
+        v["implicit_read"] = json!({ "task": id, "from": from, "to": to });
+    }
+    Ok(Json(v))
 }
 
 /// Messages addressed to `me` (sent by the other party) beyond `me`'s read cursor, oldest first.
@@ -1598,6 +1610,32 @@ pub(crate) mod tests {
                 .len(),
             3,
             "still readable as history"
+        );
+    }
+
+    #[tokio::test]
+    async fn posting_in_a_task_marks_that_task_read() {
+        let e = start().await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("u")).await;
+        let (st, m) = e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        assert_eq!(st, 200);
+        assert_eq!(
+            m["implicit_read"],
+            json!({ "task": "t", "from": 1, "to": 2 })
+        );
+        let inbox = e.get(DSH, "/v1/inbox").await.1;
+        let tasks: Vec<&str> = inbox["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["task"].as_str().unwrap())
+            .collect();
+        assert_eq!(tasks, ["u"], "only the task posted in was marked read");
+        let (_, m) = e.post(DSH, "/v1/tasks/t/messages", k("progress")).await;
+        assert_eq!(
+            m["implicit_read"],
+            json!({ "task": "t", "from": 3, "to": 3 })
         );
     }
 }
