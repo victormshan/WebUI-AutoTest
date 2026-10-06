@@ -395,6 +395,9 @@ impl AppState {
                             if self.targets.contains_key(party) {
                                 let mut p = push_for(&t, &last, party, "stalled");
                                 p.kind = "stalled".into();
+                                // Not a message: its own dedup key, or the endpoint would take it
+                                // for a repeat of message n (bridge:<task>:<n>) and drop it.
+                                p.extra.key = Some(format!("stalled:{}:{}", t.id, now.timestamp()));
                                 pushes.push(p);
                             }
                         }
@@ -1092,6 +1095,11 @@ async fn user_decision(
         if let Some(last) = last {
             let mut p = push_for(&task, &last, &other, "decision");
             p.kind = "user_decision".into();
+            p.extra.key = Some(format!(
+                "decision:{}:{}",
+                item_id,
+                &decision.sha256[..12.min(decision.sha256.len())]
+            ));
             p.summary = format!(
                 "用户对 {} 做了决定（{}转达{}）：{}",
                 item_id,
@@ -1956,6 +1964,12 @@ pub(crate) mod tests {
             stalled.len(),
             2,
             "one notice for each stalled task: {stalled:?}"
+        );
+        assert!(
+            stalled
+                .iter()
+                .all(|c| c["key"].as_str().is_some_and(|k| k.starts_with("stalled:"))),
+            "notices are not messages: own dedup key"
         );
         let pending = e.get(CLAUDE, "/v1/user/pending").await.1;
         let items: Vec<&str> = pending["items"]
