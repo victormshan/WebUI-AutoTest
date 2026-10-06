@@ -573,7 +573,12 @@ fn unread(g: &Inner, me: &str) -> Vec<Message> {
             continue;
         }
         if let Ok(ms) = g.bridge.messages(&t.id) {
-            out.extend(ms.iter().filter(|m| m.n > read && m.from != me).cloned());
+            // Imported archives are history, not news: never delivered as unread.
+            out.extend(
+                ms.iter()
+                    .filter(|m| m.n > read && m.from != me && !m.imported)
+                    .cloned(),
+            );
         }
     }
     out.sort_by(|a, b| a.at.cmp(&b.at).then(a.n.cmp(&b.n)));
@@ -1542,5 +1547,57 @@ pub(crate) mod tests {
             "copies are queued, not done inline: {h}"
         );
         state.copier.set_slow_for_tests(0);
+    }
+
+    #[tokio::test]
+    async fn imported_archives_are_neither_unread_nor_pending_for_the_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = dir.path().join("files/old");
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::write(
+            files.join("msg-1-claude.md"),
+            "taskId: old   n: 1   from: claude   kind: task   protocol: 0\n\n# 旧任务\n",
+        )
+        .unwrap();
+        std::fs::write(
+            files.join("msg-2-dsh.json"),
+            r#"{"status":"done","summary":"做完","needsUser":["当时要用户定的事"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            files.join("msg-3-claude.md"),
+            "taskId: old   n: 3   from: claude   kind: close   protocol: 0\n\n结案",
+        )
+        .unwrap();
+        let mut b = Bridge::open(dir.path().join("state"), &["claude", "dsh"]).unwrap();
+        b.import_task(crate::import::read_task(&files).unwrap())
+            .unwrap();
+        drop(b);
+        let e = start_at(dir).await;
+        let h = e.get(CLAUDE, "/v1/health").await.1;
+        assert_eq!(
+            (
+                h["unread"]["claude"].as_u64(),
+                h["unread"]["dsh"].as_u64(),
+                h["pendingForUser"].as_u64()
+            ),
+            (Some(0), Some(0), Some(0)),
+            "{h}"
+        );
+        assert_eq!(
+            e.get(DSH, "/v1/inbox").await.1["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            e.get(CLAUDE, "/v1/tasks/old").await.1["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3,
+            "still readable as history"
+        );
     }
 }

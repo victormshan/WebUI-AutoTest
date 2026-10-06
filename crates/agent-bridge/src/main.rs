@@ -301,6 +301,15 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
+                // The directory also holds the mirror of tasks that live in the service: those
+                // are not file-protocol tasks and are left alone.
+                if bridge
+                    .messages(&name)
+                    .is_ok_and(|ms| ms.first().is_some_and(|m| !m.imported))
+                {
+                    println!("skipped {name}: a task of the service (mirror files)");
+                    continue;
+                }
                 match agent_bridge::import::read_task(&d)
                     .map_err(|e| format!("{e:#}"))
                     .and_then(|m| {

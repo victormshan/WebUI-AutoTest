@@ -224,3 +224,9 @@ cargo test -p webtest -- --ignored           # 端到端：通过、改名、金
 每一版由另一家厂商的模型审核，通过后由审核门签名（ed25519），签名作为 git note 附在提交上，CI 用钉死的公钥逐个验证。
 安装、用法和 HTTP 接口见 [crates/review-gate/README.md](crates/review-gate/README.md)；CI 模板在 `ci/review-gate.yml`。
 `webtest` 的交叉评审可以直接用 `--review-command "review-gate ask"`。
+
+## agent-bridge：Claude ⇄ DSH 双向任务协作服务
+
+`crates/agent-bridge` 是 Claude Code 与 DeepSeek harness 主 agent 之间的双向任务分发与协作服务（Rust，WSL 用户服务，`127.0.0.1:7879`）。
+双方都能给对方派任务：派发 → 回执 → 问答 → 带证据的结果 → 核实 → 结案；规则由服务端强制，只有用户能决定的事项汇总到 `/v1/user/pending`，用户原话带哈希只追加保存。
+设计由 Claude 与 DSH 主 agent 协商四轮定稿；安装、用法与接口见 [crates/agent-bridge/README.md](crates/agent-bridge/README.md)。

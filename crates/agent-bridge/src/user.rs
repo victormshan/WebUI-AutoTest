@@ -171,7 +171,8 @@ pub fn pending(
     };
     for t in bridge.list(None) {
         if let Ok(ms) = bridge.messages(&t.id) {
-            for m in ms {
+            // Archived file-protocol messages are history: their items were handled back then.
+            for m in ms.iter().filter(|m| !m.imported) {
                 for (i, text) in m.needs_user.iter().enumerate() {
                     push(
                         format!("{}#{}#{}", t.id, m.n, i + 1),
