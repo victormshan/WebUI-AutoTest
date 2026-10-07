@@ -59,6 +59,9 @@ pub struct Timing {
     pub unread_alert_after: chrono::Duration,
     /// An undecided needs_user item nobody has asked the user about is overdue after this (Q5).
     pub ask_overdue_after: chrono::Duration,
+    /// A task announced as restarting but not back after this goes to the user: a restart that
+    /// never happened must not leave the task silent forever (it gets no nudge and no stall).
+    pub restart_overdue_after: chrono::Duration,
 }
 
 impl Default for Timing {
@@ -73,6 +76,7 @@ impl Default for Timing {
             nudge_max: 3,
             unread_alert_after: chrono::Duration::minutes(30),
             ask_overdue_after: chrono::Duration::hours(12),
+            restart_overdue_after: chrono::Duration::hours(1),
         }
     }
 }
@@ -382,6 +386,23 @@ impl AppState {
                             ),
                         ));
                     }
+                }
+                if t.state == TaskState::AwaitingRestart {
+                    // Q1: a restart is a step, not a stall — but one that never completes is.
+                    if now - t.updated_at >= self.timing.restart_overdue_after {
+                        alerts.push(PendingItem::new(
+                            format!("{}#restart-overdue#{}", t.id, t.last_n),
+                            &t.id,
+                            "restart-overdue",
+                            format!(
+                                "{} 在任务 {} 上宣布了重启，{} 分钟后仍未发 restarted：重启可能没有发生或失败了，请确认",
+                                t.to,
+                                t.id,
+                                (now - t.updated_at).num_minutes()
+                            ),
+                        ));
+                    }
+                    continue;
                 }
                 if now - t.updated_at >= self.timing.stall_after {
                     stalled_now.insert(t.id.clone());
@@ -1607,6 +1628,63 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_restart_that_never_completes_reaches_the_user_and_is_never_a_stall() {
+        let (notify_url, calls) = mock_notify(true).await;
+        let (e, s) = start_push(&notify_url, Timing::default()).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "progress", "protocol": PROTOCOL, "phase": "pending-restart" }),
+        )
+        .await;
+        settle().await;
+        let now = Utc::now();
+        s.tick(now + chrono::Duration::minutes(50));
+        assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+        s.tick(now + chrono::Duration::minutes(61));
+        let p = e.get(CLAUDE, "/v1/user/pending").await.1;
+        assert_eq!(pending_sources(&p), ["restart-overdue"]);
+        assert_eq!(p["items"][0]["item"], "t#restart-overdue#3");
+        // A day later it is still that, not a stall, and nobody was nudged meanwhile.
+        s.tick(now + chrono::Duration::hours(25));
+        settle().await;
+        assert_eq!(
+            pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1),
+            ["restart-overdue"]
+        );
+        assert!(
+            e.get(CLAUDE, "/v1/health").await.1["stalled"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|c| c.1["kind"] != "nudge" && c.1["kind"] != "stalled"),
+            "no nudge, no stall notice while awaiting a restart"
+        );
+        // Back from the restart: the alert goes.
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "progress", "protocol": PROTOCOL, "phase": "restarted", "body": "bootId 2" }),
+        )
+        .await;
+        // A pass right after the restarted message: the task is back in working, so the
+        // restart-overdue item must be gone. `back` is read after the post returned, so it is not
+        // earlier than the task's updated_at (and chrono durations are signed anyway).
+        let back = Utc::now();
+        assert!(back >= s.lock().bridge.task("t").unwrap().updated_at);
+        s.tick(back);
+        assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+    }
+
+    #[tokio::test]
     async fn a_silent_receiver_is_nudged_then_the_user_is_told() {
         let (notify_url, calls) = mock_notify(true).await;
         let (e, s) = start_push(&notify_url, Timing::default()).await;
@@ -1680,7 +1758,8 @@ pub(crate) mod tests {
         assert!(followed[0]["afterNudgeSecs"].is_i64());
         s.tick(Utc::now());
         assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
-        // A task waiting for a restart is not nagged.
+        // A task waiting for a restart is not nagged (a restart that never completes is
+        // reported as restart-overdue instead, see the restart test).
         e.post(
             DSH,
             "/v1/tasks/t/messages",
@@ -1690,7 +1769,10 @@ pub(crate) mod tests {
         s.tick(Utc::now() + chrono::Duration::hours(5));
         settle().await;
         assert_eq!(nudges().len(), 3);
-        assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+        assert_eq!(
+            pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1),
+            ["restart-overdue"]
+        );
     }
 
     #[tokio::test]
