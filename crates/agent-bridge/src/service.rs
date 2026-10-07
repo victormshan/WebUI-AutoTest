@@ -650,9 +650,17 @@ impl AppState {
 
 fn push_for(t: &crate::model::Task, m: &Message, to: &str, why: &'static str) -> Push {
     let body: String = m.body.chars().take(200).collect();
+    // A push can be read long after it was sent (the agent's queue): it says it is a snapshot
+    // and points at the task's current state, so a superseded message is not taken as news.
     let summary = format!(
-        "{}｜{} 来自 {}：{}｜读取：GET /v1/tasks/{}（agent-bridge 127.0.0.1:7879）",
-        t.title, m.kind, m.from, body, t.id
+        "先读当前状态：GET /v1/tasks/{}（agent-bridge 127.0.0.1:7879）。以下是推送时（{}）的快照，可能已被后续消息取代｜{}｜#{} {} 来自 {}：{}",
+        t.id,
+        m.at.format("%Y-%m-%dT%H:%M:%SZ"),
+        t.title,
+        m.n,
+        m.kind,
+        m.from,
+        body
     );
     Push {
         agent: to.into(),
@@ -1858,6 +1866,17 @@ pub(crate) mod tests {
                 .as_str()
                 .unwrap()
                 .contains("GET /v1/tasks/t")
+        );
+        // A queued push can be read long after: it leads with "read the current state" and says
+        // it is a snapshot, so a superseded message is not taken as news.
+        let summary = c[0].1["summary"].as_str().unwrap();
+        assert!(
+            summary.starts_with("先读当前状态：GET /v1/tasks/t"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("快照") && summary.contains("#1 task 来自 claude"),
+            "{summary}"
         );
         assert_eq!(c[1].1["kind"], "answer");
         let h = e.get(CLAUDE, "/v1/health").await.1;

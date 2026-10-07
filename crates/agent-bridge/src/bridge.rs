@@ -571,7 +571,11 @@ fn apply(t: &mut Task, earlier: &[Message], m: &Message) -> Result<(), BridgeErr
             ));
         }
         (Open, Kind::Ack) => Acked,
-        (Open, _) => return Err(deny("acknowledge the task first")),
+        (Open, _) => {
+            return Err(deny(
+                "acknowledge the task first: post a message with kind \"ack\" (POST /v1/tasks/{id}/messages); POST /v1/inbox/ack only moves your read cursor",
+            ));
+        }
         (Acked | Working, Kind::Progress) => Working,
         (AwaitingAnswer, Kind::Progress) => AwaitingAnswer,
         (Acked | Working, Kind::Question) => AwaitingAnswer,
