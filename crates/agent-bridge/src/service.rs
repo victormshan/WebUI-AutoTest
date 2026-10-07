@@ -295,6 +295,14 @@ impl AppState {
             let mut g = self.lock();
             let mut stalled_now = BTreeSet::new();
             let mut alerts = Vec::new();
+            // Tasks waiting for the user (an undecided needs_user item): the receiver asked and
+            // moved on, as agreed in ask-dont-wait — that is not silence, so no nudge.
+            let waiting_for_user: BTreeSet<String> = self
+                .pending_items(&g, false)
+                .into_iter()
+                .filter(|i| i.source == "needs_user")
+                .map(|i| i.task)
+                .collect();
             let tasks: Vec<crate::model::Task> = g
                 .bridge
                 .list(None)
@@ -331,6 +339,7 @@ impl AppState {
                 // requester's answer or a rework verdict, whose push may have been read and
                 // then dropped (a session that stops at the end of its turn).
                 if matches!(t.state, TaskState::Acked | TaskState::Working)
+                    && !waiting_for_user.contains(&t.id)
                     && now - last.at >= self.timing.nudge_after
                 {
                     let n = g.nudges.get(&t.id).filter(|x| x.since_n == last.n).cloned();
@@ -1684,6 +1693,55 @@ pub(crate) mod tests {
         assert!(back >= s.lock().bridge.task("t").unwrap().updated_at);
         s.tick(back);
         assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_receiver_waiting_for_the_user_is_not_nudged_until_the_user_decides() {
+        let (notify_url, calls) = mock_notify(true).await;
+        let (e, s) = start_push(&notify_url, Timing::default()).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "progress", "protocol": PROTOCOL, "body": "delivered",
+                "needs_user": [{ "text": "授权重启宿主？", "relay": "dsh" }] }),
+        )
+        .await;
+        settle().await;
+        let now = Utc::now();
+        let nudges = || {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.1["kind"] == "nudge")
+                .count()
+        };
+        s.tick(now + chrono::Duration::hours(3));
+        settle().await;
+        assert_eq!(nudges(), 0, "asking the user and moving on is not silence");
+        assert!(
+            pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1)
+                .iter()
+                .all(|x| x != "silent")
+        );
+        // The user decides: from then on it is the receiver's move again.
+        let item = e.get(CLAUDE, "/v1/user/pending").await.1["items"][0]["item"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (c, v) = e
+            .post(
+                DSH,
+                "/v1/user/decisions",
+                json!({ "item": item, "verbatim": "可以重启" }),
+            )
+            .await;
+        assert_eq!(c, 200, "{v}");
+        s.tick(now + chrono::Duration::hours(4));
+        settle().await;
+        assert_eq!(nudges(), 1, "after the decision the silence counts again");
     }
 
     #[tokio::test]
