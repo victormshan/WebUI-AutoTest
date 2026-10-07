@@ -362,7 +362,9 @@ impl AppState {
                             p.kind = "nudge".into();
                             // Measurable (dsh-auto-continue): which nudge, and since when silent.
                             p.extra = PushExtra {
-                                key: Some(format!("nudge:{}:{}", t.id, count + 1)),
+                                // The silence is part of the identity: k restarts with every new silence,
+                                // so `nudge:<task>:<k>` alone repeats and a deduping endpoint drops it.
+                                key: Some(format!("nudge:{}:{}:{}", t.id, last.n, count + 1)),
                                 ledger: Some(
                                     json!({ "nudges": count + 1, "lastMessageAt": last.at }),
                                 ),
@@ -375,7 +377,8 @@ impl AppState {
                             if self.targets.contains_key(&t.from) {
                                 let mut q = push_for(&t, &last, &t.from, "nudge");
                                 q.kind = "nudge_notice".into();
-                                q.extra.key = Some(format!("nudge-notice:{}:{}", t.id, count + 1));
+                                q.extra.key =
+                                    Some(format!("nudge-notice:{}:{}:{}", t.id, last.n, count + 1));
                                 q.summary = format!(
                                     "已提醒 {} 继续任务 {}（{} 分钟无新消息）",
                                     t.to, t.id, mins
@@ -1820,14 +1823,14 @@ pub(crate) mod tests {
         assert_eq!(nudges().len(), 1, "one nudge per 20 minutes");
         assert_eq!(
             nudges()[0]["key"],
-            "nudge:t:1",
-            "own key space, not bridge:t:<n>"
+            "nudge:t:2:1",
+            "own key space (silence since message 2, first nudge), not bridge:t:<n>"
         );
         s.tick(at(42));
         s.tick(at(63));
         settle().await;
         assert_eq!(nudges().len(), 3);
-        assert_eq!(nudges()[2]["key"], "nudge:t:3");
+        assert_eq!(nudges()[2]["key"], "nudge:t:2:3");
         assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
         s.tick(at(84));
         settle().await;
@@ -1867,6 +1870,17 @@ pub(crate) mod tests {
         assert!(followed[0]["afterNudgeSecs"].is_i64());
         s.tick(Utc::now());
         assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+        // The next silence's first nudge must not reuse the previous silence's key (seen live:
+        // DSH dropped nudge 1 of a new silence as a duplicate of an earlier nudge 1).
+        s.tick(Utc::now() + chrono::Duration::minutes(21));
+        settle().await;
+        assert_eq!(nudges().len(), 4);
+        assert_eq!(
+            nudges()[3]["key"],
+            "nudge:t:3:1",
+            "new silence, new identity"
+        );
+        assert_ne!(nudges()[3]["key"], nudges()[0]["key"]);
         // A task waiting for a restart is not nagged (a restart that never completes is
         // reported as restart-overdue instead, see the restart test).
         e.post(
@@ -1877,7 +1891,7 @@ pub(crate) mod tests {
         .await;
         s.tick(Utc::now() + chrono::Duration::hours(5));
         settle().await;
-        assert_eq!(nudges().len(), 3);
+        assert_eq!(nudges().len(), 4, "no nudge while awaiting the restart");
         assert_eq!(
             pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1),
             ["restart-overdue"]

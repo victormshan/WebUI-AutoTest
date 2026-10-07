@@ -81,7 +81,7 @@ directly goes on its task with `{task, verbatim, form}` (item `<task>#direct#<k>
 - A message whose push woke the agent is never pushed again; one still unread 15 minutes after a
   push that did not wake is re-woken once.
 - A receiver silent for 20 minutes on a task it acked is nudged (push `kind: "nudge"`, its own
-  dedup key `nudge:<task>:<k>`), at most 3 times per silence; then the user is told. Each nudge,
+  dedup key `nudge:<task>:<n>:<k>`), at most 3 times per silence; then the user is told. Each nudge,
   and how long the receiver took to speak after it (`why: "nudge-followed"`), is in `wakes.jsonl`.
 - A task without progress for 24 hours is stalled (user-visible, one notice per day).
 - Every create/post response carries `delivery {to, waiters, push, woken}` — how the message

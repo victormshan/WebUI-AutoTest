@@ -161,7 +161,7 @@ async fn curl(url: &str, token: &str, body: &Value) -> Result<Outcome, String> {
 /// in the outcome so they end up in the ledger instead of disappearing.
 /// `urgent` asks the endpoint to wake at once rather than coalesce (Q2). `key`, when given, is
 /// the identity the endpoint should dedupe on instead of `bridge:<task>:<n>` (nudges use their
-/// own key space, `nudge:<task>:<k>`, so they never collide with real messages).
+/// own key space, `nudge:<task>:<n>:<k>`, so they never collide with real messages).
 pub async fn wake(
     t: &Target,
     task: &str,
