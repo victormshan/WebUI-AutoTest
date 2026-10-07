@@ -327,8 +327,10 @@ impl AppState {
                 }
                 // P2: the receiver went quiet on work it took on — nudge it, tell the requester;
                 // once the nudges are spent, the user hears of it.
+                // In acked / working the next step is always the receiver's — also after the
+                // requester's answer or a rework verdict, whose push may have been read and
+                // then dropped (a session that stops at the end of its turn).
                 if matches!(t.state, TaskState::Acked | TaskState::Working)
-                    && last.from == t.to
                     && now - last.at >= self.timing.nudge_after
                 {
                     let n = g.nudges.get(&t.id).filter(|x| x.since_n == last.n).cloned();
@@ -357,7 +359,7 @@ impl AppState {
                                 ),
                             };
                             p.summary = format!(
-                                "任务 {}（{}）你上次发言后 {} 分钟没有新消息：请继续，或发 progress / result 说明情况｜读取：GET /v1/tasks/{}",
+                                "任务 {}（{}）最后一条消息之后 {} 分钟没有你的新消息：轮到你了，请继续，或发 progress / result 说明情况｜读取：GET /v1/tasks/{}",
                                 t.id, t.title, mins, t.id
                             );
                             pushes.push(p);
@@ -1682,6 +1684,55 @@ pub(crate) mod tests {
         assert!(back >= s.lock().bridge.task("t").unwrap().updated_at);
         s.tick(back);
         assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+    }
+
+    #[tokio::test]
+    async fn after_a_rework_verdict_the_silent_receiver_is_nudged_too() {
+        let (notify_url, calls) = mock_notify(true).await;
+        let (e, s) = start_push(&notify_url, Timing::default()).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "result", "protocol": PROTOCOL, "outcome": "done",
+            "results": [{ "item": "x", "status": "done", "evidence": "e" }] }),
+        )
+        .await;
+        // The requester sends it back: the task is working again and the next step is DSH's,
+        // although the last message is the requester's.
+        e.post(CLAUDE, "/v1/tasks/t/messages", json!({ "kind": "verdict", "protocol": PROTOCOL, "judgement": "rework", "body": "one more" })).await;
+        assert_eq!(
+            e.get(CLAUDE, "/v1/tasks/t").await.1["task"]["state"],
+            "working"
+        );
+        settle().await;
+        let now = Utc::now();
+        let nudges = || {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.1["kind"] == "nudge")
+                .count()
+        };
+        s.tick(now + chrono::Duration::minutes(15));
+        settle().await;
+        assert_eq!(nudges(), 0);
+        s.tick(now + chrono::Duration::minutes(21));
+        settle().await;
+        assert_eq!(nudges(), 1, "silence after a rework verdict is nudged");
+        // Waiting for the requester's verdict is not the receiver's silence: no nudge there.
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "result", "protocol": PROTOCOL, "outcome": "done",
+            "results": [{ "item": "x", "status": "done", "evidence": "e2" }] }),
+        )
+        .await;
+        s.tick(Utc::now() + chrono::Duration::hours(2));
+        settle().await;
+        assert_eq!(nudges(), 1);
     }
 
     #[tokio::test]
