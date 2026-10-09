@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: review-gate-newconv
+version: 1/1
+commit: f3ec9e064ce4e08e8def9c19e3b110d6227d5e55
+tree: 8e06aa0c681ac99364f79553d42e7b1ab42d3f6d
+parent: 64466bc8d4087d3b493eb8f5e730f141f18b1d7d
+review: v1-3
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-09T16:22:34Z
+signature: cM7FGeYBhTYkUZHnE2L7KnGyzKxi3IDhbS9w4dut6wPmt5m/k2I7qHssRoOSFhBKU3eOgLHHOwUrQRk/zy3aCA==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
