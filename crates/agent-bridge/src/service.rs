@@ -1685,6 +1685,31 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn the_requesters_note_on_taken_work_wakes_the_receiver() {
+        // Seen live: a rework sent as a plain note was stored quiet, never pushed, and DSH sat
+        // idle. A requester's note on acked/working work is something to act on.
+        let (notify_url, _calls) = mock_notify(true).await;
+        let (e, _s) = start_push(&notify_url, Timing::default()).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        let note = |wake: Option<&str>| {
+            let mut m =
+                json!({ "kind": "note", "protocol": PROTOCOL, "reply_to": 2, "body": "rework" });
+            if let Some(w) = wake {
+                m["wake"] = json!(w);
+            }
+            m
+        };
+        let (_, v) = e.post(CLAUDE, "/v1/tasks/t/messages", note(None)).await;
+        assert_eq!(v["delivery"]["push"], "sent", "{v}");
+        assert_eq!(v["wake"], "normal", "the level is stored on the message");
+        let (_, v) = e
+            .post(CLAUDE, "/v1/tasks/t/messages", note(Some("quiet")))
+            .await;
+        assert_eq!(v["delivery"]["push"], "quiet", "an explicit choice is kept");
+    }
+
+    #[tokio::test]
     async fn a_restart_that_never_completes_reaches_the_user_and_is_never_a_stall() {
         let (notify_url, calls) = mock_notify(true).await;
         let (e, s) = start_push(&notify_url, Timing::default()).await;

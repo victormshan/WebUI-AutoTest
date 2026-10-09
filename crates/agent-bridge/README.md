@@ -40,7 +40,9 @@ decided by each side's own review gate (review-gate for Claude).
   `awaiting_restart` (no reminders, never stalled); `phase: "restarted"` brings it back to working.
 - `meta.parent` links a derived task to the task it came from (`derivedTasks` in health).
 - Every message has a wake level, `wake: quiet | normal | urgent`. Default normal; `ack`,
-  `progress`, `note`, `close`, `resume` are quiet (stored, not pushed).
+  `progress`, `note`, `close`, `resume` are quiet (stored, not pushed) — except the requester's
+  note on an acked or working task (a review, a rework, a decision the receiver must act on),
+  which defaults to normal. The level decided is stored on the message.
 
 - The service assigns message numbers; messages are appended, never edited. Correcting yourself
   is a new message with `supersedes` pointing at the old one.

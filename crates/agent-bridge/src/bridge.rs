@@ -284,6 +284,18 @@ impl Bridge {
                 "resume is written by the service from a recorded user decision".into(),
             ));
         }
+        // A note is informational (quiet) by default — except the requester's note on work the
+        // receiver has taken on: that is a review, a rework or a decision the receiver must act
+        // on. Seen live: a rework sent as a plain note was never pushed and DSH sat idle.
+        // The level is stored on the message, so what was decided stays visible.
+        let mut d = d;
+        if d.wake.is_none()
+            && kind == Kind::Note
+            && from == e.task.from
+            && matches!(e.task.state, State::Acked | State::Working)
+        {
+            d.wake = Some(crate::model::WakeLevel::Normal);
+        }
         self.append_checked(id, from, kind, d)
     }
 
@@ -1061,8 +1073,28 @@ mod tests {
             b.post("t", "claude", with_q),
             Err(BridgeError::Invalid(_))
         ));
-        // Default wake: notes are quiet unless the sender asks otherwise.
-        assert_eq!(n.effective_wake(), crate::model::WakeLevel::Quiet);
+        // Default wake: the requester's note on acked/working work wakes the receiver (it is
+        // something to act on); the receiver's own note stays quiet unless it asks otherwise.
+        assert_eq!(n.effective_wake(), crate::model::WakeLevel::Normal);
+        let own = &b.messages("t").unwrap()[4];
+        assert_eq!((own.from.as_str(), own.kind), ("dsh", Kind::Note));
+        assert_eq!(own.effective_wake(), crate::model::WakeLevel::Quiet);
+        let explicit = b
+            .post(
+                "t",
+                "claude",
+                Draft {
+                    reply_to: Some(2),
+                    wake: Some(crate::model::WakeLevel::Quiet),
+                    ..d(Kind::Note)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            explicit.effective_wake(),
+            crate::model::WakeLevel::Quiet,
+            "an explicit choice is kept"
+        );
         let loud = b
             .post(
                 "t",
