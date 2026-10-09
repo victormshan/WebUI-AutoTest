@@ -381,7 +381,10 @@ async fn web_gemini_once(
         .as_str()
         .unwrap_or_default()
         .to_string();
-    let body = json!({ "prompt": prompt }).to_string();
+    // Every review in a new conversation: the tab is shared (DSH's own tasks and probes run in
+    // it), and a review appended to whatever conversation is open sees context that is not the
+    // diff — the reviewer is no longer independent.
+    let body = json!({ "prompt": prompt, "newConversation": true }).to_string();
     let (status, created) = bridge
         .http(
             "POST",
@@ -432,10 +435,21 @@ pub(crate) mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Mock dsh-web-relay bridge. `answers[i]` serves the i-th created task: `Ok(text)` = done,
-    /// `Err(msg)` = failed. Returns (base URL, prompts received).
+    /// `Err(msg)` = failed. A create-task without `newConversation: true` is always refused.
+    /// Returns (base URL, prompts received).
     pub(crate) async fn mock_bridge(
         answers: Vec<Result<&'static str, &'static str>>,
     ) -> (String, Arc<Mutex<Vec<String>>>) {
+        mock_bridge_refusing(0, answers).await
+    }
+
+    /// As `mock_bridge`, but the first `refused` create-task calls are refused (`ok:false`), as a
+    /// bridge does when it cannot take a task; later calls create tasks served by `answers`.
+    pub(crate) async fn mock_bridge_refusing(
+        refused: usize,
+        answers: Vec<Result<&'static str, &'static str>>,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        let creates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -448,6 +462,7 @@ pub(crate) mod tests {
                 };
                 let seen = seen.clone();
                 let answers = answers.clone();
+                let creates = creates.clone();
                 tokio::spawn(async move {
                     let mut buf = Vec::new();
                     let mut chunk = [0u8; 8192];
@@ -481,9 +496,18 @@ pub(crate) mod tests {
                     } else if !authed {
                         json!({ "ok": false })
                     } else if path == "/create-task" {
-                        let mut s = seen.lock().unwrap();
-                        s.push(serde_json::from_str::<Value>(&body).unwrap()["prompt"].as_str().unwrap().to_string());
-                        json!({ "ok": true, "id": format!("t{}", s.len()) })
+                        let req = serde_json::from_str::<Value>(&body).unwrap();
+                        let call = creates.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if req["newConversation"] != true {
+                            // A review must never land in a conversation already open.
+                            json!({ "ok": false, "error": "newConversation required" })
+                        } else if call < refused {
+                            json!({ "ok": false, "error": "bridge refused the task" })
+                        } else {
+                            let mut s = seen.lock().unwrap();
+                            s.push(req["prompt"].as_str().unwrap().to_string());
+                            json!({ "ok": true, "id": format!("t{}", s.len()) })
+                        }
                     } else {
                         let n: usize = path.rsplit('t').next().unwrap().parse().unwrap();
                         match answers.get(n - 1) {
@@ -540,6 +564,27 @@ pub(crate) mod tests {
         let e = ask(&cfg(&url), "p", "web-gemini").await.unwrap_err();
         assert!(matches!(e, AskError::Failed(_)), "{e}");
         assert_eq!(prompts.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_refused_create_task_is_a_failed_attempt_retried_not_a_panic() {
+        // Refused twice, then taken: the review still completes on the third attempt.
+        let (url, prompts) = mock_bridge_refusing(2, vec![Ok("VERDICT: APPROVED")]).await;
+        let r = ask(&cfg(&url), "p", "web-gemini").await.unwrap();
+        assert_eq!(r.answer, "VERDICT: APPROVED");
+        assert_eq!(
+            prompts.lock().unwrap().len(),
+            1,
+            "one task created, after two refusals"
+        );
+        // Refused every time: a failure that says so, after the attempt budget.
+        let (url, prompts) = mock_bridge_refusing(4, vec![]).await;
+        let e = ask(&cfg(&url), "p", "web-gemini").await.unwrap_err();
+        assert!(
+            matches!(&e, AskError::Failed(m) if m.contains("create-task failed")),
+            "{e}"
+        );
+        assert!(prompts.lock().unwrap().is_empty(), "no task was created");
     }
 
     #[tokio::test]
