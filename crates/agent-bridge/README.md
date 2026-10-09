@@ -72,8 +72,20 @@ directly goes on its task with `{task, verbatim, form}` (item `<task>#direct#<k>
 
 ## Waking the other side
 
-- **Claude** keeps `agent-bridge wait` running in the background; it exits when a message arrives,
-  which wakes the session. Reading never marks read — `ack` does (at-least-once delivery).
+- **Claude** has no inlet a service could push to (DSH's host takes injected prompts; a Claude Code
+  session does not). Its push channel is `agent-bridge rewake` as an async Stop hook: it waits on
+  the bridge and exits 2 when a message arrives that has not woken the session yet, and
+  `asyncRewake` turns that exit into a wake. One waiter at a time (a lock under
+  `~/.local/state/agent-bridge`; a second exits 0 at once), and a message left unacked wakes the
+  session only once. In the project's `.claude/settings.local.json`:
+
+  ```json
+  {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "agent-bridge rewake",
+    "asyncRewake": true, "timeout": 86400}]}]}}
+  ```
+
+  Without the hook (or before it is loaded), run `agent-bridge rewake` as a background job.
+  Reading never marks read — `ack` does (at-least-once delivery).
 - **DSH** has no waiter: the service pushes to `/dsh-web-relay/bridge/notify`. WSL cannot reach
   Windows loopback, so the push goes through Windows `curl.exe` (token on stdin). HTTP 200 is not a
   wake: only the endpoint's `agentWoken:true` counts. Every attempt is in `wakes.jsonl` and
@@ -119,6 +131,7 @@ agent-bridge decide --item fix-123#5#1 --verbatim "可以重启"
 agent-bridge decide --task fix-123 --verbatim "…" --form paraphrase
 agent-bridge presence --platform '{"host":"4.14.6","up":true}'
 agent-bridge wait             # background: exits 0 when something arrives, 3 on timeout
+agent-bridge rewake           # Claude Code hook: exits 2 on a message that has not woken the session
 ```
 
 `serve` with a `--state` other than the default never reads the default `notify.json`: a test or

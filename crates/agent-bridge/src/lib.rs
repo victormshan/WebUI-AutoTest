@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod mirror;
 pub mod model;
 pub mod notify;
+pub mod rewake;
 pub mod service;
 pub mod store;
 pub mod user;

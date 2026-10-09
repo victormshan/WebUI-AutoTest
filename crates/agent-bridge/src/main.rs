@@ -3,7 +3,8 @@
 //! `serve` runs the service; `hash-token` prints the SHA-256 the service stores for a bearer
 //! token (token on stdin, so it never appears in argv or shell history). The other commands are
 //! the client side (token from AGENT_BRIDGE_TOKEN[_FILE] or ~/.config/agent-bridge/token);
-//! `wait` is what Claude Code runs in the background so that a message wakes it.
+//! `rewake` is Claude Code's push channel (an async Stop hook that exits 2 on a new message);
+//! `wait` is the plain form of the same long poll.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -175,6 +176,14 @@ enum Cmd {
         /// Give up after this many seconds (default 7000, just under a 2-hour job limit)
         #[arg(long, default_value_t = 7000)]
         timeout: u64,
+    },
+    /// Claude Code hook (asyncRewake): wait until a message arrives that has not woken the session
+    /// yet, list it on stderr and exit 2, which wakes the session. One waiter at a time: a second
+    /// one exits 0 at once.
+    Rewake {
+        /// Lock and record of messages that already woke the session. Default: ~/.local/state/agent-bridge
+        #[arg(long)]
+        dir: Option<PathBuf>,
     },
     /// MCP server on stdio (the agent's own token)
     Mcp,
@@ -384,6 +393,19 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
             print(&json!({ "messages": m }));
             Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Rewake { dir } => {
+            let dir = dir.unwrap_or_else(|| home().join(".local/state/agent-bridge"));
+            match agent_bridge::rewake::run(&Client::from_env()?, dir).await? {
+                None => Ok(ExitCode::SUCCESS),
+                Some(lines) => {
+                    eprintln!("agent-bridge：有新消息，先运行 agent-bridge inbox 读全文");
+                    for l in lines {
+                        eprintln!("{l}");
+                    }
+                    Ok(ExitCode::from(2))
+                }
+            }
         }
         Cmd::Import { state, agents, dir } => {
             let state = state.unwrap_or_else(|| home().join(".local/state/agent-bridge"));
