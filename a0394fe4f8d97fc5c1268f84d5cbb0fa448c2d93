@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: agent-bridge-v2-5
+version: 1/1
+commit: a0394fe4f8d97fc5c1268f84d5cbb0fa448c2d93
+tree: 2d0d2a4328add24b61c06660e2ca6d2d67c8bff5
+parent: 8cf2f0a84738dddcda24b524458be1ecd1ba01e5
+review: v1-1
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-09T02:35:54Z
+signature: 2069YOlSn7Tt+7hVTmv3wHt48EmFbuHyR2XoZnor4T0HtjdYkyNfUm7OCjqbzHHrt/Kg/LOEj3jl+ATIu+qSDw==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
