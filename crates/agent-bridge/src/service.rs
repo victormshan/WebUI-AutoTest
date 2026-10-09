@@ -370,8 +370,11 @@ impl AppState {
                                 ),
                             };
                             p.summary = format!(
-                                "任务 {}（{}）最后一条消息之后 {} 分钟没有你的新消息：轮到你了，请继续，或发 progress / result 说明情况｜读取：GET /v1/tasks/{}",
-                                t.id, t.title, mins, t.id
+                                "{}任务 {}（{}）最后一条消息之后 {} 分钟没有你的新消息：轮到你了，请继续，或发 progress / result 说明情况",
+                                snapshot_lead(&t.id, now),
+                                t.id,
+                                t.title,
+                                mins
                             );
                             pushes.push(p);
                             if self.targets.contains_key(&t.from) {
@@ -380,8 +383,11 @@ impl AppState {
                                 q.extra.key =
                                     Some(format!("nudge-notice:{}:{}:{}", t.id, last.n, count + 1));
                                 q.summary = format!(
-                                    "已提醒 {} 继续任务 {}（{} 分钟无新消息）",
-                                    t.to, t.id, mins
+                                    "{}已提醒 {} 继续任务 {}（{} 分钟无新消息）",
+                                    snapshot_lead(&t.id, now),
+                                    t.to,
+                                    t.id,
+                                    mins
                                 );
                                 pushes.push(q);
                             }
@@ -683,14 +689,22 @@ impl AppState {
     }
 }
 
+/// A push can be read long after it was sent (the agent's queue): every push says it is a
+/// snapshot and points at the task's current state, so a superseded one is not taken as news.
+/// Pushes that write their own summary (nudge, notice, decision) start with this too.
+fn snapshot_lead(task: &str, at: DateTime<Utc>) -> String {
+    format!(
+        "先读当前状态：GET /v1/tasks/{}（agent-bridge 127.0.0.1:7879）。以下是推送时（{}）的快照，可能已被后续消息取代｜",
+        task,
+        at.format("%Y-%m-%dT%H:%M:%SZ")
+    )
+}
+
 fn push_for(t: &crate::model::Task, m: &Message, to: &str, why: &'static str) -> Push {
     let body: String = m.body.chars().take(200).collect();
-    // A push can be read long after it was sent (the agent's queue): it says it is a snapshot
-    // and points at the task's current state, so a superseded message is not taken as news.
     let summary = format!(
-        "先读当前状态：GET /v1/tasks/{}（agent-bridge 127.0.0.1:7879）。以下是推送时（{}）的快照，可能已被后续消息取代｜{}｜#{} {} 来自 {}：{}",
-        t.id,
-        m.at.format("%Y-%m-%dT%H:%M:%SZ"),
+        "{}{}｜#{} {} 来自 {}：{}",
+        snapshot_lead(&t.id, m.at),
         t.title,
         m.n,
         m.kind,
@@ -1144,7 +1158,8 @@ async fn user_decision(
                 &decision.sha256[..12.min(decision.sha256.len())]
             ));
             p.summary = format!(
-                "用户对 {} 做了决定（{}转达{}）：{}",
+                "{}用户对 {} 做了决定（{}转达{}）：{}",
+                snapshot_lead(&task.id, decision.at),
                 item_id,
                 me,
                 if form == "paraphrase" {
@@ -1745,6 +1760,58 @@ pub(crate) mod tests {
         s.tick(now + chrono::Duration::hours(4));
         settle().await;
         assert_eq!(nudges(), 1, "after the decision the silence counts again");
+    }
+
+    #[tokio::test]
+    async fn nudges_and_decisions_say_they_are_snapshots_like_message_pushes() {
+        // Seen live: a nudge read after its task was closed said only "your move".
+        let (notify_url, calls) = mock_notify(true).await;
+        let (e, s) = start_push(&notify_url, Timing::default()).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        settle().await;
+        s.tick(Utc::now() + chrono::Duration::hours(3));
+        settle().await;
+        let summary_of = |kind: &str| {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|c| c.1["kind"] == kind)
+                .map(|c| c.1["summary"].as_str().unwrap().to_string())
+                .unwrap_or_else(|| panic!("no {kind} push"))
+        };
+        let lead = "先读当前状态：GET /v1/tasks/t（";
+        let nudge = summary_of("nudge");
+        assert!(nudge.starts_with(lead) && nudge.contains("快照"), "{nudge}");
+        assert!(nudge.contains("轮到你了"), "{nudge}");
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "progress", "protocol": PROTOCOL, "body": "b",
+                "needs_user": [{ "text": "重载扩展？", "relay": "dsh" }] }),
+        )
+        .await;
+        let item = e.get(CLAUDE, "/v1/user/pending").await.1["items"][0]["item"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (c, v) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": item, "verbatim": "我已经做了" }),
+            )
+            .await;
+        assert_eq!(c, 200, "{v}");
+        settle().await;
+        let decision = summary_of("user_decision");
+        assert!(
+            decision.starts_with(lead) && decision.contains("快照"),
+            "{decision}"
+        );
+        assert!(decision.contains("我已经做了"), "{decision}");
     }
 
     #[tokio::test]

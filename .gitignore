@@ -3,3 +3,4 @@ runs/
 auth/
 reports/
 __pycache__/
+.claude/settings.local.json
