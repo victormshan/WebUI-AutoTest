@@ -30,7 +30,7 @@ use tokio::sync::Notify;
 use crate::bridge::{Bridge, Draft};
 use crate::inbox::Cursors;
 use crate::mirror::{Copier, Mirror};
-use crate::model::{Message, State as TaskState};
+use crate::model::{Kind, Message, State as TaskState};
 use crate::notify::{self, Target};
 use crate::user::{self, Decisions, ItemStatus, PendingItem};
 use crate::{BridgeError, PROTOCOL};
@@ -333,11 +333,18 @@ impl AppState {
                 {
                     pushes.push(push_for(&t, &last, &to, "rewake"));
                 }
-                // P2: the receiver went quiet on work it took on — nudge it, tell the requester;
-                // once the nudges are spent, the user hears of it.
-                // In acked / working the next step is always the receiver's — also after the
-                // requester's answer or a rework verdict, whose push may have been read and
-                // then dropped (a session that stops at the end of its turn).
+                // P2: whoever's move it is went quiet — nudge them, tell the other side; once
+                // the nudges are spent, the user hears of it.
+                // In acked / working the move is the receiver's — also after the requester's
+                // answer or a rework verdict, whose push may have been read and then dropped
+                // (a session that stops at the end of its turn) — except after the receiver's
+                // own note (a diff sent for review, a report): then it waits on the requester.
+                // Its own progress means it is still at work, so the move stays its own.
+                let (owes, other) = if last.from == t.to && last.kind == Kind::Note {
+                    (&t.from, &t.to)
+                } else {
+                    (&t.to, &t.from)
+                };
                 if matches!(t.state, TaskState::Acked | TaskState::Working)
                     && !waiting_for_user.contains(&t.id)
                     && now - last.at >= self.timing.nudge_after
@@ -347,7 +354,13 @@ impl AppState {
                         .as_ref()
                         .is_none_or(|x| now - x.last_at >= self.timing.nudge_after);
                     let count = n.as_ref().map_or(0, |x| x.count);
-                    if count < self.timing.nudge_max && self.targets.contains_key(&t.to) {
+                    let pushable = self.targets.contains_key(owes);
+                    // A side that cannot be pushed (Claude long-polls) gets no nudge; the user
+                    // hears of it after the silence a pushed side would have had in full.
+                    let unpushed_spent = !pushable
+                        && now - last.at
+                            >= self.timing.nudge_after * (self.timing.nudge_max as i32 + 1);
+                    if count < self.timing.nudge_max && pushable {
                         if due {
                             g.nudges.insert(
                                 t.id.clone(),
@@ -358,7 +371,7 @@ impl AppState {
                                 },
                             );
                             let mins = (now - last.at).num_minutes();
-                            let mut p = push_for(&t, &last, &t.to, "nudge");
+                            let mut p = push_for(&t, &last, owes, "nudge");
                             p.kind = "nudge".into();
                             // Measurable (dsh-auto-continue): which nudge, and since when silent.
                             p.extra = PushExtra {
@@ -369,38 +382,53 @@ impl AppState {
                                     json!({ "nudges": count + 1, "lastMessageAt": last.at }),
                                 ),
                             };
-                            p.summary = format!(
-                                "{}任务 {}（{}）最后一条消息之后 {} 分钟没有你的新消息：轮到你了，请继续，或发 progress / result 说明情况",
-                                snapshot_lead(&t.id, now),
-                                t.id,
-                                t.title,
-                                mins
+                            // Say what the nudge rests on: the last message, who sent it, the silence.
+                            let ground = format!(
+                                "任务 {}（{}）#{}（{} {} 发）之后 {} 分钟无新消息",
+                                t.id, t.title, last.n, last.from, last.kind, mins
                             );
+                            p.summary = if &last.from == owes {
+                                format!(
+                                    "{}{}：下一步在你，请继续，或发 progress / result 说明情况",
+                                    snapshot_lead(&t.id, now),
+                                    ground
+                                )
+                            } else {
+                                format!(
+                                    "{}{}：{} 在等你回复",
+                                    snapshot_lead(&t.id, now),
+                                    ground,
+                                    last.from
+                                )
+                            };
                             pushes.push(p);
-                            if self.targets.contains_key(&t.from) {
-                                let mut q = push_for(&t, &last, &t.from, "nudge");
+                            if self.targets.contains_key(other) {
+                                let mut q = push_for(&t, &last, other, "nudge");
                                 q.kind = "nudge_notice".into();
                                 q.extra.key =
                                     Some(format!("nudge-notice:{}:{}:{}", t.id, last.n, count + 1));
                                 q.summary = format!(
-                                    "{}已提醒 {} 继续任务 {}（{} 分钟无新消息）",
+                                    "{}已提醒 {} 继续任务 {}（#{} 之后 {} 分钟无新消息）",
                                     snapshot_lead(&t.id, now),
-                                    t.to,
+                                    owes,
                                     t.id,
+                                    last.n,
                                     mins
                                 );
                                 pushes.push(q);
                             }
                         }
-                    } else if due {
+                    } else if due && (pushable || unpushed_spent) {
                         alerts.push(PendingItem::new(
                             format!("{}#silent#{}", t.id, last.n),
                             &t.id,
                             "silent",
                             format!(
-                                "{} 在任务 {} 上 {} 分钟没有新消息（已提醒 {} 次）：需要你叫它继续",
-                                t.to,
+                                "{} 在任务 {} 上 #{}（{} 发）之后 {} 分钟没有新消息（已提醒 {} 次）：需要你叫它继续",
+                                owes,
                                 t.id,
+                                last.n,
+                                last.from,
                                 (now - last.at).num_minutes(),
                                 count
                             ),
@@ -1785,7 +1813,10 @@ pub(crate) mod tests {
         let lead = "先读当前状态：GET /v1/tasks/t（";
         let nudge = summary_of("nudge");
         assert!(nudge.starts_with(lead) && nudge.contains("快照"), "{nudge}");
-        assert!(nudge.contains("轮到你了"), "{nudge}");
+        assert!(
+            nudge.contains("#2（dsh ack 发）之后") && nudge.contains("下一步在你"),
+            "{nudge}"
+        );
         e.post(
             DSH,
             "/v1/tasks/t/messages",
@@ -1861,6 +1892,84 @@ pub(crate) mod tests {
         s.tick(Utc::now() + chrono::Duration::hours(2));
         settle().await;
         assert_eq!(nudges(), 1);
+    }
+
+    #[tokio::test]
+    async fn after_the_receivers_own_note_the_requester_owes_the_reply_and_is_nudged() {
+        // Seen live: DSH sent a diff for review (a note) and was told "your move" four times.
+        let (notify_url, calls) = mock_notify(true).await;
+        let (e, s) = start_push(&notify_url, Timing::default()).await;
+        e.post(
+            DSH,
+            "/v1/tasks",
+            json!({ "id": "r", "kind": "task", "protocol": PROTOCOL,
+            "body": "review this", "meta": { "to": "claude", "title": "review" } }),
+        )
+        .await;
+        e.post(CLAUDE, "/v1/tasks/r/messages", k("ack")).await;
+        e.post(
+            CLAUDE,
+            "/v1/tasks/r/messages",
+            json!({ "kind": "note", "protocol": PROTOCOL,
+            "reply_to": 1, "body": "verdict needs your numbers" }),
+        )
+        .await;
+        settle().await;
+        s.tick(Utc::now() + chrono::Duration::minutes(21));
+        settle().await;
+        let nudges: Vec<Value> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.1["kind"] == "nudge")
+            .map(|c| c.1.clone())
+            .collect();
+        assert_eq!(
+            nudges.len(),
+            1,
+            "the requester, who owes the reply, is nudged"
+        );
+        let summary = nudges[0]["summary"].as_str().unwrap();
+        assert!(
+            summary.contains("#3（claude note 发）之后") && summary.contains("claude 在等你回复"),
+            "{summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_side_that_cannot_be_pushed_is_not_nudged_and_reaches_the_user_late() {
+        // Claude long-polls: DSH's diff waits on Claude, nobody can push Claude, and DSH is
+        // not the one to nudge. The user hears of it after a pushed side's full nudge run.
+        let (notify_url, calls) = mock_notify(true).await;
+        let (e, s) = start_push(&notify_url, Timing::default()).await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "note", "protocol": PROTOCOL,
+            "reply_to": 1, "body": "diff for review" }),
+        )
+        .await;
+        settle().await;
+        let now = Utc::now();
+        for m in [21, 42, 63] {
+            s.tick(now + chrono::Duration::minutes(m));
+        }
+        settle().await;
+        assert!(
+            calls.lock().unwrap().iter().all(|c| c.1["kind"] != "nudge"),
+            "DSH waits on Claude: it must not be told it is its move"
+        );
+        assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+        s.tick(now + chrono::Duration::minutes(81));
+        let p = e.get(CLAUDE, "/v1/user/pending").await.1;
+        assert_eq!(pending_sources(&p), ["silent"]);
+        let text = p["items"][0]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("claude 在任务 t 上 #3（dsh 发）之后"),
+            "{text}"
+        );
     }
 
     #[tokio::test]

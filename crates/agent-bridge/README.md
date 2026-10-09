@@ -92,8 +92,12 @@ directly goes on its task with `{task, verbatim, form}` (item `<task>#direct#<k>
   `/v1/health.wakes`.
 - A message whose push woke the agent is never pushed again; one still unread 15 minutes after a
   push that did not wake is re-woken once.
-- A receiver silent for 20 minutes on a task it acked is nudged (push `kind: "nudge"`, its own
-  dedup key `nudge:<task>:<n>:<k>`), at most 3 times per silence; then the user is told. Each nudge,
+- 20 minutes of silence on an acked or working task nudges whoever's move it is (push
+  `kind: "nudge"`, its own dedup key `nudge:<task>:<n>:<k>`), at most 3 times per silence; then the
+  user is told. The move is the receiver's, except after the receiver's own note (a diff sent for
+  review, a report): then the requester owes the reply. The nudge says what it rests on — the last
+  message, who sent it, the silence. A side that cannot be pushed is not nudged; the user hears
+  of it after the silence a pushed side would have had in full (80 minutes). Each nudge,
   and how long the receiver took to speak after it (`why: "nudge-followed"`), is in `wakes.jsonl`.
 - A task without progress for 24 hours is stalled (user-visible, one notice per day).
 - Every create/post response carries `delivery {to, waiters, push, woken}` — how the message
