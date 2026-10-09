@@ -296,6 +296,9 @@ impl Bridge {
         {
             d.wake = Some(crate::model::WakeLevel::Normal);
         }
+        // A default taken is written too: "defaulted to quiet" must not read like a message from
+        // before the field existed (asked by DSH when agreeing to the change above).
+        d.wake.get_or_insert(kind.default_wake());
         self.append_checked(id, from, kind, d)
     }
 
@@ -1079,6 +1082,11 @@ mod tests {
         let own = &b.messages("t").unwrap()[4];
         assert_eq!((own.from.as_str(), own.kind), ("dsh", Kind::Note));
         assert_eq!(own.effective_wake(), crate::model::WakeLevel::Quiet);
+        assert_eq!(
+            own.wake,
+            Some(crate::model::WakeLevel::Quiet),
+            "a default taken is stored, not left absent like a message from before the field"
+        );
         let explicit = b
             .post(
                 "t",
