@@ -1,0 +1,9 @@
+# 2026-10-12T02:48:35+08:00 snapshot taken while gemini_probe (headless, pipe) was running
+chrome main pid: 2619379  process group: 2619379
+processes in the group: 18
+command line: ~/.cache/chrome/chrome-linux64/chrome --remote-debugging-pipe --user-data-dir=~/.local/share/browser-runtime/profiles/gemini-a1 --no-first-run --no-default-browser-check --headless=new --noerrdialogs --ozone-platform=headless --ozone-override-screen-size=800,600 --use-angle=swiftshader-webgl about:blank
+
+$ ss -ltnp   (all listening TCP sockets, filtered to chrome)
+(none: no chrome process listens on TCP)
+
+$ ss -ltn | wc -l  -> 5 listening sockets on the machine in total, none owned by the chrome group

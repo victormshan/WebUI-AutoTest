@@ -1,0 +1,11 @@
+{
+ "outcome": "no-composer",
+ "timeline": [
+  {
+   "ms": 30721,
+   "obs": null,
+   "phase": "ready"
+  }
+ ],
+ "note": "the probe did not yet keep its last observation or the target URL, so the page is unknown; runs 6 and 7, a few minutes later, landed on google.com/sorry, so this run was most likely blocked too (not proven)"
+}

@@ -1,0 +1,25 @@
+{
+ "outcome": "blocked-sorry",
+ "timeline": [
+  {
+   "lastEvalError": "",
+   "lastObs": {
+    "composer": false,
+    "composerLen": -1,
+    "lastLen": 0,
+    "lastText": "",
+    "responses": 0,
+    "send": false,
+    "signin": false,
+    "stop": false,
+    "url": "/sorry/index",
+    "userQueries": 0
+   },
+   "ms": 30781,
+   "obs": null,
+   "phase": "ready",
+   "targetUrl": "https://www.google.com/sorry/index?continue=https://gemini.google.com/app&q=<redacted>"
+  }
+ ],
+ "note": "recorded as no-composer by the probe at the time; reclassified after the target URL showed google.com/sorry"
+}

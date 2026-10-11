@@ -1,0 +1,26 @@
+# 2026-10-12T02:48:15+08:00  Linux 6.18.40.1-microsoft-standard-WSL2  Google Chrome for Testing 154.0.8037.92   rustc 1.99.0 (b940084d7 2026-09-28)
+$ cargo test -p browser-runtime
+test config::tests::a_port_or_a_missing_binary_is_a_config_error ... ok
+test config::tests::arguments_are_explicit_and_never_open_a_port ... ok
+test pipe::tests::empty_frames_are_dropped_and_outgoing_frames_end_with_nul ... ok
+test pipe::tests::frames_split_on_nul_and_keep_a_partial_tail ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test a_command_without_an_answer_times_out_and_says_the_effect_is_unknown ... ignored, needs Chrome
+test a_crashed_chrome_is_a_disconnect_and_close_still_cleans_up ... ignored, needs Chrome
+test a_profile_in_use_refuses_a_second_browser ... ignored, needs Chrome
+test cdp_over_the_pipe_works_and_no_port_is_opened ... ignored, needs Chrome
+test dropping_the_browser_never_leaves_chrome_behind ... ignored, needs Chrome
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+$ cargo test -p browser-runtime -- --ignored --test-threads=1
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+test a_command_without_an_answer_times_out_and_says_the_effect_is_unknown ... ok
+test a_crashed_chrome_is_a_disconnect_and_close_still_cleans_up ... ok
+test a_profile_in_use_refuses_a_second_browser ... ok
+test cdp_over_the_pipe_works_and_no_port_is_opened ... ok
+test dropping_the_browser_never_leaves_chrome_behind ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.88s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Chrome processes left afterwards: 0

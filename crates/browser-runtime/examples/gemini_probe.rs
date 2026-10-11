@@ -81,21 +81,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ms = |t: Instant| t.duration_since(t0).as_millis();
 
     // 1. Page ready: composer present, or a sign-in prompt (then stop: S4/S6 blocked).
+    //    Keep the last observation and the last evaluate error: a page that never gets ready
+    //    must still say where it stood.
     let mut ready = Value::Null;
+    let mut last_obs = Value::Null;
+    let mut last_err = String::new();
     for _ in 0..60 {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let o = eval(OBSERVE).await.unwrap_or(Value::Null);
-        if o["composer"] == true || o["signin"] == true {
-            ready = o;
-            break;
+        match eval(OBSERVE).await {
+            Ok(o) => {
+                last_obs = o.clone();
+                if o["composer"] == true || o["signin"] == true {
+                    ready = o;
+                    break;
+                }
+            }
+            Err(e) => last_err = e.to_string(),
         }
     }
-    timeline.push(json!({ "ms": ms(Instant::now()), "phase": "ready", "obs": ready }));
+    let info = b
+        .call("Target.getTargetInfo", json!({ "targetId": t["targetId"] }))
+        .await
+        .map(|v| v["targetInfo"]["url"].clone())
+        .unwrap_or(Value::Null);
+    timeline.push(
+        json!({ "ms": ms(Instant::now()), "phase": "ready", "obs": ready,
+        "lastObs": last_obs, "lastEvalError": last_err, "targetUrl": info }),
+    );
     if ready["composer"] != true {
-        println!(
-            "{}",
-            json!({ "outcome": "no-composer", "timeline": timeline })
-        );
+        // Google's "unusual traffic" interstitial (/sorry/): rate limiting or a CAPTCHA. Stop and
+        // hand it to a person; never retry or work around it (ADR-0 §4.1).
+        let blocked = info
+            .as_str()
+            .is_some_and(|u| u.contains("google.com/sorry/"));
+        let outcome = if blocked {
+            "blocked-sorry"
+        } else if ready["signin"] == true {
+            "signed-out"
+        } else {
+            "no-composer"
+        };
+        println!("{}", json!({ "outcome": outcome, "timeline": timeline }));
         b.close().await?;
         return Ok(());
     }
