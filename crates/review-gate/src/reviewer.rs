@@ -39,6 +39,8 @@ pub enum AskError {
 pub struct ReviewerConfig {
     pub gemini_api_key: Option<String>,
     pub gemini_model: String,
+    /// Gemini REST endpoint (overridable for tests and proxies).
+    pub gemini_base_url: String,
     /// (base URL, API key, model)
     pub openai: Option<(String, String, String)>,
     pub bridge: String,
@@ -68,6 +70,8 @@ impl ReviewerConfig {
         Self {
             gemini_api_key: var("GEMINI_API_KEY"),
             gemini_model: var("REVIEW_GATE_GEMINI_MODEL").unwrap_or("gemini-2.5-flash".into()),
+            gemini_base_url: var("REVIEW_GATE_GEMINI_BASE_URL")
+                .unwrap_or("https://generativelanguage.googleapis.com".into()),
             openai,
             bridge: var("DSH_RELAY_BRIDGE")
                 .unwrap_or("http://localhost:8899".into())
@@ -144,18 +148,23 @@ pub async fn ask(cfg: &ReviewerConfig, prompt: &str, provider: &str) -> Result<R
 
 async fn gemini_api(cfg: &ReviewerConfig, prompt: &str) -> anyhow::Result<Reply> {
     let key = cfg.gemini_api_key.as_deref().unwrap_or_default();
+    // The key goes in a header, never the URL: a reqwest error prints its URL, and that error
+    // ends up in logs and in the review record.
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={key}",
+        "{}/v1beta/models/{}:generateContent",
+        cfg.gemini_base_url.trim_end_matches('/'),
         cfg.gemini_model
     );
     let resp = reqwest::Client::new()
         .post(url)
+        .header("x-goog-api-key", key)
         .timeout(Duration::from_secs(180))
         .json(&json!({ "contents": [{ "role": "user", "parts": [{ "text": prompt }] }] }))
         .send()
-        .await?;
+        .await
+        .map_err(reqwest::Error::without_url)?;
     let status = resp.status();
-    let v: Value = resp.json().await?;
+    let v: Value = resp.json().await.map_err(reqwest::Error::without_url)?;
     if !status.is_success() {
         anyhow::bail!(
             "gemini-api {status}: {}",
@@ -532,6 +541,7 @@ pub(crate) mod tests {
         ReviewerConfig {
             gemini_api_key: None,
             gemini_model: "m".into(),
+            gemini_base_url: "http://127.0.0.1:9".into(),
             openai: None,
             bridge: bridge.into(),
             web_attempts: 4,
@@ -585,6 +595,50 @@ pub(crate) mod tests {
             "{e}"
         );
         assert!(prompts.lock().unwrap().is_empty(), "no task was created");
+    }
+
+    #[tokio::test]
+    async fn the_gemini_key_travels_in_a_header_and_never_in_a_url_or_an_error() {
+        const KEY: &str = "AIzaTEST-not-a-real-key-0123456789";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(String::new()));
+        let s = seen.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 65536];
+            let n = sock.read(&mut buf).await.unwrap();
+            *s.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = r#"{"candidates":[{"content":{"parts":[{"text":"VERDICT: APPROVED"}]}}]}"#;
+            let out = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(out.as_bytes()).await;
+        });
+        let mut c = cfg("http://127.0.0.1:9");
+        c.gemini_api_key = Some(KEY.into());
+        c.gemini_base_url = base;
+        let r = ask(&c, "p", "gemini-api").await.unwrap();
+        assert_eq!(
+            (r.answer.as_str(), r.channel),
+            ("VERDICT: APPROVED", Channel::ExternalApi)
+        );
+        let req = seen.lock().unwrap().clone();
+        let request_line = req.lines().next().unwrap_or_default();
+        assert!(
+            !request_line.contains(KEY),
+            "key must not be in the URL: {request_line}"
+        );
+        assert!(
+            req.to_lowercase()
+                .contains(&format!("x-goog-api-key: {}", KEY.to_lowercase())),
+            "key goes in the x-goog-api-key header"
+        );
+        // A failed request reports an error without the key (it lands in logs and records).
+        c.gemini_base_url = "http://127.0.0.1:9".into();
+        let e = ask(&c, "p", "gemini-api").await.unwrap_err().to_string();
+        assert!(!e.contains(KEY), "{e}");
     }
 
     #[tokio::test]
