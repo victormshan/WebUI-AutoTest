@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: review-gate-honest-channel
+version: 1/1
+commit: b5f944999b7abc7686705972c877af31b8fc32e9
+tree: c6ac303c3e69ab9b8593de380e9a45c9d56135d8
+parent: 604c1f477395e82bbcfa821afa1b46d3259d59c9
+review: v1-1
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-11T12:31:51Z
+signature: ZygYzJ7TG1xcddo3JnF/1DyaYJcwTOhwtUjHCxPaVXYL/BlaRBOHXMk/s8AhJ3r5v6wITtZKgbZ35IwdleG7Ag==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
