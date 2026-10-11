@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: adr-0-unified-browser-runtime
+version: 1/1
+commit: f563829e48966a1d2f9cb8491395870c028a24a0
+tree: 44fb7268b9056802b28e410fd295cd396b7b2264
+parent: b1120f7e8a3625343a226d8f7bfd1f643fd56648
+review: v1-2
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-11T01:07:31Z
+signature: CQ5+53+ywCs1sZiSl+CIcIrlvmL6FfWPEZsKl/8ZWokWh8kWUdvtlECBTbnESKk5+zpDTqG4JR8ioIuHRM5uDw==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
