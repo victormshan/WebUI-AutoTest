@@ -37,7 +37,7 @@
 
 ## 验收决定
 - ChatGPT 评审（2026-10-12）建议：**PASS WITH CONDITIONS**。理由：技术可行性已证明；合规、profile 所有权和完成判定的可靠性尚未证明。
-- **用户决定：待确认**。在这条补充（风控）之后，用户需要在“进入 A2（低频回退定位）”和“A 线暂停、审核以 Gemini API 为主”之间做选择，见 `plans/compliance-gemini-web.md`。
+- **用户决定（2026-10-12，原话：「全部同意」）：A1 = PASS WITH CONDITIONS**。合规选择见 `plans/compliance-gemini-web.md`，选的是（a）：**A2 不做**，A 线暂停；A1 的 pipe Runtime 转给 B 线。
 
 ## 结论建议
 **PASS WITH CONDITIONS，进入 A2。** 条件：
