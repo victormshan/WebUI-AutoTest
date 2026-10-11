@@ -52,6 +52,9 @@ pub struct ReviewerConfig {
     pub web_timeout: Duration,
     pub retry_pause: Duration,
     pub poll: Duration,
+    /// Waits before retrying an API call that answered 503 (overloaded) or 429 (rate limited);
+    /// one retry per entry. Other errors are not retried.
+    pub api_retry_pauses: Vec<Duration>,
 }
 
 impl ReviewerConfig {
@@ -73,7 +76,8 @@ impl ReviewerConfig {
         };
         Self {
             gemini_api_key: var("GEMINI_API_KEY"),
-            gemini_model: var("REVIEW_GATE_GEMINI_MODEL").unwrap_or("gemini-2.5-flash".into()),
+            // gemini-2.5-flash answers 404 for keys created since late 2026.
+            gemini_model: var("REVIEW_GATE_GEMINI_MODEL").unwrap_or("gemini-3.8-flash".into()),
             gemini_base_url: var("REVIEW_GATE_GEMINI_BASE_URL")
                 .unwrap_or("https://generativelanguage.googleapis.com".into()),
             openai,
@@ -85,6 +89,14 @@ impl ReviewerConfig {
             web_timeout: Duration::from_secs(420), // beyond the bridge's length-scaled processing timeout (≤ ~370s)
             retry_pause: Duration::from_secs(5),
             poll: Duration::from_secs(3),
+            api_retry_pauses: var("REVIEW_GATE_API_RETRY_PAUSES")
+                .map(|v| {
+                    v.split(',')
+                        .filter_map(|x| x.trim().parse::<u64>().ok())
+                        .map(Duration::from_secs)
+                        .collect()
+                })
+                .unwrap_or_else(|| vec![Duration::from_secs(15), Duration::from_secs(45)]),
         }
     }
 }
@@ -166,22 +178,38 @@ async fn gemini_api(cfg: &ReviewerConfig, prompt: &str) -> anyhow::Result<Reply>
         cfg.gemini_base_url.trim_end_matches('/'),
         cfg.gemini_model
     );
-    let resp = reqwest::Client::new()
-        .post(url)
-        .header("x-goog-api-key", key)
-        .timeout(Duration::from_secs(180))
-        .json(&json!({ "contents": [{ "role": "user", "parts": [{ "text": prompt }] }] }))
-        .send()
-        .await
-        .map_err(reqwest::Error::without_url)?;
-    let status = resp.status();
-    let v: Value = resp.json().await.map_err(reqwest::Error::without_url)?;
-    if !status.is_success() {
+    let body = json!({ "contents": [{ "role": "user", "parts": [{ "text": prompt }] }] });
+    let mut attempt = 0;
+    let v: Value = loop {
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .header("x-goog-api-key", key)
+            .timeout(Duration::from_secs(180))
+            .json(&body)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?;
+        let status = resp.status();
+        let v: Value = resp.json().await.map_err(reqwest::Error::without_url)?;
+        if status.is_success() {
+            break v;
+        }
+        let transient = status.as_u16() == 503 || status.as_u16() == 429;
+        if transient && let Some(pause) = cfg.api_retry_pauses.get(attempt) {
+            eprintln!(
+                "[review-gate] gemini-api {status}, retrying in {}s",
+                pause.as_secs()
+            );
+            tokio::time::sleep(*pause).await;
+            attempt += 1;
+            continue;
+        }
         anyhow::bail!(
-            "gemini-api {status}: {}",
+            "gemini-api {status} after {} attempt(s): {}",
+            attempt + 1,
             v.to_string().chars().take(300).collect::<String>()
         );
-    }
+    };
     let answer = v["candidates"][0]["content"]["parts"]
         .as_array()
         .into_iter()
@@ -562,6 +590,7 @@ pub(crate) mod tests {
             web_timeout: Duration::from_secs(5),
             retry_pause: Duration::from_millis(10),
             poll: Duration::from_millis(10),
+            api_retry_pauses: vec![Duration::from_millis(10), Duration::from_millis(10)],
         }
     }
 
@@ -653,6 +682,83 @@ pub(crate) mod tests {
         c.gemini_base_url = "http://127.0.0.1:9".into();
         let e = ask(&c, "p", "gemini-api").await.unwrap_err().to_string();
         assert!(!e.contains(KEY), "{e}");
+    }
+
+    /// A Gemini REST stand-in answering each request with the next status: 200 carries a
+    /// verdict, anything else an error body. Returns (base URL, request count).
+    async fn mock_gemini(statuses: Vec<u16>) -> (String, Arc<Mutex<usize>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(Mutex::new(0usize));
+        let h = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0u8; 65536];
+                let _ = sock.read(&mut buf).await;
+                let i = {
+                    let mut n = h.lock().unwrap();
+                    *n += 1;
+                    *n - 1
+                };
+                let status = statuses.get(i).copied().unwrap_or(500);
+                let body = if status == 200 {
+                    r#"{"candidates":[{"content":{"parts":[{"text":"VERDICT: APPROVED"}]}}]}"#
+                        .to_string()
+                } else {
+                    format!(r#"{{"error":{{"code":{status},"message":"m"}}}}"#)
+                };
+                let out = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(out.as_bytes()).await;
+            }
+        });
+        (base, hits)
+    }
+
+    fn gemini_cfg(base: String) -> ReviewerConfig {
+        let mut c = cfg("http://127.0.0.1:9");
+        c.gemini_api_key = Some("k".into());
+        c.gemini_base_url = base;
+        c
+    }
+
+    #[tokio::test]
+    async fn an_overloaded_gemini_api_is_retried_before_anything_falls_back() {
+        let (base, hits) = mock_gemini(vec![503, 503, 200]).await;
+        let r = ask(&gemini_cfg(base), "p", "auto").await.unwrap();
+        assert_eq!(
+            (r.provider.as_str(), r.channel),
+            ("gemini-api", Channel::ExternalApi)
+        );
+        assert!(r.fallbacks.is_empty(), "{:?}", r.fallbacks);
+        assert_eq!(*hits.lock().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn retries_are_bounded_and_say_how_many_were_made() {
+        let (base, hits) = mock_gemini(vec![503, 429, 503, 200]).await;
+        let e = ask(&gemini_cfg(base), "p", "gemini-api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("503") && e.contains("after 3 attempt(s)"), "{e}");
+        assert_eq!(*hits.lock().unwrap(), 3, "two retries, no more");
+    }
+
+    #[tokio::test]
+    async fn other_api_errors_are_not_retried() {
+        let (base, hits) = mock_gemini(vec![400, 200]).await;
+        let e = ask(&gemini_cfg(base), "p", "gemini-api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("400") && e.contains("after 1 attempt(s)"), "{e}");
+        assert_eq!(*hits.lock().unwrap(), 1);
     }
 
     #[tokio::test]
