@@ -24,6 +24,10 @@ pub struct Reply {
     pub family: String,
     pub channel: Channel,
     pub answer: String,
+    /// Providers tried before this one in `auto`, with why they failed: a fallback to a weaker
+    /// channel must be visible, never silent.
+    #[serde(default)]
+    pub fallbacks: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -113,6 +117,8 @@ pub async fn ask(cfg: &ReviewerConfig, prompt: &str, provider: &str) -> Result<R
         vec![provider]
     };
     let mut errors = Vec::new();
+    // Only providers that were tried and failed: an unconfigured one is not a fallback.
+    let mut failed = Vec::new();
     let mut any_available = false;
     for name in names {
         if !PROVIDERS.contains(&name) {
@@ -129,8 +135,13 @@ pub async fn ask(cfg: &ReviewerConfig, prompt: &str, provider: &str) -> Result<R
             _ => web_gemini(cfg, prompt).await,
         };
         match res {
-            Ok(r) => return Ok(r),
+            Ok(mut r) => {
+                r.fallbacks = failed;
+                return Ok(r);
+            }
             Err(e) => {
+                eprintln!("[review-gate] provider {name} failed: {e:#}");
+                failed.push(format!("{name}: {e:#}"));
                 errors.push(format!("{name}: {e:#}"));
                 if provider != "auto" {
                     break;
@@ -183,6 +194,7 @@ async fn gemini_api(cfg: &ReviewerConfig, prompt: &str) -> anyhow::Result<Reply>
         family: "gemini".into(),
         channel: Channel::ExternalApi,
         answer,
+        fallbacks: Vec::new(),
     })
 }
 
@@ -212,6 +224,7 @@ async fn openai(cfg: &ReviewerConfig, prompt: &str) -> anyhow::Result<Reply> {
         family: family.into(),
         channel: Channel::ExternalApi,
         answer,
+        fallbacks: Vec::new(),
     })
 }
 
@@ -363,6 +376,7 @@ async fn web_gemini(cfg: &ReviewerConfig, prompt: &str) -> anyhow::Result<Reply>
                     family: "gemini".into(),
                     channel: Channel::WebGemini,
                     answer,
+                    fallbacks: Vec::new(),
                 });
             }
             Err(e) => {

@@ -225,7 +225,7 @@ pub async fn run(
             .enumerate()
             .map(|(i, c)| {
                 format!(
-                    "【本段 diff：第 {}/{n} 段，只含 {}】\n只就本段判定 VERDICT；需要其他段才能确认的跨文件问题，标为【非阻断】并说明。\n{}",
+                    "【本段 diff：第 {}/{n} 段，只含 {}】\n只就本段判定 VERDICT；需要其他段才能确认的跨文件问题，标为【非阻断】并说明。\n标为“第 i/n 部分”的文件被按行切开：本段开头或结尾的代码可能在中途截断，这是分段造成的，不是缺陷，不得据此打回。\n{}",
                     i + 1,
                     c.files.join("、"),
                     c.diff
@@ -238,7 +238,10 @@ pub async fn run(
     let mut verdict = Verdict::Approved;
     let mut answers = Vec::new();
     let mut hasher = Sha256::new();
-    let mut last: Option<Reply> = None;
+    // The record must not claim more than its weakest chunk: in `auto` one chunk can fall back
+    // to a weaker channel while another does not.
+    let mut weakest: Option<Reply> = None;
+    let mut fallbacks: Vec<String> = Vec::new();
     for (i, body) in bodies.iter().enumerate() {
         let prompt = build_prompt(&task, &previous, evidence, &staged.stat, body);
         let key = hex(&Sha256::digest(prompt.as_bytes()));
@@ -256,7 +259,7 @@ pub async fn run(
                 "{header}（复用先前对同一提示的审核）\n{}",
                 cached.answer
             ));
-            last = Some(cached);
+            keep_weakest(&mut weakest, cached);
             continue;
         }
         if n > 1 {
@@ -273,9 +276,14 @@ pub async fn run(
         }
         gate.store().cache_put(&task.id, &key, &reply)?;
         answers.push(format!("{header}{}", reply.answer));
-        last = Some(reply);
+        for f in &reply.fallbacks {
+            if !fallbacks.contains(f) {
+                fallbacks.push(f.clone());
+            }
+        }
+        keep_weakest(&mut weakest, reply);
     }
-    let reply = last.expect("at least one chunk");
+    let reply = weakest.expect("at least one chunk");
     let summary = if n > 1 {
         format!(
             "VERDICT: {}（分 {n} 段审核，任一段打回即整版打回）\n\n",
@@ -299,10 +307,35 @@ pub async fn run(
             model: reply.model,
             family: reply.family,
             prompt_sha: hex(&hasher.finalize()),
-            text: summary + &answers.join("\n\n"),
+            text: fallback_note(&fallbacks) + &summary + &answers.join("\n\n"),
         },
     )?;
     Ok(record)
+}
+
+/// Keeps the reply with the weakest channel (the first one on a tie).
+fn keep_weakest(weakest: &mut Option<Reply>, r: Reply) {
+    if weakest
+        .as_ref()
+        .is_none_or(|w| r.channel.strength() < w.channel.strength())
+    {
+        *weakest = Some(r);
+    }
+}
+
+/// A visible line for every provider that failed before the one that answered.
+fn fallback_note(fallbacks: &[String]) -> String {
+    if fallbacks.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<String> = fallbacks
+        .iter()
+        .map(|f| format!("- {}", f.chars().take(300).collect::<String>()))
+        .collect();
+    format!(
+        "【通道回退】以下通道失败后改用了下一个：\n{}\n\n",
+        lines.join("\n")
+    )
 }
 
 /// Stores a review that did not come from an external model: a weaker channel
@@ -486,6 +519,10 @@ mod tests {
         let p = prompts.lock().unwrap();
         assert_eq!(p.len(), 2);
         assert!(p[0].contains("第 1/2 段，只含 a.txt") && !p[0].contains("BBBB"));
+        assert!(
+            p[0].contains("不是缺陷"),
+            "reviewers are told that a cut at a part boundary is not a defect"
+        );
         assert!(r.text.starts_with("VERDICT: REJECTED（分 2 段审核"));
     }
 
@@ -517,5 +554,45 @@ mod tests {
         assert_eq!(prompts.lock().unwrap().len(), 6, "chunk 1 reused");
         assert!(r.text.contains("复用先前对同一提示的审核"));
         assert_eq!(r.verdict, Verdict::Approved);
+    }
+
+    #[tokio::test]
+    async fn a_fallback_to_a_weaker_channel_is_written_into_the_record() {
+        let d = tempfile::tempdir().unwrap();
+        let (gate, repo) = setup(d.path());
+        fs::write(repo.join("a.txt"), "v1-change\n").unwrap();
+        let (url, _prompts) = mock_bridge(vec![Ok("VERDICT: APPROVED")]).await;
+        let mut c = cfg(&url);
+        c.gemini_api_key = Some("k".into()); // configured, but its endpoint is down
+        let (tree, base) = git::stage_all(&repo).unwrap();
+        let r = run(&gate, "t", &tree, &base, "", None, &c).await.unwrap();
+        assert_eq!(r.channel, Channel::WebGemini);
+        assert!(
+            r.text.starts_with("【通道回退】") && r.text.contains("gemini-api"),
+            "{}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn the_record_takes_the_weakest_channel_of_its_chunks() {
+        let reply = |ch: Channel| Reply {
+            provider: ch.as_str().into(),
+            model: None,
+            family: "f".into(),
+            channel: ch,
+            answer: "VERDICT: APPROVED".into(),
+            fallbacks: Vec::new(),
+        };
+        for order in [
+            [Channel::ExternalApi, Channel::WebGemini],
+            [Channel::WebGemini, Channel::ExternalApi],
+        ] {
+            let mut w = None;
+            for ch in order {
+                keep_weakest(&mut w, reply(ch));
+            }
+            assert_eq!(w.unwrap().channel, Channel::WebGemini, "{order:?}");
+        }
     }
 }
