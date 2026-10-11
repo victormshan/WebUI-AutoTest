@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: a1-cdp-spike
+version: 1/1
+commit: 604c1f477395e82bbcfa821afa1b46d3259d59c9
+tree: ca18c40b3ce6f43509739c0c2426142139299568
+parent: f563829e48966a1d2f9cb8491395870c028a24a0
+review: v1-2
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-11T12:28:18Z
+signature: T7VkDL+O60suNNjOVCXAHGzjwIyqY3izoUZC+DixQtIxLB0UBkDSejTPohUDgT5zrx4bQG7GkOmlq0rW7MDIDg==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
