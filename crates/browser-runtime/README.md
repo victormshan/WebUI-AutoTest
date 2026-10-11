@@ -38,3 +38,13 @@ cargo test -p browser-runtime -- --ignored --test-threads=1         # real Chrom
 
 Chrome comes from `BROWSER_RUNTIME_CHROME`, defaulting to `~/.local/bin/chrome-wsl`
 (Chrome for Testing, `scripts/setup-wsl.sh`).
+
+## Examples (A1, see `plans/A1-report.md`)
+
+```bash
+# First sign-in by hand: a plain Chrome without any debugging flag, because Google refuses
+# sign-in in a pipe-debugged Chrome.
+cargo run -p browser-runtime --example login_window -- <profile-dir> https://gemini.google.com/app
+# Then the runtime takes the signed-in profile over: new chat, trusted input, wait, read.
+cargo run -p browser-runtime --example gemini_probe -- <profile-dir> [--headless]
+```
