@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: b1-phase2a-native-lifecycle
+version: 1/1
+commit: 204b4e095fbc02215b4e5acc6efb169d9cfdba41
+tree: 2250239b615373ace53173c8ba2314c33af5f6d5
+parent: 6f9c44f2ccbf4912de8dfed700e3c35cd91517b8
+review: v1-2
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-12T21:41:49Z
+signature: aIhzGKD3cufI2lqMqBsa25my06X1TKgrO3l7Oh/aKJGBKPF3an5VH5RiIQETxghX3VLg5RQncDx8Zvyur0CFBQ==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
