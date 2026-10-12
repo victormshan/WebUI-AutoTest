@@ -1,0 +1,25 @@
+   Compiling browser-runtime v0.1.0 (/home/administrator/projects/Chrome-MCP/crates/browser-runtime)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.38s
+     Running unittests src/lib.rs (target/debug/deps/browser_runtime-dea08b26f0823ac8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/chrome.rs (target/debug/deps/chrome-f9b7446612af59c5)
+
+running 5 tests
+test a_command_without_an_answer_times_out_and_says_the_effect_is_unknown ... ok
+test a_crashed_chrome_is_a_disconnect_and_close_still_cleans_up ... ok
+test a_profile_in_use_refuses_a_second_browser ... ok
+test cdp_over_the_pipe_works_and_no_port_is_opened ... ok
+test dropping_the_browser_never_leaves_chrome_behind ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.77s
+
+   Doc-tests browser_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -1,0 +1,57 @@
+   Compiling agent v0.1.0 (/home/administrator/projects/Chrome-MCP/crates/agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.26s
+     Running unittests src/lib.rs (target/debug/deps/agent-5c257ea358201c02)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.00s
+
+     Running tests/mcp_backend.rs (target/debug/deps/mcp_backend-59befe5ab0d0770f)
+
+running 1 test
+test a_browser_crash_reads_as_failed_diagnostics ... chrome-devtools-mcp exposes content of the browser instance to the MCP clients allowing them to inspect,
+debug, and modify any data in the browser or DevTools.
+Avoid sharing sensitive or personal information that you do not want to share with MCP clients.
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.28s
+
+     Running tests/native_backend.rs (target/debug/deps/native_backend-6010eb9b43f3e1fa)
+
+running 10 tests
+test a_crash_during_a_load_is_a_disconnect_right_away ... BeforeHeaders: disconnect reported after 1.52243513s
+MidBody: disconnect reported after 1.677577345s
+ok
+test a_crash_is_a_disconnect_and_nothing_restarts ... ok
+test a_failed_launch_leaves_nothing_behind ... exits at once: launching Chrome: failed to launch Chrome: Chrome did not answer on the pipe (browser disconnected)
+missing binary: launching Chrome: invalid configuration: Chrome executable not found: /nonexistent/chrome
+debugging port: launching Chrome: invalid configuration: --remote-debugging-port is not allowed: this runtime talks CDP over a pipe only
+ok
+test a_page_that_never_loads_times_out ... BeforeHeaders timeout: CDP command Page.navigate timed out after 3001 ms (effect unknown)
+MidBody timeout: http://127.0.0.1:36613/ did not finish loading within 3s (outcome unknown)
+ok
+test aborting_the_owning_task_leaves_nothing_behind ... ok
+test cancelling_a_launch_at_any_point_leaves_nothing_behind ... cancelled at 0 ms: clean
+cancelled at 5 ms: clean
+cancelled at 20 ms: clean
+cancelled at 50 ms: clean
+cancelled at 100 ms: clean
+cancelled at 200 ms: clean
+cancelled at 400 ms: clean
+launched, dropped at 800 ms: clean
+ok
+test concurrent_backends_are_isolated ... 3 concurrent backends: pgids [2979225, 2979227, 2979229]
+ok
+test dropping_the_backend_leaves_nothing_behind ... ok
+test runs_over_a_pipe_with_no_port_and_cleans_up_on_close ... closed: graceful
+ok
+test unimplemented_parts_say_so ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.44s
+
+   Doc-tests agent
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

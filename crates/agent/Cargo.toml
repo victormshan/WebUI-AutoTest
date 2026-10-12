@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+browser-runtime = { version = "0.1.0", path = "../browser-runtime" }
 chrono = { version = "0.4.45", features = ["serde"] }
 futures = "0.3.34"
 llm = { version = "0.1.0", path = "../llm" }
@@ -13,5 +14,9 @@ mcp-client = { version = "0.1.0", path = "../mcp-client" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng = "0.10.0"
+tempfile = "3"
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+libc = "0.2"

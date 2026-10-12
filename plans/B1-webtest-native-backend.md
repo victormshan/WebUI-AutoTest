@@ -70,6 +70,7 @@ agent 对浏览器的依赖分成 7 类：
   - **`diagnostics()` 整体不会失败（阶段 1 收尾，按 ChatGPT 的阶段 1 审核意见）**：trait 签名是 `async fn diagnostics(&self) -> Diagnostics`，不返回 `Result`。底层调用返回 `Err`（传输错误、浏览器断连）时，只把**该通道**标为 `failed`，另一个通道照常读取；两个都读不了，两个都标 `failed`。这样任何后端都不能用一个 `Err` 绕过覆盖状态；
   - **浏览器中途重启（阶段 1 收尾时发现）**：Chrome 死掉后，chrome-devtools-mcp 会**静默启动一个新的 Chrome**，并且只在下一次工具调用的结果里提示一次（`structuredContent.reconnected` 和一行 `Note: the browser was restarted or reconnected ...`）。新浏览器的诊断列表是干净、完整的样子，但重启前的错误已经丢了。如果重启发生在断言通过之后、读诊断之前，replay 会**误判 PASS**。处理办法：mcp-client 在任何工具结果里看到这个提示就锁存 `restarted()`；锁存之后 `diagnostics()` 把两个通道都标为 `failed`（原因：重启前的条目已丢失）；
   - **McpBackend 的行为变化**（只有这些）：以前诊断工具返回 `is_error`、输出格式不认识、浏览器中途被静默重启时，会被当成"没有错误"；现在都报为诊断不完整，replay 判非 PASS。以前底层调用 `Err` 会让整个 replay 以错误中止，现在改为该通道 `failed`、用例判非 PASS。正常输出的行为不变，由 e2e 测试守住（§5.6 阶段 1 证据）。
+  - **重启锁存的生命周期**：从 `Browser` 启动起算，**不在用例之间清零**。多个用例复用同一个浏览器时，后面的用例也会一直是诊断 `failed`。这是保守的做法，清零可能再次丢掉故障证据（ChatGPT 阶段 1 收尾审核意见）；
   - 已知限制：工具调用本身没有超时，MCP 服务端挂起时诊断读取也会挂起（现有行为，所有工具都一样）。超时归入 §3.4 的"超时（结果未知）"类，在阶段 3/4 处理。
   - 不为此建立通用诊断框架。
 - `McpBackend` = 现有 `mcp_client::Browser` 的包装，**行为不变**，**默认后端**。
@@ -196,7 +197,7 @@ agent 对浏览器的依赖分成 7 类：
 | 阶段 | 内容 | Gate |
 |---|---|---|
 | 1 接口与基线 | 定义 `BrowserBackend` 和 `diagnostics()`（含 Coverage）；McpBackend 的工具输出、诊断解析、登录态行为不变 | McpBackend 回归测试通过；接口 diff 经审核后再进入阶段 2 |
-| 2 NativeBackend 基础能力 | pipe 生命周期、快照、uid 代次、基础工具；先在本地契约页面上验证 | 契约测试通过；错误和资源清理可验证；没有调试端口 |
+| 2 NativeBackend 基础能力 | 分两批提交审核（ChatGPT 建议）：**2a** pipe 启动、断连（不静默重建）、超时、取消和资源清理；**2b** AX 快照 → C1、uid 代次与 StaleUid、navigate/click/fill、契约页面、`--backend native` | 2a：无调试端口、各种情况下的清理可验证；2b：契约测试通过 |
 | 3 工具与登录态兼容 | 补齐其余工具、结构化诊断、Cookie/localStorage 往返 | 工具行为和错误传播的对照测试通过 |
 | 4 故障注入与双后端对照 | §5.2、§5.3、§5.5 的用例；变异测试；逐轮记录；不一致调查 | 所有强制场景都有证据；NOT RUN/BLOCKED 不计 PASS |
 | 5 独立验收与迁移决策 | 汇总 diff、原始输出、限制、未执行项和审核通道，交给用户和 ChatGPT | 迁移另行批准；在那之前 McpBackend 一直是默认后端 |

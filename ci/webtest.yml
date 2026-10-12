@@ -37,8 +37,10 @@ jobs:
         with:
           node-version: 22
       - uses: Swatinem/rust-cache@v2
-      # Framework self-tests against fixtures/shop (uses the runner's Chrome).
+      # Framework self-tests against fixtures/shop and the native backend (runner's Chrome).
       - run: cargo test --locked -p webtest -p agent -- --ignored --test-threads 2
+        env:
+          WEBTEST_CHROME: /usr/bin/google-chrome
 
   regression:
     needs: checks

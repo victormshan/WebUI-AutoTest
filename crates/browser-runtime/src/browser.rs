@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -38,6 +38,8 @@ pub struct Browser {
     pgid: i32,
     writer: Mutex<std::io::PipeWriter>,
     pending: Pending,
+    /// Set by the reader when the pipe closes; never cleared (no reconnect, no relaunch).
+    disconnected: Arc<AtomicBool>,
     next_id: AtomicU64,
     events: broadcast::Sender<Event>,
     config: LaunchConfig,
@@ -81,13 +83,20 @@ impl Browser {
         drop(from_chrome_w);
 
         let pending: Pending = Arc::default();
+        let disconnected = Arc::new(AtomicBool::new(false));
         let (events, _) = broadcast::channel(1024);
-        spawn_reader(from_chrome_r, pending.clone(), events.clone());
+        spawn_reader(
+            from_chrome_r,
+            pending.clone(),
+            disconnected.clone(),
+            events.clone(),
+        );
         let b = Self {
             child: Mutex::new(Some(child)),
             pgid,
             writer: Mutex::new(to_chrome_w),
             pending,
+            disconnected,
             next_id: AtomicU64::new(1),
             events,
             config,
@@ -108,6 +117,12 @@ impl Browser {
     /// Chrome's process group id (= the launched process's pid).
     pub fn pgid(&self) -> i32 {
         self.pgid
+    }
+
+    /// Whether the pipe to Chrome has closed. Once true it stays true: this runtime never
+    /// reconnects or starts another Chrome behind the caller's back.
+    pub fn is_disconnected(&self) -> bool {
+        self.disconnected.load(Ordering::SeqCst)
     }
 
     pub fn events(&self) -> broadcast::Receiver<Event> {
@@ -133,6 +148,12 @@ impl Browser {
         }
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
+        // Checked after inserting: the reader sets the flag before it clears `pending`, so
+        // a command can neither miss the flag nor wait for an answer that cannot come.
+        if self.is_disconnected() {
+            self.pending.lock().unwrap().remove(&id);
+            return Err(Error::BrowserDisconnected);
+        }
         let bytes = pipe::frame(&msg);
         let wrote = self.writer.lock().unwrap().write_all(&bytes);
         if wrote.is_err() {
@@ -238,7 +259,12 @@ fn restrict(dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn spawn_reader(mut r: std::io::PipeReader, pending: Pending, events: broadcast::Sender<Event>) {
+fn spawn_reader(
+    mut r: std::io::PipeReader,
+    pending: Pending,
+    disconnected: Arc<AtomicBool>,
+    events: broadcast::Sender<Event>,
+) {
     std::thread::spawn(move || {
         let mut buf = Vec::new();
         let mut chunk = vec![0u8; 64 * 1024];
@@ -266,7 +292,8 @@ fn spawn_reader(mut r: std::io::PipeReader, pending: Pending, events: broadcast:
                 }
             }
         }
-        // Pipe closed: fail every waiting command (dropping the senders).
+        // Pipe closed: flag it first, then fail every waiting command (dropping the senders).
+        disconnected.store(true, Ordering::SeqCst);
         pending.lock().unwrap().clear();
         tracing::info!("chrome pipe closed");
     });

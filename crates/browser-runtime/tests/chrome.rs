@@ -155,6 +155,7 @@ async fn a_crashed_chrome_is_a_disconnect_and_close_still_cleans_up_body() {
         libc::kill(pgid, libc::SIGKILL);
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(b.is_disconnected());
     let e = b.call("Browser.getVersion", json!({})).await.unwrap_err();
     assert!(matches!(e, Error::BrowserDisconnected), "{e}");
     b.close().await.unwrap();

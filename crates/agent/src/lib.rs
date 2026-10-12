@@ -7,6 +7,7 @@ pub mod backend;
 pub mod crossreview;
 pub mod explore;
 pub mod flow;
+pub mod native;
 pub mod replay;
 pub mod snapshot;
 

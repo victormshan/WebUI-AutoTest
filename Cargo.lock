@@ -8,13 +8,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "browser-runtime",
  "chrono",
  "futures",
+ "libc",
  "llm",
  "mcp-client",
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "tempfile",
  "tokio",
  "tracing",
 ]

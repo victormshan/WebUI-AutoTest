@@ -1,0 +1,26 @@
+=== N1 load wait does not poll for a disconnect
+test a_crash_during_a_load_is_a_disconnect_right_away ... FAILED
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.81s
+error: test failed, to rerun pass `-p agent --test native_backend`
+=== N2 runtime call ignores the disconnect latch
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.58s
+=== N3 profile dropped before Chrome (field order)
+test dropping_the_backend_leaves_nothing_behind ... FAILED
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.25s
+error: test failed, to rerun pass `-p agent --test native_backend`
+=== N4 diagnostics after a disconnect say unsupported
+test a_crash_is_a_disconnect_and_nothing_restarts ... FAILED
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.46s
+error: test failed, to rerun pass `-p agent --test native_backend`
+=== N5 runtime Drop does not kill the group
+test aborting_the_owning_task_leaves_nothing_behind ... FAILED
+test cancelling_a_launch_at_any_point_leaves_nothing_behind ... FAILED
+test dropping_the_backend_leaves_nothing_behind ... FAILED
+test result: FAILED. 7 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.95s
+error: test failed, to rerun pass `-p agent --test native_backend`
+=== N6 debugging port flag allowed
+test a_failed_launch_leaves_nothing_behind ... FAILED
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.07s
+error: test failed, to rerun pass `-p agent --test native_backend`
+=== restored
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.50s
