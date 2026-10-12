@@ -3,6 +3,7 @@
 //! Every executed step is recorded with a uid-free [`Locator`] so the trace can
 //! later be replayed deterministically without the LLM.
 
+pub mod backend;
 pub mod crossreview;
 pub mod explore;
 pub mod flow;
@@ -10,9 +11,10 @@ pub mod replay;
 pub mod snapshot;
 
 use anyhow::{Result, bail};
+pub use backend::{BrowserBackend, Coverage, Diagnostics, McpBackend};
 use chrono::{DateTime, Utc};
 use llm::{Llm, extract_json};
-use mcp_client::{Browser, ToolInfo};
+use mcp_client::ToolInfo;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use snapshot::Locator;
@@ -69,12 +71,6 @@ pub struct Target {
     pub locator: Locator,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Diagnostics {
-    pub console_errors: Vec<String>,
-    pub failed_requests: Vec<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trace {
     pub goal: String,
@@ -93,7 +89,7 @@ pub struct Trace {
 }
 
 pub struct Agent<'a> {
-    browser: &'a Browser,
+    browser: &'a dyn BrowserBackend,
     llm: &'a dyn Llm,
     cfg: AgentConfig,
 }
@@ -114,7 +110,7 @@ enum Decision {
 }
 
 impl<'a> Agent<'a> {
-    pub fn new(browser: &'a Browser, llm: &'a dyn Llm, cfg: AgentConfig) -> Self {
+    pub fn new(browser: &'a dyn BrowserBackend, llm: &'a dyn Llm, cfg: AgentConfig) -> Self {
         Self { browser, llm, cfg }
     }
 
@@ -208,7 +204,7 @@ impl<'a> Agent<'a> {
             }
         }
 
-        trace.diagnostics = collect_diagnostics(self.browser).await?;
+        trace.diagnostics = self.browser.diagnostics().await?;
         trace.finished_at = Some(Utc::now());
         Ok(trace)
     }
@@ -286,55 +282,6 @@ impl<'a> Agent<'a> {
                 .any(|k| lower.contains(&k.to_lowercase()))
                 .then_some(line)
         })
-    }
-}
-
-/// Built-in checks that need no assertions: console errors and HTTP failures.
-/// Entries are normalized (ids and arg counts stripped) so runs can be compared.
-pub async fn collect_diagnostics(browser: &Browser) -> Result<Diagnostics> {
-    let console = browser
-        .call("list_console_messages", serde_json::json!({}))
-        .await?;
-    let network = browser
-        .call("list_network_requests", serde_json::json!({}))
-        .await?;
-    Ok(Diagnostics {
-        console_errors: console
-            .text
-            .lines()
-            .filter(|l| l.starts_with("msgid=") && l.contains(" [error] "))
-            .map(|l| strip_arg_count(strip_id(l)).to_string())
-            .collect(),
-        failed_requests: network
-            .text
-            .lines()
-            .filter(|l| l.starts_with("reqid=") && http_failed(l))
-            .map(|l| strip_id(l).to_string())
-            .collect(),
-    })
-}
-
-/// `msgid=3 [error] x` -> `[error] x`
-fn strip_id(line: &str) -> &str {
-    line.split_once(' ').map_or(line, |(_, rest)| rest)
-}
-
-/// `... (0 args)` -> `...`
-fn strip_arg_count(line: &str) -> &str {
-    match line.rsplit_once(" (") {
-        Some((head, tail)) if tail.ends_with(" args)") || tail.ends_with(" arg)") => head,
-        _ => line,
-    }
-}
-
-/// `reqid=2 GET http://x/favicon.ico [404]` -> true for 4xx/5xx and network failures.
-fn http_failed(line: &str) -> bool {
-    let Some(status) = line.rsplit_once('[').map(|(_, s)| s.trim_end_matches(']')) else {
-        return false;
-    };
-    match status.parse::<u16>() {
-        Ok(code) => code >= 400,
-        Err(_) => status.contains("fail") || status.contains("ERR"),
     }
 }
 
@@ -462,26 +409,6 @@ mod tests {
             uids_in(&serde_json::json!({"from_uid": "1", "to_uid": "2"})).len(),
             2
         );
-    }
-
-    #[test]
-    fn normalizes_diagnostic_lines() {
-        let l = "msgid=4 [error] analytics: tracker not configured (1 args)";
-        assert_eq!(
-            strip_arg_count(strip_id(l)),
-            "[error] analytics: tracker not configured"
-        );
-        assert_eq!(
-            strip_id("reqid=2 GET http://x/a [404]"),
-            "GET http://x/a [404]"
-        );
-    }
-
-    #[test]
-    fn classifies_requests() {
-        assert!(http_failed("reqid=2 GET http://x/favicon.ico [404]"));
-        assert!(!http_failed("reqid=1 GET http://x/ [200]"));
-        assert!(http_failed("reqid=3 GET http://x/a [net::ERR_FAILED]"));
     }
 
     #[test]

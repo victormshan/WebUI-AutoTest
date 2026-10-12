@@ -1,0 +1,8 @@
+test creates_missing_state_via_login_flow ... ok
+test new_console_error_fails ... ok
+test passes_on_original_site_under_other_origin ... ok
+test refreshes_expired_session_and_retries ... ok
+test renamed_button_fails_without_healing ... ok
+test reuses_saved_login_state ... ok
+test wrong_total_fails_assertion ... ok
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 77.54s

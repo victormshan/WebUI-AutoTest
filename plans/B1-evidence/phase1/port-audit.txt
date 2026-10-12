@@ -1,0 +1,15 @@
+## 2026-10-12T20:12:55+08:00 while running
+LISTEN 0      10         127.0.0.1:35127      0.0.0.0:*    users:(("chrome",pid=2815926,fd=83))     
+port=35127
+remote-debugging-port=0
+-- from Windows:
+True
+-- from WSL:
+bash: connect: Connection refused
+bash: line 1: /dev/tcp/127.0.0.1/35127: Connection refused
+WSL TCP connect: failed  [note: this probe ran after the browser had exited (repl input closed at +25s); not a reachability result]
+## 2026-10-12T20:15:28+08:00 after close
+webtest procs: 0
+chrome listeners: 0
+chrome with debug port: 0
+from Windows port 35127: False

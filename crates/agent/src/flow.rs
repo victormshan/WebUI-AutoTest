@@ -120,6 +120,11 @@ impl Flow {
         if !trace.success {
             bail!("trace did not succeed; refusing to turn it into a regression flow");
         }
+        // The allowlists below may then miss errors the page always had;
+        // replay reports those as new, so the flow errs on the failing side.
+        for gap in trace.diagnostics.gaps() {
+            tracing::warn!("recording diagnostics incomplete, allowlist may be short: {gap}");
+        }
         let mut steps = Vec::new();
         for st in trace.steps.iter().filter(|s| s.ok) {
             let uids = crate::uids_in(&st.args);

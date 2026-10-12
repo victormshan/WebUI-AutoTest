@@ -1,0 +1,54 @@
+$ cargo fmt --all -- --check
+ok
+$ cargo clippy --workspace --all-targets -- -D warnings
+ok
+$ cargo test --workspace
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.97s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.05s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo test -p agent -- --list
+backend::tests::a_failed_read_is_not_an_empty_list: test
+backend::tests::a_paged_or_short_list_is_partial: test
+backend::tests::classifies_requests: test
+backend::tests::explicit_empty_lists_are_complete: test
+backend::tests::full_lists_are_complete: test
+backend::tests::gaps_name_every_unread_channel: test
+backend::tests::normalizes_diagnostic_lines: test
+backend::tests::traces_without_coverage_read_as_not_recorded: test
+crossreview::tests::budget_reserves_a_slot_for_reviewer_additions: test
+crossreview::tests::flow_review_drops_with_reason_and_validates_additions_on_page: test
+crossreview::tests::flow_review_never_removes_every_assertion: test
+crossreview::tests::prompts_carry_the_material_to_review: test
+crossreview::tests::proposals_drop_needs_reason_and_additions_are_tagged_external: test
+crossreview::tests::unusable_reply_keeps_everything: test
+explore::tests::markdown_has_graph_and_table: test
+explore::tests::markdown_reports_cross_review: test
+explore::tests::shared_login_state_puts_session_ending_actions_off_limits: test
+explore::tests::slugs: test
+flow::tests::distills_trace_into_placeholders: test
+flow::tests::landmark_fallback: test
+flow::tests::relativizes_same_origin_urls: test
+flow::tests::yaml_roundtrip: test
+replay::tests::summary_and_junit: test
+replay::tests::unread_diagnostics_never_pass: test
+snapshot::tests::compacts_text_and_linebreaks: test
+snapshot::tests::fingerprint_ignores_dynamic_text: test
+snapshot::tests::locator_roundtrip_with_duplicates: test
+snapshot::tests::queries: test
+snapshot::tests::truncates: test
+tests::finds_nested_uids: test
+tests::parses_both_reply_shapes: test

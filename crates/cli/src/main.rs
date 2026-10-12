@@ -359,6 +359,9 @@ async fn run(browser: &Browser, args: RunArgs) -> Result<bool> {
     for r in &trace.diagnostics.failed_requests {
         println!("network : {r}");
     }
+    for gap in trace.diagnostics.gaps() {
+        println!("diagnostics incomplete: {gap}");
+    }
     println!("trace   : {}", path.display());
 
     if let (true, Some(flow_path)) = (trace.success, &args.save) {

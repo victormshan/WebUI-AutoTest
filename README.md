@@ -129,6 +129,18 @@ webtest --storage-state auth/alice.json explore --url <url>                 # �
 - 如果没有配置登录用例，失败时会提示用 `webtest login` 手动刷新。
 - 演示站点的会话只保存在服务端内存里，重启服务端后旧的状态文件就失效了。
 
+### 运行环境限制（调试端口）
+
+chrome-devtools-mcp 没有读写 Cookie 的工具，所以 webtest 启动的每个 Chrome 都开着 `--remote-debugging-port=0`（绑定 `127.0.0.1`，端口随机，浏览器关闭后消失）。这个端口**没有鉴权**：浏览器运行期间，本机任何进程或用户都能连上并完全控制测试浏览器，包括读取测试账号的会话 Cookie。WSL2 默认把这个端口转发给 Windows，Windows 上的进程也能连上。
+
+因此，在没有去掉这个端口之前：
+
+- 只在**单用户、受控**的开发机，或者每个 job 独占一台临时虚拟机的 CI（例如 GitHub 托管的 runner）上运行；
+- **不要**在多用户主机、共享主机或不受信任的自托管 runner 上运行；
+- 测试账号只给测试需要的权限，不要用个人账号或生产管理员账号。
+
+风险大小取决于主机隔离程度、测试账号的权限和端口的实际可达范围。README 里的这段说明只是约束，不代表问题已经解决；整改跟踪见 `plans/B1-webtest-native-backend.md` §4。
+
 ### CI（GitHub Actions）
 
 工作流文件放在 `ci/webtest.yml`。启用方法：复制到 `.github/workflows/webtest.yml` 并提交（这一步需要有 `workflow` 权限的账号）。启用后，它会在 push、PR、每天定时和手动触发时运行，包含三个 job：

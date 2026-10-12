@@ -8,11 +8,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use llm::{Llm, extract_json};
-use mcp_client::Browser;
 use serde::Serialize;
 
 use crate::flow::{Assertion, Flow, map_uids, placeholder, relativize};
-use crate::{Locator, collect_diagnostics, snapshot};
+use crate::{BrowserBackend, Locator, snapshot};
 
 #[derive(Debug, Clone)]
 pub struct ReplayOptions {
@@ -64,7 +63,7 @@ pub struct ReplayReport {
 }
 
 pub async fn replay(
-    browser: &Browser,
+    browser: &dyn BrowserBackend,
     flow: &Flow,
     healer: Option<&dyn Llm>,
     opts: &ReplayOptions,
@@ -114,7 +113,11 @@ pub async fn replay(
 /// Opens the flow's start page and runs its steps without healing, assertions
 /// or diagnostics — used to bring a browser into a known state.
 /// Returns the first failure, if any.
-pub async fn reach(browser: &Browser, flow: &Flow, opts: &ReplayOptions) -> Result<Option<String>> {
+pub async fn reach(
+    browser: &dyn BrowserBackend,
+    flow: &Flow,
+    opts: &ReplayOptions,
+) -> Result<Option<String>> {
     let url = opts.url_override.as_deref().unwrap_or(&flow.start_url);
     let nav = browser.navigate(url).await?;
     if nav.is_error {
@@ -139,7 +142,7 @@ pub async fn reach(browser: &Browser, flow: &Flow, opts: &ReplayOptions) -> Resu
 }
 
 async fn run_steps(
-    browser: &Browser,
+    browser: &dyn BrowserBackend,
     flow: &Flow,
     healer: Option<&dyn Llm>,
     opts: &ReplayOptions,
@@ -208,7 +211,7 @@ async fn run_steps(
 /// Polls snapshots until every locator resolves or the timeout passes.
 /// Returns the last snapshot and each locator with its uid (if found).
 async fn wait_for_targets(
-    browser: &Browser,
+    browser: &dyn BrowserBackend,
     targets: &[Locator],
     opts: &ReplayOptions,
 ) -> Result<(String, Vec<(Locator, Option<String>)>)> {
@@ -227,7 +230,7 @@ async fn wait_for_targets(
 }
 
 async fn check_assertions(
-    browser: &Browser,
+    browser: &dyn BrowserBackend,
     assertions: &[Assertion],
     opts: &ReplayOptions,
     report: &mut ReplayReport,
@@ -255,12 +258,18 @@ async fn check_assertions(
 
 /// Only errors that were not present when the flow was recorded fail the run.
 async fn check_diagnostics(
-    browser: &Browser,
+    browser: &dyn BrowserBackend,
     flow: &Flow,
     url: &str,
     report: &mut ReplayReport,
 ) -> Result<()> {
-    let d = collect_diagnostics(browser).await?;
+    let d = browser.diagnostics().await?;
+    // An unread channel proves nothing, so it cannot let the run pass.
+    for gap in d.gaps() {
+        report
+            .failures
+            .push(format!("diagnostics incomplete: {gap}"));
+    }
     for e in d.console_errors {
         if !flow.allowed_console_errors.contains(&e) {
             report.failures.push(format!("new console error: {e}"));
@@ -407,6 +416,7 @@ pub fn markdown_summary(reports: &[ReplayReport]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Coverage;
 
     fn report(name: &str, passed: bool) -> ReplayReport {
         ReplayReport {
@@ -440,5 +450,94 @@ mod tests {
         let x = junit_xml(&reports);
         assert!(x.contains(r#"failures="1""#));
         assert!(x.contains("login state was refreshed"));
+    }
+
+    /// A browser that loads any page and reports the given diagnostics.
+    struct FakeBrowser(crate::Diagnostics);
+
+    #[async_trait::async_trait]
+    impl BrowserBackend for FakeBrowser {
+        async fn tools(&self) -> Result<Vec<mcp_client::ToolInfo>> {
+            Ok(vec![])
+        }
+        async fn call(&self, _: &str, _: serde_json::Value) -> Result<mcp_client::ToolOutput> {
+            Ok(Default::default())
+        }
+        async fn navigate(&self, _: &str) -> Result<mcp_client::ToolOutput> {
+            Ok(Default::default())
+        }
+        async fn snapshot(&self) -> Result<String> {
+            Ok(r#"uid=1_0 RootWebArea "Shop" url="http://x/""#.into())
+        }
+        async fn storage_state(&self) -> Result<mcp_client::StorageState> {
+            anyhow::bail!("unused")
+        }
+        async fn apply_storage_state(&self, _: &mcp_client::StorageState) -> Result<()> {
+            anyhow::bail!("unused")
+        }
+        async fn diagnostics(&self) -> Result<crate::Diagnostics> {
+            Ok(self.0.clone())
+        }
+        async fn close(self: Box<Self>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn empty_flow() -> Flow {
+        Flow {
+            name: "f".into(),
+            goal: "g".into(),
+            start_url: "http://x/".into(),
+            storage_state: None,
+            login_flow: None,
+            steps: vec![],
+            assertions: vec![],
+            allowed_console_errors: vec![],
+            allowed_failed_requests: vec![],
+        }
+    }
+
+    async fn replay_with(console: Coverage, network: Coverage) -> ReplayReport {
+        let browser = FakeBrowser(crate::Diagnostics {
+            console,
+            network,
+            ..Default::default()
+        });
+        replay(&browser, &empty_flow(), None, &ReplayOptions::default())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn unread_diagnostics_never_pass() {
+        let ok = replay_with(Coverage::Complete, Coverage::Complete).await;
+        assert!(ok.passed, "{:?}", ok.failures);
+
+        for (console, network) in [
+            (
+                Coverage::Failed {
+                    reason: "timeout".into(),
+                },
+                Coverage::Complete,
+            ),
+            (Coverage::Complete, Coverage::Unsupported),
+            (
+                Coverage::Partial {
+                    reason: "1-1 of 3".into(),
+                },
+                Coverage::Complete,
+            ),
+            (Coverage::NotRecorded, Coverage::Complete),
+        ] {
+            let r = replay_with(console.clone(), network.clone()).await;
+            assert!(!r.passed, "{console:?}/{network:?} must not pass");
+            assert!(
+                r.failures
+                    .iter()
+                    .all(|f| f.starts_with("diagnostics incomplete: ")),
+                "{:?}",
+                r.failures
+            );
+        }
     }
 }
