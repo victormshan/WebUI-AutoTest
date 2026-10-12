@@ -224,6 +224,15 @@ cargo test                                   # 单元测试
 cargo test -p webtest -p agent -- --ignored  # 端到端：通过、改名、金额 bug、新 console 错误、登录态复用、会话过期自动刷新、自动创建登录态、浏览器中途崩溃后诊断判为不完整
 ```
 
+### 升级 chrome-devtools-mcp
+
+默认的 MCP 服务端版本固定为 `chrome-devtools-mcp@1.10.1`（`crates/mcp-client` 的 `DEFAULT_PACKAGE`），不用 `@latest`。原因是诊断（console 错误、失败请求）靠解析服务端的文本输出：如果新版本改了措辞，webtest 会把诊断判为"读取失败"，所有回放一起变红。这种情况不会漏报，但结果没法复现。
+
+升级步骤：
+
+1. 先用 `--mcp-package chrome-devtools-mcp@<新版本>`（或者设置环境变量 `WEBTEST_MCP_PACKAGE`）跑一遍 `cargo test -p webtest -p agent -- --ignored`，并用 `webtest repl` 看看 `list_console_messages`、`list_network_requests` 的输出是否和 `crates/agent/src/backend.rs` 测试里的样本一致；
+2. 都通过后，再修改 `DEFAULT_PACKAGE`，并按需更新测试样本。
+
 ### 其他参数
 
 `run` 的常用参数：`--max-steps`、`--model`（默认 `claude-sonnet-5-5`）、`--deny 删除,delete`（拒绝操作含这些关键词的元素）、`--headed`、`--out`。

@@ -23,6 +23,12 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 pub use storage::{OriginStorage, StorageState};
 
+/// The chrome-devtools-mcp release webtest is verified against. Pinned, not
+/// `@latest`: diagnostics parsing reads the server's text output, and a new
+/// wording reads as a failed diagnostics read (see agent's `backend`).
+/// To upgrade, see "升级 chrome-devtools-mcp" in the README.
+pub const DEFAULT_PACKAGE: &str = "chrome-devtools-mcp@1.10.1";
+
 /// How to launch `chrome-devtools-mcp` and the browser behind it.
 #[derive(Debug, Clone)]
 pub struct BrowserConfig {
@@ -43,7 +49,7 @@ pub struct BrowserConfig {
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
-            package: "chrome-devtools-mcp@latest".into(),
+            package: DEFAULT_PACKAGE.into(),
             chrome_path: None,
             headless: true,
             user_data_dir: None,

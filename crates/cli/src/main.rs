@@ -32,7 +32,7 @@ struct BrowserArgs {
     #[arg(
         long,
         env = "WEBTEST_MCP_PACKAGE",
-        default_value = "chrome-devtools-mcp@latest",
+        default_value = mcp_client::DEFAULT_PACKAGE,
         global = true
     )]
     mcp_package: String,
