@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: pin-chrome-devtools-mcp
+version: 1/1
+commit: 6f9c44f2ccbf4912de8dfed700e3c35cd91517b8
+tree: a2537a3145b4cfe81ae27a2f42d1cf2cdc83b9fd
+parent: 49ec653d63d6dbbd130d72a94ee68dc51dd081e1
+review: v1-1
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-12T20:05:34Z
+signature: 9fJapuRPVp+9OjYXZ7UfNBEiV6dYBhLKArxOfnpS5Tz5YFzli7O6rR5gg0GEsg1qooMuAZ10LLaidem6P8TXCA==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
