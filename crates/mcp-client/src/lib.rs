@@ -9,6 +9,7 @@ pub mod cdp;
 mod storage;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -102,6 +103,8 @@ pub struct ToolOutput {
 pub struct Browser {
     service: RunningService<RoleClient, ()>,
     profile: PathBuf,
+    /// The server reported that Chrome was restarted under us (see [`Browser::restarted`]).
+    restarted: AtomicBool,
     /// Keeps a throwaway profile alive until the browser is dropped.
     _temp_profile: Option<tempfile::TempDir>,
 }
@@ -136,6 +139,7 @@ impl Browser {
         let browser = Self {
             service,
             profile,
+            restarted: AtomicBool::new(false),
             _temp_profile: temp,
         };
         if let Some(state) = &cfg.storage_state {
@@ -252,6 +256,9 @@ impl Browser {
             .await
             .with_context(|| format!("MCP call `{name}` failed"))?;
 
+        if reports_restart(&res) && !self.restarted.swap(true, Ordering::SeqCst) {
+            tracing::warn!("chrome-devtools-mcp restarted the browser; page state was lost");
+        }
         let mut out = ToolOutput {
             is_error: res.is_error.unwrap_or(false),
             ..Default::default()
@@ -269,6 +276,13 @@ impl Browser {
             }
         }
         Ok(out)
+    }
+
+    /// Whether Chrome died and chrome-devtools-mcp silently started a fresh
+    /// one at any point since launch. The server says so only once, on the
+    /// next tool call, so this latches.
+    pub fn restarted(&self) -> bool {
+        self.restarted.load(Ordering::SeqCst)
     }
 
     pub async fn navigate(&self, url: &str) -> Result<ToolOutput> {
@@ -292,4 +306,18 @@ impl Browser {
         self.service.cancel().await?;
         Ok(())
     }
+}
+
+/// chrome-devtools-mcp marks the first result after a browser restart with
+/// `structuredContent.reconnected` and a leading note.
+fn reports_restart(res: &rmcp::model::CallToolResult) -> bool {
+    let flagged = res
+        .structured_content
+        .as_ref()
+        .is_some_and(|v| v["reconnected"] == Value::Bool(true));
+    flagged
+        || res.content.iter().any(|b| {
+            matches!(b, ContentBlock::Text(t)
+                if t.text.contains("the browser was restarted or reconnected since the last call"))
+        })
 }

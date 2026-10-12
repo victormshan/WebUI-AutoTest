@@ -204,7 +204,7 @@ impl<'a> Agent<'a> {
             }
         }
 
-        trace.diagnostics = self.browser.diagnostics().await?;
+        trace.diagnostics = self.browser.diagnostics().await;
         trace.finished_at = Some(Utc::now());
         Ok(trace)
     }

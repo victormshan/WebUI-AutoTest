@@ -67,7 +67,10 @@ agent 对浏览器的依赖分成 7 类：
   - **run**（PASS 由大模型判定，诊断只是附带输出）：判定规则不变，打印 `diagnostics incomplete: ...`；
   - **录制 flow**：允许列表来自不完整诊断时记警告。允许列表偏短只会让回放多报错，不会漏报；
   - **McpBackend 的解析**：识别 chrome-devtools-mcp 的 `Showing a-b of N` 表头和两种空列表文案（`<no console messages found>`、`No requests found.`）。工具报错 → `failed`；表头显示不全或条目数对不上 → `partial`；**不认识的输出（例如服务端升级改了措辞）→ `failed`**，不当成空列表；
-  - **McpBackend 唯一的行为变化**：以前诊断工具返回 `is_error`、或输出格式不认识时，会被静默解析成"没有错误"；现在报为诊断不完整。正常输出的行为不变，由 e2e 测试守住（§5.6 阶段 1 证据）。
+  - **`diagnostics()` 整体不会失败（阶段 1 收尾，按 ChatGPT 的阶段 1 审核意见）**：trait 签名是 `async fn diagnostics(&self) -> Diagnostics`，不返回 `Result`。底层调用返回 `Err`（传输错误、浏览器断连）时，只把**该通道**标为 `failed`，另一个通道照常读取；两个都读不了，两个都标 `failed`。这样任何后端都不能用一个 `Err` 绕过覆盖状态；
+  - **浏览器中途重启（阶段 1 收尾时发现）**：Chrome 死掉后，chrome-devtools-mcp 会**静默启动一个新的 Chrome**，并且只在下一次工具调用的结果里提示一次（`structuredContent.reconnected` 和一行 `Note: the browser was restarted or reconnected ...`）。新浏览器的诊断列表是干净、完整的样子，但重启前的错误已经丢了。如果重启发生在断言通过之后、读诊断之前，replay 会**误判 PASS**。处理办法：mcp-client 在任何工具结果里看到这个提示就锁存 `restarted()`；锁存之后 `diagnostics()` 把两个通道都标为 `failed`（原因：重启前的条目已丢失）；
+  - **McpBackend 的行为变化**（只有这些）：以前诊断工具返回 `is_error`、输出格式不认识、浏览器中途被静默重启时，会被当成"没有错误"；现在都报为诊断不完整，replay 判非 PASS。以前底层调用 `Err` 会让整个 replay 以错误中止，现在改为该通道 `failed`、用例判非 PASS。正常输出的行为不变，由 e2e 测试守住（§5.6 阶段 1 证据）。
+  - 已知限制：工具调用本身没有超时，MCP 服务端挂起时诊断读取也会挂起（现有行为，所有工具都一样）。超时归入 §3.4 的"超时（结果未知）"类，在阶段 3/4 处理。
   - 不为此建立通用诊断框架。
 - `McpBackend` = 现有 `mcp_client::Browser` 的包装，**行为不变**，**默认后端**。
 - `NativeBackend` 只能通过 CLI `--backend native` 显式启用，**默认不启用**，也不移除 `McpBackend`。

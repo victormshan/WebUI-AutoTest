@@ -263,7 +263,7 @@ async fn check_diagnostics(
     url: &str,
     report: &mut ReplayReport,
 ) -> Result<()> {
-    let d = browser.diagnostics().await?;
+    let d = browser.diagnostics().await;
     // An unread channel proves nothing, so it cannot let the run pass.
     for gap in d.gaps() {
         report
@@ -475,8 +475,8 @@ mod tests {
         async fn apply_storage_state(&self, _: &mcp_client::StorageState) -> Result<()> {
             anyhow::bail!("unused")
         }
-        async fn diagnostics(&self) -> Result<crate::Diagnostics> {
-            Ok(self.0.clone())
+        async fn diagnostics(&self) -> crate::Diagnostics {
+            self.0.clone()
         }
         async fn close(self: Box<Self>) -> Result<()> {
             Ok(())

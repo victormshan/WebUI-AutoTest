@@ -29,7 +29,11 @@ pub trait BrowserBackend: Send + Sync {
     async fn apply_storage_state(&self, state: &StorageState) -> Result<()>;
     /// Console errors and failed requests since the page was opened, normalized
     /// (ids and arg counts stripped) so runs can be compared.
-    async fn diagnostics(&self) -> Result<Diagnostics>;
+    ///
+    /// Never fails as a whole: a channel that cannot be read (tool error,
+    /// transport error, disconnected browser) is reported in its [`Coverage`],
+    /// and the other channel is still read.
+    async fn diagnostics(&self) -> Diagnostics;
     async fn close(self: Box<Self>) -> Result<()>;
 }
 
@@ -105,22 +109,16 @@ impl BrowserBackend for McpBackend {
     async fn apply_storage_state(&self, state: &StorageState) -> Result<()> {
         mcp_client::Browser::apply_storage_state(self, state).await
     }
-    async fn diagnostics(&self) -> Result<Diagnostics> {
-        let console = mcp_client::Browser::call(self, "list_console_messages", json!({})).await?;
-        let network = mcp_client::Browser::call(self, "list_network_requests", json!({})).await?;
-        let (console_errors, console) = mcp_channel(&console, CONSOLE, |l| {
-            l.contains(" [error] ")
-                .then(|| strip_arg_count(strip_id(l)).to_string())
-        });
-        let (failed_requests, network) = mcp_channel(&network, NETWORK, |l| {
-            http_failed(l).then(|| strip_id(l).to_string())
-        });
-        Ok(Diagnostics {
-            console_errors,
-            failed_requests,
-            console,
-            network,
-        })
+    async fn diagnostics(&self) -> Diagnostics {
+        let console = mcp_client::Browser::call(self, "list_console_messages", json!({})).await;
+        let network = mcp_client::Browser::call(self, "list_network_requests", json!({})).await;
+        let d = mcp_diagnostics(console, network);
+        // Checked after the calls: they may be the first to hear of a restart.
+        if self.restarted() {
+            lost_to_restart(d)
+        } else {
+            d
+        }
     }
     async fn close(self: Box<Self>) -> Result<()> {
         mcp_client::Browser::close(*self).await
@@ -144,13 +142,50 @@ const NETWORK: McpList = McpList {
     empty: "No requests found.",
 };
 
+/// Builds diagnostics from the two list tools' results; either call may have failed.
+fn mcp_diagnostics(console: Result<ToolOutput>, network: Result<ToolOutput>) -> Diagnostics {
+    let (console_errors, console) = mcp_channel(console, CONSOLE, |l| {
+        l.contains(" [error] ")
+            .then(|| strip_arg_count(strip_id(l)).to_string())
+    });
+    let (failed_requests, network) = mcp_channel(network, NETWORK, |l| {
+        http_failed(l).then(|| strip_id(l).to_string())
+    });
+    Diagnostics {
+        console_errors,
+        failed_requests,
+        console,
+        network,
+    }
+}
+
+/// After a browser restart both lists only cover the new browser, so neither
+/// can vouch for the run.
+fn lost_to_restart(mut d: Diagnostics) -> Diagnostics {
+    let lost = || Coverage::Failed {
+        reason: "the browser restarted during the run; entries from before the restart are lost"
+            .into(),
+    };
+    d.console = lost();
+    d.network = lost();
+    d
+}
+
 /// Picks the errors out of a list tool's output and says how complete the
-/// list was. Output we do not recognize is a failed read, never "no errors".
+/// list was. A failed call or output we do not recognize is a failed read,
+/// never "no errors".
 fn mcp_channel(
-    out: &ToolOutput,
+    out: Result<ToolOutput>,
     list: McpList,
     pick: impl Fn(&str) -> Option<String>,
 ) -> (Vec<String>, Coverage) {
+    let out = match out {
+        Ok(out) => out,
+        Err(e) => {
+            let reason = format!("{e:#}").chars().take(200).collect();
+            return (Vec::new(), Coverage::Failed { reason });
+        }
+    };
     if out.is_error {
         return (
             Vec::new(),
@@ -236,17 +271,19 @@ mod tests {
         }
     }
 
+    const NO_REQUESTS: &str = "## Network requests\nNo requests found.";
+    const NO_MESSAGES: &str = "## Console messages\n<no console messages found>";
+
+    /// The console half of `mcp_diagnostics`, with an empty network list.
     fn console(out: &ToolOutput) -> (Vec<String>, Coverage) {
-        mcp_channel(out, CONSOLE, |l| {
-            l.contains(" [error] ")
-                .then(|| strip_arg_count(strip_id(l)).to_string())
-        })
+        let d = mcp_diagnostics(Ok(out.clone()), Ok(ok(NO_REQUESTS)));
+        (d.console_errors, d.console)
     }
 
+    /// The network half of `mcp_diagnostics`, with an empty console list.
     fn network(out: &ToolOutput) -> (Vec<String>, Coverage) {
-        mcp_channel(out, NETWORK, |l| {
-            http_failed(l).then(|| strip_id(l).to_string())
-        })
+        let d = mcp_diagnostics(Ok(ok(NO_MESSAGES)), Ok(out.clone()));
+        (d.failed_requests, d.network)
     }
 
     #[test]
@@ -315,6 +352,46 @@ mod tests {
         assert!(matches!(c, Coverage::Failed { .. }));
         let (_, c) = console(&ok(""));
         assert!(matches!(c, Coverage::Failed { .. }));
+    }
+
+    #[test]
+    fn a_failed_call_marks_only_its_own_channel() {
+        // e.g. the MCP server died between the two calls.
+        let d = mcp_diagnostics(
+            Ok(ok(
+                "## Console messages\nShowing 1-1 of 1 (Page 1 of 1).\nmsgid=1 [error] boom (0 args)",
+            )),
+            Err(anyhow::anyhow!(
+                "MCP call `list_network_requests` failed: connection closed"
+            )),
+        );
+        assert_eq!(d.console, Coverage::Complete);
+        assert_eq!(d.console_errors, vec!["[error] boom"]);
+        assert!(
+            matches!(&d.network, Coverage::Failed { reason } if reason.contains("connection closed")),
+            "{:?}",
+            d.network
+        );
+        assert!(d.failed_requests.is_empty());
+        assert_eq!(d.gaps().len(), 1);
+
+        // A disconnected browser: both channels failed, both say so.
+        let gone = || Err(anyhow::anyhow!("transport closed"));
+        let d = mcp_diagnostics(gone(), gone());
+        assert!(matches!(d.console, Coverage::Failed { .. }));
+        assert!(matches!(d.network, Coverage::Failed { .. }));
+        assert_eq!(d.gaps().len(), 2);
+    }
+
+    #[test]
+    fn a_restarted_browser_vouches_for_nothing() {
+        // What the fresh browser returns: clean, complete-looking lists.
+        let d = mcp_diagnostics(Ok(ok(NO_MESSAGES)), Ok(ok(NO_REQUESTS)));
+        assert!(d.gaps().is_empty());
+        let d = lost_to_restart(d);
+        assert!(matches!(d.console, Coverage::Failed { .. }));
+        assert!(matches!(d.network, Coverage::Failed { .. }));
+        assert_eq!(d.gaps().len(), 2);
     }
 
     #[test]

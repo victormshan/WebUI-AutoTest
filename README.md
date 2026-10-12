@@ -221,7 +221,7 @@ webtest check-llm --review-command "review-gate ask"      # 先确认评审者�
 
 ```bash
 cargo test                                   # 单元测试
-cargo test -p webtest -- --ignored           # 端到端：通过、改名、金额 bug、新 console 错误、登录态复用、会话过期自动刷新、自动创建登录态
+cargo test -p webtest -p agent -- --ignored  # 端到端：通过、改名、金额 bug、新 console 错误、登录态复用、会话过期自动刷新、自动创建登录态、浏览器中途崩溃后诊断判为不完整
 ```
 
 ### 其他参数
