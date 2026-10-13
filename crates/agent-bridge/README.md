@@ -158,9 +158,12 @@ holds everything to review (exchange document, diff, evidence): Codex's Windows 
 file reads, so the worker passes the task text to `codex exec -s read-only` on stdin. The worker
 acks, runs Codex and posts a `result` (`done` with Codex's answer, whose first line is
 `VERDICT: APPROVE | APPROVE WITH CONDITIONS | REWORK | BLOCK`, or `blocked` with the error).
-A `verdict: rework` re-runs the review on the whole thread. A review the worker started but never
-answered (it died after its ack) is found again from the task list and re-run; replies carry
-idempotency keys.
+All reviews run in one persistent Codex thread (`codex exec resume <id>`, read-only), so Codex
+keeps the context of earlier phases; a rework of a task already reviewed there sends only the new
+message, otherwise the whole task thread. The thread id is in `~/.local/state/codex-worker/threads.json`
+and at the end of every answer: `codex resume <id>` opens the same thread interactively (not while a
+review runs). A review the worker started but never answered (it died after its ack) is found again
+from the task list and re-run; replies carry idempotency keys.
 
 ```bash
 head -c 48 /dev/urandom | base64 | tr -d '/+=\n' > ~/.config/agent-bridge/codex.token   # 0600

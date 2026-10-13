@@ -9,8 +9,15 @@ For each task addressed to `codex`:
   2. run `codex exec` read-only with the task's title and body on stdin (Codex's Windows
      sandbox blocks file reads, so everything it reviews must be in the task text);
   3. post `result` (outcome done) with Codex's final message, or `blocked` with the error.
-A `verdict: rework` from the requester re-runs the review on the whole thread.
+A `verdict: rework` from the requester re-runs the review.
 Other messages (close, notes, …) are only marked read.
+
+All reviews run in one persistent Codex thread (`codex exec resume <id>`), so Codex keeps
+the context of earlier phases and rounds. A rework of a task already reviewed in that thread
+sends only the new message; otherwise (first review there, or the thread could not be
+resumed and a new one was started) it sends the whole task thread. The thread id is kept in
+`<state>/threads.json`, written next to each review and at the end of each answer, so the
+user can open the same thread with `codex resume <id>` (not while a review is running).
 
 Replies carry a client_msg_id derived from the message they answer, so a retry never posts
 the same answer twice; reviews that were started but never answered (worker died after its
@@ -35,6 +42,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+RESUME_NOTE = """继续担任本线程的独立审查者，规则与本线程开头相同（材料都在 <stdin>，不运行命令、不读文件；中文；第一行 VERDICT；逐条注明【阻断】/【非阻断】；无法核实的标"未核实"）。新的审查材料如下。"""
 
 INSTRUCTIONS = """你是独立审查者（与提交方 Claude Code 不同厂商的模型），负责审查一个软件项目的阶段材料。
 
@@ -94,32 +103,36 @@ def to_windows(path):
     return r.stdout.strip() if r.returncode == 0 else str(path)
 
 
-def run_codex(material, job):
-    """Runs one review; returns Codex's final message."""
+def for_codex(path):
+    """A path as Codex sees it: Windows form for a Windows codex.exe."""
+    return to_windows(path) if env("CODEX_EXE").lower().endswith(".exe") else str(path)
+
+
+def load_threads(state_dir):
+    f = state_dir / "threads.json"
+    try:
+        return json.loads(f.read_text())
+    except (OSError, ValueError):
+        return {"thread": None, "tasks": {}}
+
+
+def save_threads(state_dir, threads):
+    state_dir.mkdir(parents=True, exist_ok=True)
+    f = state_dir / "threads.json"
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(threads, indent=2))
+    tmp.replace(f)
+
+
+def codex(args, prompt, material, workdir, last):
+    """Runs `codex exec …` (or `exec resume …`) once; returns (thread id, final message)."""
     exe = env("CODEX_EXE")
-    workdir = Path(env("CODEX_WORKDIR")) / job
-    workdir.mkdir(parents=True, exist_ok=True)
-    last = workdir / "last-message.md"
-    last.unlink(missing_ok=True)
-    windows = exe.lower().endswith(".exe")
-    conv = to_windows if windows else str
-    cmd = [
-        exe,
-        "exec",
-        "-s",
-        "read-only",
-        "--skip-git-repo-check",
-        "-C",
-        conv(workdir),
-        "-o",
-        conv(last),
-        "-c",
-        f'model_reasoning_effort="{os.environ.get("CODEX_EFFORT", "high")}"',
-    ]
+    cmd = [exe, "exec", *args, "--json", "--skip-git-repo-check", "-o", for_codex(last),
+           "-c", f'model_reasoning_effort="{os.environ.get("CODEX_EFFORT", "high")}"']
     if os.environ.get("CODEX_MODEL"):
         cmd += ["-m", os.environ["CODEX_MODEL"]]
-    cmd.append(INSTRUCTIONS)
-    (workdir / "material.md").write_text(material)
+    cmd.append(prompt)
+    last.unlink(missing_ok=True)
     r = subprocess.run(
         cmd,
         input=material,
@@ -130,13 +143,57 @@ def run_codex(material, job):
         cwd=workdir,
         timeout=int(os.environ.get("CODEX_TIMEOUT", "1800")),
     )
-    (workdir / "codex-stderr.log").write_text(r.stderr)
+    with open(workdir / "codex-stderr.log", "a") as log:
+        log.write(f"$ {' '.join(cmd[:4])} …\n{r.stderr}\n")
     if r.returncode != 0:
         raise RuntimeError(f"codex exec exited {r.returncode}: {r.stderr.strip()[-800:]}")
-    text = last.read_text(encoding="utf-8").strip() if last.exists() else r.stdout.strip()
+    thread = None
+    for line in r.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("type") == "thread.started":
+            thread = event.get("thread_id")
+    text = last.read_text(encoding="utf-8").strip() if last.exists() else ""
     if not text:
         raise RuntimeError("codex exec returned an empty answer")
-    return text
+    return thread, text
+
+
+def run_codex(task, job, full, delta, state_dir):
+    """Runs one review in the persistent thread; returns (thread id, final message).
+    `delta` (the new message only) is used when this task was already reviewed in the
+    thread being resumed, `full` otherwise."""
+    workdir = Path(env("CODEX_WORKDIR")) / job
+    workdir.mkdir(parents=True, exist_ok=True)
+    last = workdir / "last-message.md"
+    threads = load_threads(state_dir)
+    current = threads.get("thread")
+    thread, text = None, None
+    if current:
+        material = delta if (delta is not None and threads["tasks"].get(task) == current) else full
+        (workdir / "material.md").write_text(material)
+        try:
+            # `exec resume` does not append stdin to a prompt argument (unlike `exec`):
+            # with "-" the whole prompt, note and material, is read from stdin.
+            thread, text = codex(["resume", current, "-c", 'sandbox_mode="read-only"'],
+                                 "-", f"{RESUME_NOTE}\n\n{material}", workdir, last)
+            thread = thread or current
+        except Exception as e:
+            (workdir / "resume-failed.txt").write_text(f"thread {current}: {e}\n")
+    if text is None:
+        # No thread yet, or it could not be resumed: start a new one with everything.
+        (workdir / "material.md").write_text(full)
+        thread, text = codex(["-s", "read-only", "-C", for_codex(workdir)], INSTRUCTIONS, full,
+                             workdir, last)
+        if not thread:
+            raise RuntimeError("codex exec did not report a thread id")
+    threads["thread"] = thread
+    threads.setdefault("tasks", {})[task] = thread
+    save_threads(state_dir, threads)
+    (workdir / "thread.txt").write_text(thread + "\n")
+    return thread, text
 
 
 def thread_material(task):
@@ -153,15 +210,24 @@ def thread_material(task):
     return "\n\n".join(parts)
 
 
-def review(task, answers_n, title, material, state_dir, first):
+def rework_message(m):
+    """What a re-review in the same thread needs: the requester's new message."""
+    return f"## 消息 {m['n']}（{m['from']} · verdict · rework）\n\n" + m.get("body", "")
+
+
+def review(task, answers_n, title, material, state_dir, first, delta=None):
     """Acks (first review) or reports progress (re-review), runs Codex and posts its result;
-    answers_n keys the idempotent replies."""
+    answers_n keys the idempotent replies. `delta` is the new message alone (re-reviews)."""
     post(task, {"kind": "ack" if first else "progress",
                 "body": f"Codex 收到（消息 {answers_n}），开始审查。", "wake": "quiet",
                 "client_msg_id": f"codex-start-{task}-{answers_n}"}, state_dir)
     try:
-        answer = run_codex(f"# {title}\n\n{material}", f"{task}-{answers_n}")
-        reply = {"kind": "result", "outcome": "done", "body": answer}
+        head = f"# {title}\n\n"
+        thread, answer = run_codex(task, f"{task}-{answers_n}", head + material,
+                                   None if delta is None else head + delta, state_dir)
+        footer = (f"\n\n---\n审查线程：`{thread}`（在 Codex 窗口运行 `codex resume {thread}` "
+                  f"可以接着讨论；审查进行时请不要同时打开它）")
+        reply = {"kind": "result", "outcome": "done", "body": answer + footer}
     except Exception as e:  # report every failure; never pretend the review happened
         reply = {"kind": "result", "outcome": "blocked", "body": f"Codex 审查没有完成：{e}"}
     reply.update({"wake": "normal", "client_msg_id": f"codex-result-{task}-{answers_n}"})
@@ -185,7 +251,8 @@ def owed(state_dir):
         if last["kind"] == "task":
             review(t["id"], last["n"], title, last.get("body", ""), state_dir, True)
         else:
-            review(t["id"], last["n"], title, thread_material(t["id"]), state_dir, False)
+            review(t["id"], last["n"], title, thread_material(t["id"]), state_dir, False,
+                   delta=rework_message(last))
 
 
 def poll(state_dir, wait):
@@ -202,7 +269,7 @@ def handle(m, state_dir):
         review(task, m["n"], (m.get("meta") or {}).get("title", task), m.get("body", ""), state_dir, True)
     elif kind == "verdict" and m.get("judgement") == "rework":
         title = bridge("show", task).get("task", {}).get("title", task)
-        review(task, m["n"], title, thread_material(task), state_dir, False)
+        review(task, m["n"], title, thread_material(task), state_dir, False, delta=rework_message(m))
     bridge("ack", "--task", task, "--n", str(m["n"]))
 
 

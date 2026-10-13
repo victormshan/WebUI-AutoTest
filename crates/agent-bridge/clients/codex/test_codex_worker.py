@@ -27,17 +27,32 @@ spec.loader.exec_module(worker)
 FAKE_CODEX = textwrap.dedent(
     """\
     #!/usr/bin/env python3
-    # Fake `codex exec`: echoes what it was given into the -o file, or fails on request.
-    import os, sys
+    # Fake `codex exec [resume <id>]`: reports a thread like --json does, echoes what it was
+    # given into the -o file, logs each call, and fails on request.
+    import json, os, sys, uuid
     args = sys.argv[1:]
     material = sys.stdin.read()
-    if os.environ.get("FAKE_CODEX_FAIL"):
+    resume = len(args) > 1 and args[1] == "resume"
+    thread = args[2] if resume else str(uuid.uuid4())
+    # Like the real CLI: `exec` appends stdin to the prompt argument, `exec resume` does not;
+    # there stdin is read only when the prompt argument is "-".
+    if resume and args[-1] != "-":
+        material = ""
+    with open(os.environ["FAKE_CODEX_LOG"], "a") as log:
+        log.write(json.dumps({"resume": resume, "thread": thread, "material": material}) + "\\n")
+    if os.environ.get("FAKE_CODEX_FAIL") or (resume and os.environ.get("FAKE_CODEX_RESUME_FAIL")):
         print("fake failure", file=sys.stderr)
         sys.exit(2)
+    if resume:
+        assert 'sandbox_mode="read-only"' in args, args
+    else:
+        assert "-s" in args and args[args.index("-s") + 1] == "read-only", args
+    assert "--json" in args, args
     out = args[args.index("-o") + 1]
-    assert "-s" in args and args[args.index("-s") + 1] == "read-only", args
     with open(out, "w") as f:
         f.write("VERDICT: APPROVE\\n\\nreviewed:\\n" + material)
+    print(json.dumps({"type": "thread.started", "thread_id": thread}))
+    print(json.dumps({"type": "turn.completed"}))
     """
 )
 
@@ -83,6 +98,7 @@ class WorkerTest(unittest.TestCase):
             "CODEX_EXE": str(fake),
             "CODEX_WORKDIR": str(root / "work"),
             "XDG_STATE_HOME": str(root / "xdg"),
+            "FAKE_CODEX_LOG": str(root / "codex-calls.jsonl"),
         }
 
     @classmethod
@@ -95,6 +111,10 @@ class WorkerTest(unittest.TestCase):
         self.saved = dict(os.environ)
         os.environ.update(self.base_env)
         os.environ.pop("FAKE_CODEX_FAIL", None)
+        os.environ.pop("FAKE_CODEX_RESUME_FAIL", None)
+        # Each test starts without a review thread and with an empty call log.
+        (self.root / "xdg" / "codex-worker" / "threads.json").unlink(missing_ok=True)
+        (self.root / "codex-calls.jsonl").unlink(missing_ok=True)
 
     def tearDown(self):
         os.environ.clear()
@@ -110,6 +130,10 @@ class WorkerTest(unittest.TestCase):
     def run_worker_once(self):
         self.as_agent("codex")
         worker.poll(self.root / "xdg" / "codex-worker", 0)
+
+    def calls(self):
+        f = self.root / "codex-calls.jsonl"
+        return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
 
     def messages(self, task):
         self.as_agent("claude")
@@ -139,7 +163,7 @@ class WorkerTest(unittest.TestCase):
         self.assertIn("没有完成", result["body"])
         self.assertIn("fake failure", result["body"])
 
-    def test_rework_reviews_the_whole_thread_again(self):
+    def test_rework_in_the_same_thread_sends_only_the_new_message(self):
         self.send("t-rework", "FIRST-ROUND")
         self.run_worker_once()
         self.as_agent("claude")
@@ -148,9 +172,48 @@ class WorkerTest(unittest.TestCase):
         self.run_worker_once()
         ms = self.messages("t-rework")
         self.assertEqual([m["kind"] for m in ms], ["task", "ack", "result", "verdict", "progress", "result"])
-        second = ms[-1]["body"]
-        for text in ("FIRST-ROUND", "FIXED-IN-ROUND-TWO", "rework"):
-            self.assertIn(text, second)
+        first, second = self.calls()
+        self.assertFalse(first["resume"])
+        self.assertTrue(second["resume"])
+        self.assertEqual(second["thread"], first["thread"])
+        # The thread already has round one: only the new message is sent.
+        self.assertIn("FIXED-IN-ROUND-TWO", second["material"])
+        self.assertNotIn("FIRST-ROUND", second["material"])
+        self.assertIn(first["thread"], ms[-1]["body"])
+
+    def test_later_reviews_continue_the_same_thread(self):
+        self.send("t-one", "PHASE-ONE")
+        self.run_worker_once()
+        self.send("t-two", "PHASE-TWO")
+        self.run_worker_once()
+        one, two = self.calls()
+        self.assertEqual((one["resume"], two["resume"]), (False, True))
+        self.assertEqual(two["thread"], one["thread"])
+        self.assertIn("PHASE-TWO", two["material"])
+        result = self.messages("t-two")[-1]["body"]
+        self.assertTrue(result.startswith("VERDICT: APPROVE"))
+        self.assertIn(f"codex resume {one['thread']}", result)
+
+    def test_a_thread_that_cannot_be_resumed_is_replaced_with_full_material(self):
+        self.send("t-a", "ROUND-ONE")
+        self.run_worker_once()
+        os.environ["FAKE_CODEX_RESUME_FAIL"] = "1"
+        self.as_agent("claude")
+        worker.bridge("post", "--task", "t-a", "--kind", "verdict", "--judgement", "rework",
+                      "--body", "ROUND-TWO")
+        self.run_worker_once()
+        first, failed, fresh = self.calls()
+        self.assertTrue(failed["resume"])
+        self.assertFalse(fresh["resume"])
+        self.assertNotEqual(fresh["thread"], first["thread"])
+        # A new thread knows nothing: it gets the whole task thread.
+        for text in ("ROUND-ONE", "ROUND-TWO", "rework"):
+            self.assertIn(text, fresh["material"])
+        result = self.messages("t-a")[-1]
+        self.assertEqual(result["outcome"], "done")
+        self.assertIn(fresh["thread"], result["body"])
+        threads = json.loads((self.root / "xdg" / "codex-worker" / "threads.json").read_text())
+        self.assertEqual(threads["thread"], fresh["thread"])
 
     def test_a_restarted_worker_does_not_answer_twice(self):
         self.send("t-retry", "MATERIAL")

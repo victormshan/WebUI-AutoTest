@@ -2,9 +2,11 @@ test_a_failed_review_is_reported_as_blocked (__main__.WorkerTest.test_a_failed_r
 test_a_restarted_worker_does_not_answer_twice (__main__.WorkerTest.test_a_restarted_worker_does_not_answer_twice) ... ok
 test_a_review_interrupted_after_the_ack_is_finished_after_a_restart (__main__.WorkerTest.test_a_review_interrupted_after_the_ack_is_finished_after_a_restart) ... ok
 test_a_review_is_acked_and_answered (__main__.WorkerTest.test_a_review_is_acked_and_answered) ... ok
-test_rework_reviews_the_whole_thread_again (__main__.WorkerTest.test_rework_reviews_the_whole_thread_again) ... ok
+test_a_thread_that_cannot_be_resumed_is_replaced_with_full_material (__main__.WorkerTest.test_a_thread_that_cannot_be_resumed_is_replaced_with_full_material) ... ok
+test_later_reviews_continue_the_same_thread (__main__.WorkerTest.test_later_reviews_continue_the_same_thread) ... ok
+test_rework_in_the_same_thread_sends_only_the_new_message (__main__.WorkerTest.test_rework_in_the_same_thread_sends_only_the_new_message) ... ok
 
 ----------------------------------------------------------------------
-Ran 5 tests in 0.824s
+Ran 7 tests in 1.483s
 
 OK

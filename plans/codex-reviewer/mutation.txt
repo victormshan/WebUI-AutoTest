@@ -35,3 +35,33 @@ OK
 === restored
 Ran 5 tests in 0.879s
 OK
+# thread mutations (2026-10-13)
+=== T1 never resume (always a fresh thread)
+test_a_thread_that_cannot_be_resumed_is_replaced_with_full_material (__main__.WorkerTest.test_a_thread_that_cannot_be_resumed_is_replaced_with_full_material) ... ERROR
+test_later_reviews_continue_the_same_thread (__main__.WorkerTest.test_later_reviews_continue_the_same_thread) ... FAIL
+test_rework_in_the_same_thread_sends_only_the_new_message (__main__.WorkerTest.test_rework_in_the_same_thread_sends_only_the_new_message) ... FAIL
+Ran 7 tests in 1.499s
+FAILED (failures=2, errors=1)
+=== T2 rework in the same thread sends the full thread
+test_rework_in_the_same_thread_sends_only_the_new_message (__main__.WorkerTest.test_rework_in_the_same_thread_sends_only_the_new_message) ... FAIL
+Ran 7 tests in 1.526s
+FAILED (failures=1)
+=== T3 no fallback when resume fails
+test_a_thread_that_cannot_be_resumed_is_replaced_with_full_material (__main__.WorkerTest.test_a_thread_that_cannot_be_resumed_is_replaced_with_full_material) ... ERROR
+Ran 7 tests in 1.486s
+FAILED (errors=1)
+=== T4 no thread id in the answer
+test_a_thread_that_cannot_be_resumed_is_replaced_with_full_material (__main__.WorkerTest.test_a_thread_that_cannot_be_resumed_is_replaced_with_full_material) ... FAIL
+test_later_reviews_continue_the_same_thread (__main__.WorkerTest.test_later_reviews_continue_the_same_thread) ... FAIL
+test_rework_in_the_same_thread_sends_only_the_new_message (__main__.WorkerTest.test_rework_in_the_same_thread_sends_only_the_new_message) ... FAIL
+Ran 7 tests in 1.535s
+FAILED (failures=3)
+=== restored
+Ran 7 tests in 1.463s
+OK
+=== T5 resume passes the note as prompt argument (the bug found in the real e2e)
+test_later_reviews_continue_the_same_thread (__main__.WorkerTest.test_later_reviews_continue_the_same_thread) ... FAIL
+test_rework_in_the_same_thread_sends_only_the_new_message (__main__.WorkerTest.test_rework_in_the_same_thread_sends_only_the_new_message) ... FAIL
+Ran 7 tests in 1.550s
+FAILED (failures=2)
+restored
