@@ -1,0 +1,10 @@
+test_a_failed_review_is_reported_as_blocked (__main__.WorkerTest.test_a_failed_review_is_reported_as_blocked) ... ok
+test_a_restarted_worker_does_not_answer_twice (__main__.WorkerTest.test_a_restarted_worker_does_not_answer_twice) ... ok
+test_a_review_interrupted_after_the_ack_is_finished_after_a_restart (__main__.WorkerTest.test_a_review_interrupted_after_the_ack_is_finished_after_a_restart) ... ok
+test_a_review_is_acked_and_answered (__main__.WorkerTest.test_a_review_is_acked_and_answered) ... ok
+test_rework_reviews_the_whole_thread_again (__main__.WorkerTest.test_rework_reviews_the_whole_thread_again) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.824s
+
+OK

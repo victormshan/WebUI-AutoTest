@@ -150,6 +150,30 @@ tools `bridge_tasks`, `bridge_show`, `bridge_send`, `bridge_post`, `bridge_inbox
 Node (DSH): `crates/agent-bridge/clients/node/bridge-client.mjs` (reference client: built-in fetch,
 4xx final, idempotent retries, explicit UTF-8).
 
+## Codex reviewer
+
+`clients/codex/codex-worker.py` puts the local Codex CLI (signed in to the user's ChatGPT
+account) on the bridge as the agent `codex`, the reviewer of each phase. Send it a task whose body
+holds everything to review (exchange document, diff, evidence): Codex's Windows sandbox blocks
+file reads, so the worker passes the task text to `codex exec -s read-only` on stdin. The worker
+acks, runs Codex and posts a `result` (`done` with Codex's answer, whose first line is
+`VERDICT: APPROVE | APPROVE WITH CONDITIONS | REWORK | BLOCK`, or `blocked` with the error).
+A `verdict: rework` re-runs the review on the whole thread. A review the worker started but never
+answered (it died after its ack) is found again from the task list and re-run; replies carry
+idempotency keys.
+
+```bash
+head -c 48 /dev/urandom | base64 | tr -d '/+=\n' > ~/.config/agent-bridge/codex.token   # 0600
+agent-bridge hash-token < ~/.config/agent-bridge/codex.token    # add as "codex" to agents.json
+systemctl --user restart agent-bridge
+install -D crates/agent-bridge/clients/codex/codex-worker.py ~/.local/share/agent-bridge/codex-worker.py
+cp crates/agent-bridge/deploy/codex-worker.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+systemctl --user enable --now codex-worker
+agent-bridge send --id review-x --to codex --title "…" --body-file packet.md
+```
+
+Tests (private service, fake Codex): `python3 crates/agent-bridge/clients/codex/test_codex_worker.py`.
+
 ## HTTP API `/v1`
 
 All routes except `/v1/health` need `Authorization: Bearer <token>`.

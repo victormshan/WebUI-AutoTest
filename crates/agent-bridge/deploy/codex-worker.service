@@ -1,0 +1,21 @@
+# systemd user unit for the Codex reviewer (crates/agent-bridge/clients/codex/codex-worker.py).
+# Install: copy to ~/.config/systemd/user/, adjust the paths, then
+#   systemctl --user daemon-reload && systemctl --user enable --now codex-worker
+[Unit]
+Description=Codex reviewer on agent-bridge
+After=agent-bridge.service
+Wants=agent-bridge.service
+
+[Service]
+# Windows codex.exe runs through WSL interop: keep System32 on PATH (wslpath, cmd).
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/mnt/c/Windows/System32
+Environment=AGENT_BRIDGE_TOKEN_FILE=%h/.config/agent-bridge/codex.token
+Environment=CODEX_EXE=/mnt/e/Tools/npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe
+# Codex working directory: one subdirectory per review (material, answer, log).
+Environment=CODEX_WORKDIR=/mnt/e/rust-agent-browser/reviews
+ExecStart=/usr/bin/python3 %h/.local/share/agent-bridge/codex-worker.py
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

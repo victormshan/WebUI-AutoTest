@@ -1,0 +1,37 @@
+=== W1 result without client_msg_id
+1
+test_a_failed_review_is_reported_as_blocked (__main__.WorkerTest.test_a_failed_review_is_reported_as_blocked) ... ok
+test_a_restarted_worker_does_not_answer_twice (__main__.WorkerTest.test_a_restarted_worker_does_not_answer_twice) ... ok
+test_a_review_is_acked_and_answered (__main__.WorkerTest.test_a_review_is_acked_and_answered) ... ok
+test_rework_reviews_the_whole_thread_again (__main__.WorkerTest.test_rework_reviews_the_whole_thread_again) ... ok
+Ran 4 tests in 0.650s
+OK
+=== W2 failure posted as done
+test_a_failed_review_is_reported_as_blocked (__main__.WorkerTest.test_a_failed_review_is_reported_as_blocked) ... FAIL
+test_a_restarted_worker_does_not_answer_twice (__main__.WorkerTest.test_a_restarted_worker_does_not_answer_twice) ... ok
+test_a_review_is_acked_and_answered (__main__.WorkerTest.test_a_review_is_acked_and_answered) ... ok
+test_rework_reviews_the_whole_thread_again (__main__.WorkerTest.test_rework_reviews_the_whole_thread_again) ... ok
+Ran 4 tests in 0.644s
+FAILED (failures=1)
+=== W3 rework ignored
+test_a_failed_review_is_reported_as_blocked (__main__.WorkerTest.test_a_failed_review_is_reported_as_blocked) ... ok
+test_a_restarted_worker_does_not_answer_twice (__main__.WorkerTest.test_a_restarted_worker_does_not_answer_twice) ... ok
+test_a_review_is_acked_and_answered (__main__.WorkerTest.test_a_review_is_acked_and_answered) ... ok
+test_rework_reviews_the_whole_thread_again (__main__.WorkerTest.test_rework_reviews_the_whole_thread_again) ... FAIL
+Ran 4 tests in 0.565s
+FAILED (failures=1)
+=== restored
+Ran 4 tests in 0.653s
+OK
+
+# after the owed() fix
+=== W4 no scan for owed reviews
+test_a_review_interrupted_after_the_ack_is_finished_after_a_restart (__main__.WorkerTest.test_a_review_interrupted_after_the_ack_is_finished_after_a_restart) ... FAIL
+Ran 5 tests in 0.758s
+FAILED (failures=1)
+=== W1 again (result without client_msg_id)
+Ran 5 tests in 0.850s
+OK
+=== restored
+Ran 5 tests in 0.879s
+OK
