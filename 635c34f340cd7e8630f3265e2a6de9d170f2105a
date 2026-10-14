@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: milestone-audit-plan
+version: 1/1
+commit: 635c34f340cd7e8630f3265e2a6de9d170f2105a
+tree: 1a3c0d7b44ad336cc667c734c2aabd1e8e254a2e
+parent: e0915116f54f48dceb73a878e4d8ab384497ec4d
+review: v1-1
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-14T12:47:13Z
+signature: 2ka+YNm4PXzFd0sIx4Ycm4C2kgYkexNkmqhk2UW/67Xqr3+NHQO8btag/tbgOpvNqs4Tpsnx23qz+4kYMWTDDA==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
