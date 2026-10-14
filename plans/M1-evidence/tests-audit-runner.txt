@@ -1,0 +1,29 @@
+
+running 4 tests
+test tests::digest_is_lowercase_hex_sha256 ... ok
+test tests::events_report_item_types_and_commands ... ok
+test tests::job_ids_are_plain_names ... ok
+test tests::only_the_allowed_uid_and_executable_pass ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 6 tests
+test bad_requests_are_rejected ... ok
+test a_job_runs_with_its_own_digest_and_a_clean_environment ... ok
+test a_job_id_is_used_once ... ok
+test failures_are_reported_never_as_completed ... ok
+test an_unknown_caller_is_refused_before_anything_runs ... ok
+test a_hanging_codex_times_out ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.04s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

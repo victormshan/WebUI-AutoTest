@@ -1,0 +1,25 @@
+# audit-runner: runs milestone audit jobs for review-gate with the auditor's Codex CLI.
+# Holds no keys. Install the binary as root-owned /usr/local/lib/audit-runner/audit-runner.
+[Unit]
+Description=audit-runner (milestone audits for review-gate, holds no keys)
+Requires=audit-runner.socket
+
+[Service]
+User=auditor
+Group=auditor
+ExecStart=/usr/local/lib/audit-runner/audit-runner \
+  --allow-uid 999 \
+  --allow-exe /usr/local/bin/review-gate \
+  --codex /home/auditor/.local/node_modules/.bin/codex \
+  --codex-home /home/auditor/.codex \
+  --workdir /home/auditor/jobs
+NoNewPrivileges=yes
+ProtectSystem=strict
+# /home is hidden except the auditor's own directory (Codex login, job records).
+ProtectHome=tmpfs
+BindPaths=/home/auditor
+PrivateTmp=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

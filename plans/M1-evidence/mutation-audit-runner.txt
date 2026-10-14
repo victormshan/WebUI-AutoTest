@@ -1,0 +1,22 @@
+=== A1 peer uid not checked
+test tests::only_the_allowed_uid_and_executable_pass ... FAILED
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p audit-runner --lib`
+=== A2 environment not cleared
+test a_job_runs_with_its_own_digest_and_a_clean_environment ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.02s
+error: test failed, to rerun pass `-p audit-runner --test runner`
+=== A3 timeout kills only the top process
+test a_hanging_codex_times_out ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.08s
+error: test failed, to rerun pass `-p audit-runner --test runner`
+=== A4 job ids may be reused
+test a_job_id_is_used_once ... FAILED
+test a_hanging_codex_times_out ... FAILED
+test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.03s
+error: test failed, to rerun pass `-p audit-runner --test runner`
+=== restored
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+=== A4 rerun (clean, after removing processes leaked by A3)
+test a_job_id_is_used_once ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s

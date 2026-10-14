@@ -1,0 +1,18 @@
+[package]
+name = "audit-runner"
+description = "Runs milestone audit jobs for review-gate with the auditor's Codex CLI; holds no keys (plans/milestone-audit-plan.md, M1)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono = { version = "0.4", features = ["serde"] }
+clap = { workspace = true, features = ["derive"] }
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.11.0"
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
