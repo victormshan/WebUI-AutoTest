@@ -1,0 +1,9 @@
+## 2026-10-13T20:19:23+08:00 after the full ignored run (checked by reading /proc; this script excludes itself)
+Chrome for Testing processes (chrome-linux64/chrome): 0
+chrome-devtools-mcp servers (node): 0
+processes using a webtest-native-* profile: 0
+/tmp webtest-native-*/webtest-profile-* directories: 0
+$ chrome-wsl --version
+Google Chrome for Testing 154.0.8037.92 
+chrome-devtools-mcp (npx cache for @1.10.1): "version":"1.10.1"
+rustc 1.99.0 (b940084d7 2026-09-28)

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Contract page</title>
+<style>
+  .card { border: 1px solid #ccc; margin: 4px; padding: 4px; }
+  #cover { position: relative; }
+  #cover .overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.1); }
+</style>
+</head>
+<body>
+<!-- B1 snapshot contract page (r3 §3.2, §5.1). Both backends snapshot this page and the
+     results are compared node by node; keep it deterministic (no timers, no randomness). -->
+<header>
+  <nav aria-label="Main">
+    <a href="#home">Home</a>
+    <a href="#cart">Cart</a>
+  </nav>
+</header>
+<main>
+  <h1>Contract page</h1>
+  <h2>Duplicates and unnamed</h2>
+  <section class="card" aria-label="Product A">
+    <p>Widget A costs 10.00</p>
+    <button data-testid="add-a">Add to cart</button>
+  </section>
+  <section class="card" aria-label="Product B">
+    <p>Widget B costs 20.00</p>
+    <button data-testid="add-b">Add to cart</button>
+  </section>
+  <button aria-label="" data-testid="icon-button"><svg width="10" height="10"></svg></button>
+  <div role="button" tabindex="0">Div button</div>
+
+  <h2>States</h2>
+  <button disabled>Disabled button</button>
+  <label><input type="checkbox" checked> Checked box</label>
+  <label><input type="checkbox"> Unchecked box</label>
+  <div role="checkbox" aria-checked="mixed" tabindex="0">Mixed box</div>
+  <button aria-expanded="true" aria-controls="panel">Expanded toggle</button>
+  <button aria-expanded="false">Collapsed toggle</button>
+  <div id="panel">Panel content</div>
+  <label>Focused field <input id="focused" type="text" value=""></label>
+  <label>Prefilled <input type="text" value="old value"></label>
+  <label>Required <input type="email" required></label>
+  <label>Notes <textarea>line one</textarea></label>
+  <label>Size
+    <select>
+      <option>Small</option>
+      <option selected>Large</option>
+    </select>
+  </label>
+  <label><input type="radio" name="r" checked> Radio one</label>
+  <label><input type="radio" name="r"> Radio two</label>
+  <input type="range" min="0" max="10" value="4" aria-label="Volume">
+  <input type="range" min="0" max="1" step="any" value="0.000001" aria-label="Tiny">
+  <input type="range" min="0" max="1" step="any" value="0.0000001" aria-label="Tinier">
+  <input type="range" min="-1" max="1" step="any" value="-0.5" aria-label="Negative">
+  <h3>Level three</h3>
+  <img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="Pixel">
+
+  <h2>Hidden</h2>
+  <button style="display:none">Display none button</button>
+  <button aria-hidden="true">Aria hidden button</button>
+  <button style="visibility:hidden">Visibility hidden button</button>
+  <div hidden><button>Hidden attribute button</button></div>
+
+  <h2>Nesting</h2>
+  <ul>
+    <li>First item <a href="#first">first link</a></li>
+    <li>Second item
+      <ul><li>Nested item <button>Nested button</button></li></ul>
+    </li>
+  </ul>
+  <table>
+    <tr><th>Name</th><th>Price</th></tr>
+    <tr><td>Widget A</td><td>10.00</td></tr>
+  </table>
+  <form aria-label="Search form">
+    <input type="search" aria-label="Search">
+    <button type="submit">Go</button>
+  </form>
+
+  <h2>Covered</h2>
+  <div id="cover"><button>Covered button</button><div class="overlay"></div></div>
+  <button><span>Inner</span> <b>text</b></button>
+
+  <h2>Frame</h2>
+  <iframe src="frame.html" title="Same origin frame" width="300" height="80"></iframe>
+
+  <h2>Dynamic</h2>
+  <div id="dynamic"></div>
+  <p role="status" aria-live="polite">Status message</p>
+</main>
+<footer><p>Footer text</p></footer>
+<script>
+  document.getElementById('focused').focus();
+  // Test hooks: change the DOM without navigating.
+  window.contract = {
+    insert(name) {
+      const b = document.createElement('button');
+      b.textContent = name;
+      document.getElementById('dynamic').appendChild(b);
+    },
+    clear() { document.getElementById('dynamic').replaceChildren(); },
+  };
+</script>
+</body>
+</html>

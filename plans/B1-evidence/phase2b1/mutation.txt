@@ -1,0 +1,45 @@
+=== S1 resolve_uid ignores the generation
+test native_uids_go_stale_and_never_move ... FAILED
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.92s
+=== S2 resolve_uid ignores navigation (loader check)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.37s
+=== S3 resolve_uid ignores isConnected
+test native_uids_go_stale_and_never_move ... FAILED
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.20s
+=== S4 load wait ignores loaderId
+Traceback (most recent call last):
+  File "<string>", line 3, in <module>
+    assert a in s, a;open(p,'w').write(s.replace(a,b,1))
+           ^^^^^^
+AssertionError: if p["frameId"] == frame && p["loaderId"] == loader && p["name"] == "load" =>
+test a_navigation_is_only_completed_by_its_own_load ... FAILED
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.72s
+=== S5 ax keeps hidden nodes
+test result: FAILED. 37 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.23s
+=== S6 ax keeps text inside controls
+test result: FAILED. 37 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.50s
+=== S7 snapshot keeps the old generation
+test native_uids_go_stale_and_never_move ... FAILED
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.82s
+=== S8 ax ignores iframes
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.23s
+=== restored
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.29s
+
+# S4 rerun (the first S4 pattern did not match after rustfmt; see README)
+=== S4a load wait ignores loaderId (superseded check kept)
+test a_navigation_is_only_completed_by_its_own_load ... replaced navigation: navigation to http://127.0.0.1:41299/ was replaced by another navigation before it loaded
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.10s
+=== S4b load wait ignores loaderId and the superseded check (old behavior: any load of the frame)
+thread 'a_navigation_is_only_completed_by_its_own_load' (3030678) panicked at crates/agent/tests/snapshot_contract.rs:410:20:
+the replaced navigation reported success: Successfully navigated to http://127.0.0.1:36395/.
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.02s
+=== S4c superseded check off, loaderId kept
+test a_navigation_is_only_completed_by_its_own_load ... replaced navigation: http://127.0.0.1:45319/ did not finish loading within 30s (outcome unknown)
+thread 'a_navigation_is_only_completed_by_its_own_load' (3031404) panicked at crates/agent/tests/snapshot_contract.rs:413:13:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 30.54s
+=== restored
+test a_navigation_is_only_completed_by_its_own_load ... replaced navigation: navigation to http://127.0.0.1:38921/ was replaced by another navigation before it loaded
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.20s

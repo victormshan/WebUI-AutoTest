@@ -3,6 +3,8 @@
 //! unconditional `--no-sandbox` / `--disable-dev-shm-usage` (baseline §5, P1).
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicI32;
 use std::time::Duration;
 
 use crate::error::{Error, Result};
@@ -24,6 +26,32 @@ pub struct LaunchConfig {
     pub command_timeout: Duration,
     /// How long `close` waits for a graceful exit before killing the process group.
     pub close_timeout: Duration,
+    /// Set to Chrome's process group id as soon as Chrome is spawned, before `launch`
+    /// returns, so a caller can tell whether the group is gone (see `group_liveness`) before
+    /// removing the profile, also when `launch` fails or its future is dropped midway.
+    /// Ending the group stays the runtime's job (the half-built Browser's Drop).
+    pub spawned_pgid: Option<Arc<AtomicI32>>,
+    /// Test hook: pause `launch` once the Browser exists (Chrome spawned, pipe reader
+    /// running) and before the first command, so a test can drop the future exactly there.
+    #[doc(hidden)]
+    pub pause_before_handshake: Option<Arc<LaunchPause>>,
+}
+
+/// A test hook's meeting point: the code under test signals `reached`, then waits for
+/// `release`. A test that drops the future instead of releasing it cancels at that point.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct LaunchPause {
+    pub reached: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
+impl LaunchPause {
+    /// Called by the code under test.
+    pub async fn pause(&self) {
+        self.reached.notify_one();
+        self.release.notified().await;
+    }
 }
 
 impl LaunchConfig {
@@ -36,6 +64,8 @@ impl LaunchConfig {
             env: Vec::new(),
             command_timeout: Duration::from_secs(30),
             close_timeout: Duration::from_secs(10),
+            spawned_pgid: None,
+            pause_before_handshake: None,
         }
     }
 

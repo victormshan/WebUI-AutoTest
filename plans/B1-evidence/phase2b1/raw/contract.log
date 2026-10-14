@@ -1,0 +1,46 @@
+   Compiling agent v0.1.0 (/home/administrator/projects/Chrome-MCP/crates/agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.63s
+     Running tests/snapshot_contract.rs (target/debug/deps/snapshot_contract-951cd96b3a5de250)
+
+running 8 tests
+test a_cross_process_iframe_is_left_empty_not_failed ... chrome-devtools-mcp exposes content of the browser instance to the MCP clients allowing them to inspect,
+debug, and modify any data in the browser or DevTools.
+Avoid sharing sensitive or personal information that you do not want to share with MCP clients.
+mcp:
+## Latest page snapshot
+uid=1_0 RootWebArea "Cross-site frame" url="http://127.0.0.1:34183/oopif.html"
+  uid=1_1 heading "Outer" level="1"
+  uid=1_2 Iframe "Other site frame"
+    uid=1_3 RootWebArea "Inner frame" url="http://localhost:34183/frame.html"
+      uid=1_4 StaticText "Inside the frame"
+      uid=1_5 button "Frame button"
+      uid=1_6 link "Frame link" url="http://localhost:34183/frame.html#x"
+        uid=1_7 StaticText "Frame link"
+
+native:
+uid=1_0 RootWebArea "Cross-site frame" url="http://127.0.0.1:34183/oopif.html"
+  uid=1_1 heading "Outer" level="1"
+  uid=1_2 Iframe "Other site frame"
+
+ok
+test a_failed_iframe_read_fails_the_snapshot ... ok
+test a_navigation_is_only_completed_by_its_own_load ... replaced navigation: navigation to http://127.0.0.1:42777/ was replaced by another navigation before it loaded
+ok
+test a_snapshot_during_a_resolution_makes_the_uid_stale ... ok
+test both_backends_snapshot_the_contract_page_alike ... chrome-devtools-mcp exposes content of the browser instance to the MCP clients allowing them to inspect,
+debug, and modify any data in the browser or DevTools.
+Avoid sharing sensitive or personal information that you do not want to share with MCP clients.
+index.html: 77 nodes, text and agent functions identical
+second.html: 3 nodes, text and agent functions identical
+frame.html: 5 nodes, text and agent functions identical
+after insert: 79 nodes, text and agent functions identical
+after removal: 77 nodes, text and agent functions identical
+ok
+test every_native_uid_resolves_to_its_own_element ... 77 uids resolved to their own elements
+ok
+test native_uids_go_stale_and_never_move ... ok
+test numbers_match_the_browsers_own_formatting ... 21 numbers match the browser
+ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.23s
+

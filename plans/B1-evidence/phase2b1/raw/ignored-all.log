@@ -1,0 +1,87 @@
+   Compiling browser-runtime v0.1.0 (/home/administrator/projects/Chrome-MCP/crates/browser-runtime)
+   Compiling agent v0.1.0 (/home/administrator/projects/Chrome-MCP/crates/agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.03s
+     Running unittests src/lib.rs (target/debug/deps/agent-5c257ea358201c02)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 52 filtered out; finished in 0.00s
+
+     Running tests/mcp_backend.rs (target/debug/deps/mcp_backend-59befe5ab0d0770f)
+
+running 1 test
+test a_browser_crash_reads_as_failed_diagnostics ... chrome-devtools-mcp exposes content of the browser instance to the MCP clients allowing them to inspect,
+debug, and modify any data in the browser or DevTools.
+Avoid sharing sensitive or personal information that you do not want to share with MCP clients.
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.40s
+
+     Running tests/native_backend.rs (target/debug/deps/native_backend-6010eb9b43f3e1fa)
+
+running 13 tests
+test a_crash_during_a_load_is_a_disconnect_right_away ... ok
+test a_crash_is_a_disconnect_and_nothing_restarts ... ok
+test a_failed_launch_leaves_nothing_behind ... ok
+test a_launch_cancelled_before_the_handshake_cleans_up_in_order ... ok
+test a_launch_cancelled_during_setup_cleans_up_in_order ... ok
+test a_page_that_never_loads_times_out ... ok
+test a_profile_that_cannot_be_removed_fails_the_shutdown ... ok
+test aborting_the_owning_task_leaves_nothing_behind ... ok
+test cancelling_a_launch_at_any_point_leaves_nothing_behind ... ok
+test concurrent_backends_are_isolated ... ok
+test dropping_the_backend_leaves_nothing_behind ... ok
+test runs_over_a_pipe_with_no_port_and_cleans_up_on_close ... ok
+test unimplemented_parts_say_so ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.64s
+
+     Running tests/snapshot_contract.rs (target/debug/deps/snapshot_contract-951cd96b3a5de250)
+
+running 8 tests
+test a_cross_process_iframe_is_left_empty_not_failed ... chrome-devtools-mcp exposes content of the browser instance to the MCP clients allowing them to inspect,
+debug, and modify any data in the browser or DevTools.
+Avoid sharing sensitive or personal information that you do not want to share with MCP clients.
+ok
+test a_failed_iframe_read_fails_the_snapshot ... ok
+test a_navigation_is_only_completed_by_its_own_load ... ok
+test a_snapshot_during_a_resolution_makes_the_uid_stale ... ok
+test both_backends_snapshot_the_contract_page_alike ... chrome-devtools-mcp exposes content of the browser instance to the MCP clients allowing them to inspect,
+debug, and modify any data in the browser or DevTools.
+Avoid sharing sensitive or personal information that you do not want to share with MCP clients.
+ok
+test every_native_uid_resolves_to_its_own_element ... ok
+test native_uids_go_stale_and_never_move ... ok
+test numbers_match_the_browsers_own_formatting ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.33s
+
+     Running unittests src/lib.rs (target/debug/deps/browser_runtime-dcbe9742958eb414)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/chrome.rs (target/debug/deps/chrome-83e730971a21de7c)
+
+running 5 tests
+test a_command_without_an_answer_times_out_and_says_the_effect_is_unknown ... ok
+test a_crashed_chrome_is_a_disconnect_and_close_still_cleans_up ... ok
+test a_profile_in_use_refuses_a_second_browser ... ok
+test cdp_over_the_pipe_works_and_no_port_is_opened ... ok
+test dropping_the_browser_never_leaves_chrome_behind ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.96s
+
+   Doc-tests agent
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests browser_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

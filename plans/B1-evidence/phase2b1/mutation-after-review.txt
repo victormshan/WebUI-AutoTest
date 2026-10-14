@@ -1,0 +1,8 @@
+=== S2' (after the review) lookup ignores navigation (loaderId/frame)
+test native::tests::a_new_document_makes_every_uid_stale ... FAILED
+test result: FAILED. 42 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+=== S9 missing objectId is a generic error again
+pattern ok
+(not run: no page returns a resolveNode result without objectId; covered by review only)
+restored
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

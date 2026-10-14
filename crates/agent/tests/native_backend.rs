@@ -426,8 +426,7 @@ async fn unimplemented_parts_say_so() {
             .await
             .unwrap();
         assert!(out.is_error, "{}", out.text);
-        assert!(format!("{:#}", b.snapshot().await.unwrap_err()).contains("not implemented"));
-        assert!(b.storage_state().await.is_err());
+        assert!(format!("{:#}", b.storage_state().await.unwrap_err()).contains("not implemented"));
         let d = b.diagnostics().await;
         assert_eq!(d.console, Coverage::Unsupported);
         assert_eq!(d.network, Coverage::Unsupported);
@@ -549,5 +548,100 @@ async fn a_crash_during_a_load_is_a_disconnect_right_away() {
         }
         assert!(entries(root.path()).is_empty());
     })
+    .await
+}
+
+/// Chrome exits but its profile cannot be removed: shutdown says so and names the profile,
+/// instead of reporting a clean close.
+#[tokio::test]
+#[ignore = "needs Chrome"]
+async fn a_profile_that_cannot_be_removed_fails_the_shutdown() {
+    use std::os::unix::fs::PermissionsExt;
+    bounded(async {
+        let root = tempfile::tempdir().unwrap();
+        let b = NativeBackend::launch(&config(root.path())).await.unwrap();
+        let pgid = b.pgid();
+        let profile = b.profile_dir().to_path_buf();
+        // Its parent read-only: the profile directory itself cannot be unlinked.
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let r = b.shutdown().await;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let e = r.expect_err("shutdown must not succeed while the profile is still there");
+        eprintln!("{e:#}");
+        assert!(
+            format!("{e:#}").contains(&profile.display().to_string()),
+            "{e:#}"
+        );
+        assert!(!group_alive(pgid), "Chrome itself was closed");
+    })
+    .await
+}
+
+/// Cancels a launch at a known point (the test hook pauses it there) and checks, right after
+/// the cancellation, that Chrome's group is gone and the profile removed. The guard removes
+/// the profile only when the group is confirmed gone, so a removed profile also shows that
+/// the runtime ended the group before the guard looked.
+async fn cancel_while_paused(stage: &str, at_handshake: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let pause = std::sync::Arc::new(browser_runtime::LaunchPause::default());
+    let mut cfg = config(root.path());
+    if at_handshake {
+        cfg.pause_before_handshake = Some(pause.clone());
+    } else {
+        cfg.pause_before_setup = Some(pause.clone());
+    }
+    let task = tokio::spawn(async move { NativeBackend::launch(&cfg).await.map(|_| ()) });
+    pause.reached.notified().await;
+    let running = processes_mentioning(root.path());
+    assert!(
+        !running.is_empty(),
+        "{stage}: Chrome should be running while paused"
+    );
+    assert_eq!(
+        entries(root.path()).len(),
+        1,
+        "{stage}: the profile exists while paused"
+    );
+    let pgid: i32 = running
+        .iter()
+        .filter_map(|p| p.split(':').next()?.parse().ok())
+        .find(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|c| c.contains("--remote-debugging-pipe"))
+        })
+        .expect("the browser process");
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    // No waiting: cleanup ran inside the cancellation.
+    assert!(
+        !group_alive(pgid),
+        "{stage}: group {pgid} left after cancel"
+    );
+    assert!(processes_mentioning(root.path()).is_empty(), "{stage}");
+    assert!(
+        entries(root.path()).is_empty(),
+        "{stage}: profile left: {:?}",
+        entries(root.path())
+    );
+    eprintln!("{stage}: cancelled with pgid {pgid}; group gone and profile removed");
+}
+
+#[tokio::test]
+#[ignore = "needs Chrome"]
+async fn a_launch_cancelled_before_the_handshake_cleans_up_in_order() {
+    bounded(cancel_while_paused(
+        "before the handshake (runtime, half-built Browser)",
+        true,
+    ))
+    .await
+}
+
+#[tokio::test]
+#[ignore = "needs Chrome"]
+async fn a_launch_cancelled_during_setup_cleans_up_in_order() {
+    bounded(cancel_while_paused(
+        "before the page setup (Browser complete)",
+        false,
+    ))
     .await
 }

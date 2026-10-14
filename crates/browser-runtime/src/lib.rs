@@ -11,5 +11,5 @@ pub mod error;
 mod pipe;
 
 pub use browser::Browser;
-pub use config::LaunchConfig;
+pub use config::{LaunchConfig, LaunchPause};
 pub use error::{Error, Result};

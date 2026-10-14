@@ -1,0 +1,10 @@
+=== R13 runtime Drop does not end the group (the half-built Browser of a cancelled launch included)
+test a_launch_cancelled_before_the_handshake_cleans_up_in_order ... FAILED
+test a_launch_cancelled_during_setup_cleans_up_in_order ... FAILED
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 11 filtered out; finished in 6.31s
+restored
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.26s
+Chrome for Testing processes (chrome-linux64/chrome): 0
+chrome-devtools-mcp servers (node): 0
+processes using a webtest-native-* profile: 0
+/tmp webtest-native-*/webtest-profile-* directories: 0

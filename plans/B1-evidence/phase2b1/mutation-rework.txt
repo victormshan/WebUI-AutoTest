@@ -1,0 +1,36 @@
+=== R1 dispose_profile ignores whether Chrome is gone
+test result: FAILED. 50 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p agent --lib`
+=== R2 shutdown ignores the dispose result
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test a_profile_that_cannot_be_removed_fails_the_shutdown ... FAILED
+test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.61s
+=== R3 NavWatch: any other loader replaces (no commit tracking)
+test result: FAILED. 49 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p agent --lib`
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.56s
+=== R4 iframe failures skipped again
+Traceback (most recent call last):
+  File "<string>", line 3, in <module>
+    assert a in s, a;open(p,'w').write(s.replace(a,b,1))
+           ^^^^^^
+AssertionError:             tree.nodes[index].iframe = Box::pin(
+=== R5 numbers printed the Rust way
+test result: FAILED. 50 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p agent --lib`
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.31s
+=== R6 every error after resolve becomes Stale
+test result: FAILED. 50 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+error: test failed, to rerun pass `-p agent --lib`
+=== R7 no generation re-check at the end of resolve_uid
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.37s
+=== restored
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+=== R4 (rerun; hook now makes the real CDP read fail) restored code
+test a_failed_iframe_read_fails_the_snapshot ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 2.65s
+=== R4 iframe read errors swallowed
+test a_failed_iframe_read_fails_the_snapshot ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.28s
+restored

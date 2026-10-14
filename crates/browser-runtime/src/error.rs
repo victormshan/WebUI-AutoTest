@@ -24,6 +24,9 @@ pub enum Error {
         code: i64,
         message: String,
     },
+    /// Chrome's process group was still alive after SIGKILL: cleanup did not finish.
+    #[error("Chrome process group {pgid} still alive after SIGKILL")]
+    Shutdown { pgid: i32 },
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

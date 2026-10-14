@@ -78,6 +78,9 @@ impl Browser {
             .spawn()
             .map_err(|e| Error::Launch(format!("{}: {e}", config.chrome.display())))?;
         let pgid = child.id() as i32;
+        if let Some(slot) = &config.spawned_pgid {
+            slot.store(pgid, Ordering::SeqCst);
+        }
         // Our copies of Chrome's ends must close, or EOF never reaches the reader.
         drop(to_chrome_r);
         drop(from_chrome_w);
@@ -102,6 +105,9 @@ impl Browser {
             config,
         };
         // The first answer proves the pipe works; a Chrome that died on start fails here.
+        if let Some(p) = &b.config.pause_before_handshake {
+            p.pause().await;
+        }
         b.call("Browser.getVersion", json!({}))
             .await
             .map_err(|e| match e {
@@ -183,7 +189,10 @@ impl Browser {
     }
 
     /// Asks Chrome to exit, then makes sure the whole process group is gone.
-    /// Returns how it ended: "graceful", "sigterm" or "sigkill".
+    /// Returns how it ended: "graceful", "sigterm" or "sigkill"; an error if processes of
+    /// the group are still there after SIGKILL (cleanup is then not done).
+    /// "Gone" means no process of the group is left, helpers included, even when the
+    /// browser process itself already exited.
     pub async fn close(&self) -> Result<&'static str> {
         let _ = tokio::time::timeout(
             Duration::from_secs(2),
@@ -198,8 +207,10 @@ impl Browser {
             return Ok("sigterm");
         }
         self.signal(libc::SIGKILL);
-        self.wait_group(Duration::from_secs(3)).await;
-        Ok("sigkill")
+        if self.wait_group(Duration::from_secs(3)).await {
+            return Ok("sigkill");
+        }
+        Err(Error::Shutdown { pgid: self.pgid })
     }
 
     fn signal(&self, sig: i32) {
@@ -247,10 +258,40 @@ impl Drop for Browser {
     }
 }
 
-/// Whether any process of the group still exists (signal 0 probes without delivering).
-pub fn group_alive(pgid: i32) -> bool {
+/// What signal 0 to a process group says about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    /// At least one process of the group exists.
+    Alive,
+    /// No process of the group exists (`ESRCH`).
+    Gone,
+    /// The check failed for another reason (e.g. `EPERM`): existence is not known.
+    Unknown(i32),
+}
+
+/// Probes the group with signal 0 (nothing is delivered).
+pub fn group_liveness(pgid: i32) -> Liveness {
     // SAFETY: signal 0 only checks for existence and permission.
-    unsafe { libc::killpg(pgid, 0) == 0 }
+    let ret = unsafe { libc::killpg(pgid, 0) };
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    liveness_from(ret, errno)
+}
+
+/// Maps `killpg(pgid, 0)`'s result: only `ESRCH` means gone.
+pub fn liveness_from(ret: i32, errno: i32) -> Liveness {
+    if ret == 0 {
+        Liveness::Alive
+    } else if errno == libc::ESRCH {
+        Liveness::Gone
+    } else {
+        Liveness::Unknown(errno)
+    }
+}
+
+/// Whether the group may still have processes: anything but a confirmed `Gone` counts, so
+/// a failed check never passes for "exited".
+pub fn group_alive(pgid: i32) -> bool {
+    group_liveness(pgid) != Liveness::Gone
 }
 
 fn restrict(dir: &std::path::Path) -> Result<()> {
@@ -297,4 +338,31 @@ fn spawn_reader(
         pending.lock().unwrap().clear();
         tracing::info!("chrome pipe closed");
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_esrch_means_the_group_is_gone() {
+        assert_eq!(liveness_from(0, 0), Liveness::Alive);
+        assert_eq!(liveness_from(-1, libc::ESRCH), Liveness::Gone);
+        assert_eq!(
+            liveness_from(-1, libc::EPERM),
+            Liveness::Unknown(libc::EPERM)
+        );
+        assert_eq!(
+            liveness_from(-1, libc::EINVAL),
+            Liveness::Unknown(libc::EINVAL)
+        );
+    }
+
+    #[test]
+    fn an_unknown_group_counts_as_alive() {
+        // pid 1's group: it exists but is not ours to signal (EPERM) unless we are root.
+        let l = group_liveness(1);
+        assert_ne!(l, Liveness::Gone);
+        assert!(group_alive(1));
+    }
 }
