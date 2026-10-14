@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: b1-phase2b1-snapshot-uids-r2
+version: 1/1
+commit: e0915116f54f48dceb73a878e4d8ab384497ec4d
+tree: 6e7bd9d8a173605703fa4b39840a09bb3b381d73
+parent: 89f2be793dff6665727fc9c8d23d648594b7e78b
+review: v1-2
+reviewer: manual/manual
+verdict: approved
+at: 2026-10-14T12:38:33Z
+signature: 8NvHjtspWU7MsLZ+JrIlHAVu86XdbMGcK2YcRMJKoijqXcdNoU/q0MYK7XPBqBGGMZlZUmDkfzWzmvWbEa95Bg==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
