@@ -215,6 +215,22 @@ class WorkerTest(unittest.TestCase):
         threads = json.loads((self.root / "xdg" / "codex-worker" / "threads.json").read_text())
         self.assertEqual(threads["thread"], fresh["thread"])
 
+    def test_a_partial_threads_file_does_not_stop_reviews(self):
+        state = self.root / "xdg" / "codex-worker"
+        state.mkdir(parents=True, exist_ok=True)
+        for content in ('{"thread": "abc"}', '[]', '{"tasks": null}'):
+            (state / "threads.json").write_text(content)
+            self.assertIn("tasks", worker.load_threads(state))
+        # A thread id without a task map: the review resumes it and sends everything.
+        (state / "threads.json").write_text('{"thread": "kept-thread"}')
+        self.send("t-partial", "MATERIAL-PARTIAL")
+        self.run_worker_once()
+        call = self.calls()[-1]
+        self.assertTrue(call["resume"])
+        self.assertEqual(call["thread"], "kept-thread")
+        self.assertIn("MATERIAL-PARTIAL", call["material"])
+        self.assertEqual(self.messages("t-partial")[-1]["outcome"], "done")
+
     def test_a_restarted_worker_does_not_answer_twice(self):
         self.send("t-retry", "MATERIAL")
         self.as_agent("codex")

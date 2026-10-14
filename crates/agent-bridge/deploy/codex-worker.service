@@ -3,8 +3,9 @@
 #   systemctl --user daemon-reload && systemctl --user enable --now codex-worker
 [Unit]
 Description=Codex reviewer on agent-bridge
-After=agent-bridge.service
-Wants=agent-bridge.service
+# No ordering on agent-bridge.service: that unit is ordered after default.target, so
+# "After=agent-bridge" plus "WantedBy=default.target" is a cycle and systemd drops this job
+# at boot. The worker retries every 30 s while the bridge is unreachable.
 
 [Service]
 # Windows codex.exe runs through WSL interop: keep System32 on PATH (wslpath, cmd).

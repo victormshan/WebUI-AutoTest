@@ -111,9 +111,16 @@ def for_codex(path):
 def load_threads(state_dir):
     f = state_dir / "threads.json"
     try:
-        return json.loads(f.read_text())
+        threads = json.loads(f.read_text())
     except (OSError, ValueError):
         return {"thread": None, "tasks": {}}
+    # A hand-edited or partial file must not stop reviews: missing keys mean "none yet".
+    if not isinstance(threads, dict):
+        return {"thread": None, "tasks": {}}
+    threads.setdefault("thread", None)
+    if not isinstance(threads.get("tasks"), dict):
+        threads["tasks"] = {}
+    return threads
 
 
 def save_threads(state_dir, threads):
@@ -172,7 +179,8 @@ def run_codex(task, job, full, delta, state_dir):
     current = threads.get("thread")
     thread, text = None, None
     if current:
-        material = delta if (delta is not None and threads["tasks"].get(task) == current) else full
+        reviewed_here = threads.get("tasks", {}).get(task) == current
+        material = delta if (delta is not None and reviewed_here) else full
         (workdir / "material.md").write_text(material)
         try:
             # `exec resume` does not append stdin to a prompt argument (unlike `exec`):
