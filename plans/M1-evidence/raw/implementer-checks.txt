@@ -1,0 +1,68 @@
+## 2026-10-15T02:51:31+08:00 checks run as the implementer (administrator, uid 1000) — plain identity, no sudo/root
+$ id
+uid=1000(administrator) gid=1000(administrator) groups=1000(administrator),4(adm),24(cdrom),27(sudo),30(dip),46(plugdev),100(users)
+exit=0
+$ ls /home/auditor
+ls: cannot open directory '/home/auditor': Permission denied
+exit=2
+$ ls /home/auditor/.codex
+ls: cannot open file '/home/auditor/.codex': Permission denied
+exit=2
+$ cat /etc/review-gate/env
+cat: /etc/review-gate/env: Permission denied
+exit=1
+$ ls /var/lib/reviewgate
+relay
+state
+exit=0
+$ python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner/runner.sock admin-probe hello
+connect-error: EACCES Permission denied
+exit=2
+$ ls -l /usr/local/lib/audit-runner/audit-runner /etc/systemd/system/audit-runner.socket /etc/systemd/system/audit-runner.service
+-rw-r--r-- 1 root root     799 Oct 15 02:46 /etc/systemd/system/audit-runner.service
+-rw-r--r-- 1 root root     429 Oct 15 02:46 /etc/systemd/system/audit-runner.socket
+-rwxr-xr-x 1 root root 1587248 Oct 15 02:46 /usr/local/lib/audit-runner/audit-runner
+exit=0
+$ ls -ld /usr/local/lib/audit-runner /etc/systemd/system
+drwxr-xr-x 12 root root 4096 Oct 15 02:46 /etc/systemd/system
+drwxr-xr-x  2 root root 4096 Oct 15 02:46 /usr/local/lib/audit-runner
+exit=0
+$ test -w /usr/local/lib/audit-runner/audit-runner && echo WRITABLE || echo not-writable
+not-writable
+exit=0
+$ test -w /usr/local/lib/audit-runner && echo WRITABLE || echo not-writable
+not-writable
+exit=0
+$ test -w /etc/systemd/system/audit-runner.service && echo WRITABLE || echo not-writable
+not-writable
+exit=0
+$ test -w /etc/systemd/system && echo WRITABLE || echo not-writable
+not-writable
+exit=0
+$ ls -ld /run/audit-runner /run/audit-runner/runner.sock
+ls: cannot open file '/run/audit-runner/runner.sock': Permission denied
+drwxr-x--- 2 root root 60 Oct 15 02:46 /run/audit-runner
+exit=2
+
+## 2026-10-15T02:53:42+08:00 identities and secret-file modes (metadata only, no contents read)
+$ id auditor
+uid=997(auditor) gid=985(auditor) groups=985(auditor)
+exit=0
+$ id reviewgate
+uid=999(reviewgate) gid=986(reviewgate) groups=986(reviewgate)
+exit=0
+$ getent group reviewgate
+reviewgate:x:986:
+exit=0
+$ ls -ld /etc/review-gate /etc/review-gate/client.token /etc/review-gate/env
+drwxr-xr-x 2 root root       4096 Oct  5 09:41 /etc/review-gate
+-rw-r----- 1 root reviewgate   64 Oct  5 09:41 /etc/review-gate/client.token
+-rw-r----- 1 root reviewgate  458 Oct 12 02:22 /etc/review-gate/env
+exit=0
+$ ls -ld /var/lib/reviewgate /var/lib/reviewgate/state /var/lib/reviewgate/relay
+drwxr-xr-x 5 reviewgate reviewgate 4096 Oct 14 02:30 /var/lib/reviewgate
+drwxr-xr-x 3 reviewgate reviewgate 4096 Oct  5 09:41 /var/lib/reviewgate/relay
+drwx------ 6 reviewgate reviewgate 4096 Oct  5 09:41 /var/lib/reviewgate/state
+exit=0
+
+note: /var/lib/reviewgate is 0755 by design (install.sh:38); the state dir holding keys/gate.ed25519 is 0700. The top-level listing above (relay, state) shows names only.

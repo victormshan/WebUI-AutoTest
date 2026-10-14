@@ -1,5 +1,6 @@
 # Socket for audit-runner (plans/milestone-audit-plan.md, M1). Only the review-gate service
-# (group reviewgate) can connect; the runner also checks the peer's uid and executable.
+# (group reviewgate) can connect; the runner also checks the peer's uid and that it
+# runs in review-gate.service (service-origin allowlist, by cgroup).
 [Unit]
 Description=audit-runner socket (milestone audits for review-gate)
 
@@ -8,7 +9,9 @@ ListenStream=/run/audit-runner/runner.sock
 SocketUser=auditor
 SocketGroup=reviewgate
 SocketMode=0660
-DirectoryMode=0750
+# The directory must be traversable by the gate (group reviewgate is not root);
+# access is controlled by the socket itself (auditor:reviewgate 0660).
+DirectoryMode=0755
 Accept=no
 
 [Install]

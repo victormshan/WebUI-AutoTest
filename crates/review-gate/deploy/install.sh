@@ -34,10 +34,13 @@ fi
 # 2. Binary.
 install -m 0755 -o root -g root "$BIN" /usr/local/bin/review-gate
 
-# 3. State (private) and trace dir (world-readable, only the gate writes).
+# 3. State (private) and trace dir (only the gate writes; only the implementer's group can read,
+#    so other users, such as the milestone auditor, cannot).
+IMPL_GROUP=$(id -gn "$IMPL")
 install -d -m 0755 -o reviewgate -g reviewgate /var/lib/reviewgate
 install -d -m 0700 -o reviewgate -g reviewgate /var/lib/reviewgate/state
-install -d -m 0755 -o reviewgate -g reviewgate /var/lib/reviewgate/relay /var/lib/reviewgate/relay/traces
+install -d -m 0755 -o reviewgate -g reviewgate /var/lib/reviewgate/relay
+install -d -m 0750 -o reviewgate -g "$IMPL_GROUP" /var/lib/reviewgate/relay/traces
 
 # 4. Client token: readable by the gate and the implementer, writable by neither.
 install -d -m 0755 /etc/review-gate

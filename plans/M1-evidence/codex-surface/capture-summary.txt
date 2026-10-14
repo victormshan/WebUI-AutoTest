@@ -1,0 +1,87 @@
+# Codex CLI 0.162.1 tool and context surface — local captures, 2026-10-15T04:02:28+08:00
+Linux Codex 0.162.1 installed locally (same version as the auditor's), provider redirected to a local fake Responses API (tools/capture.py, tools/scripted.py). No OpenAI quota used. Planted context in the test CODEX_HOME: AGENTS.md (PLANTED-GLOBAL-AGENTS), skills/planted-skill, config.toml with an MCP server; AGENTS.md in the parent and jobs dirs.
+
+## baseline: runner args WITHOUT NO_TOOLS, model gpt-5 (fallback metadata)  [cap-baseline]
+model: gpt-5
+tools: ['function:exec_command', 'function:write_stdin', 'function:list_mcp_resources', 'function:list_mcp_resource_templates', 'function:read_mcp_resource', 'function:request_user_input', 'function:view_image', 'namespace:multi_agent_v1[function:close_agent,function:resume_agent,function:send_input,function:spawn_agent,function:wait_agent]', 'function:get_goal', 'function:create_goal', 'function:update_goal', 'web_search:']
+marker PLANTED-GLOBAL-AGENTS: PRESENT
+marker PLANTED-PARENT-AGENTS: absent
+marker PLANTED-JOBS-AGENTS: absent
+marker PLANTED-SKILL-DESC: PRESENT
+marker PLANTED-SKILL-BODY: absent
+marker planted-skill: PRESENT
+marker planted: PRESENT
+marker mcp: PRESENT
+input items: [('developer', 'message'), ('developer', 'message'), ('user', 'message'), ('user', 'message')]
+offered: ['exec_command', 'write_stdin', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource', 'request_user_input', 'view_image', 'multi_agent_v1', 'multi_agent_v1.close_agent', 'multi_agent_v1.resume_agent', 'multi_agent_v1.send_input', 'multi_agent_v1.spawn_agent', 'multi_agent_v1.wait_agent', 'get_goal', 'create_goal', 'update_goal', 'web_search']
+
+## NO_TOOLS, model gpt-5  [cap2]
+model: gpt-5
+tools: ['function:request_user_input', 'function:view_image', 'function:get_goal', 'function:create_goal', 'function:update_goal']
+marker PLANTED-GLOBAL-AGENTS: PRESENT
+marker PLANTED-PARENT-AGENTS: absent
+marker PLANTED-JOBS-AGENTS: absent
+marker PLANTED-SKILL-DESC: PRESENT
+marker PLANTED-SKILL-BODY: absent
+marker planted-skill: PRESENT
+marker planted: PRESENT
+marker mcp: absent
+input items: [('developer', 'message'), ('developer', 'message'), ('user', 'message'), ('user', 'message')]
+offered: ['request_user_input', 'view_image', 'get_goal', 'create_goal', 'update_goal']
+
+## NO_TOOLS, default model (gpt-6.1-sol)  [c-21]
+model: gpt-6.1-sol
+tools: []
+marker PLANTED-GLOBAL-AGENTS: PRESENT
+marker PLANTED-PARENT-AGENTS: absent
+marker PLANTED-JOBS-AGENTS: absent
+marker PLANTED-SKILL-DESC: PRESENT
+marker PLANTED-SKILL-BODY: absent
+marker planted-skill: PRESENT
+marker planted: PRESENT
+marker mcp: PRESENT
+input items: [('developer', 'additional_tools'), ('developer', 'message'), ('developer', 'message'), ('developer', 'message'), ('developer', 'message'), ('user', 'message'), ('user', 'message')]
+offered: ['functions', 'functions.exec', 'functions.wait', 'functions.request_user_input', 'functions.request_user_input_async', 'clock', 'clock.sleep', 'collaboration', 'collaboration.followup_task', 'collaboration.interrupt_agent', 'collaboration.list_agents', 'collaboration.send_message', 'collaboration.spawn_agent', 'collaboration.wait_agent']
+
+## through the runner itself (clean per-job home), default model  [c-41]
+model: gpt-6.1-sol
+tools: []
+marker PLANTED-GLOBAL-AGENTS: absent
+marker PLANTED-PARENT-AGENTS: absent
+marker PLANTED-JOBS-AGENTS: absent
+marker PLANTED-SKILL-DESC: absent
+marker PLANTED-SKILL-BODY: absent
+marker planted-skill: absent
+marker planted: absent
+marker mcp: PRESENT
+input items: [('developer', 'additional_tools'), ('developer', 'message'), ('developer', 'message'), ('developer', 'message'), ('developer', 'message'), ('user', 'message'), ('user', 'message')]
+offered: ['functions', 'functions.exec', 'functions.wait', 'functions.request_user_input', 'functions.request_user_input_async', 'clock', 'clock.sleep', 'collaboration', 'collaboration.followup_task', 'collaboration.interrupt_agent', 'collaboration.list_agents', 'collaboration.send_message', 'collaboration.spawn_agent', 'collaboration.wait_agent']
+
+## scripted calls (the fake model calls the tool; NO_TOOLS unless noted)
+### c-31
+2026-10-14T19:56:58.198223Z ERROR codex_core::tools::router: error=code-mode host is disabled
+  tool output to model: custom_tool_call_output "code-mode host is disabled"
+### c-32
+  tool output to model: function_call_output "Chunk ID: 92f16f\nWall time: 0.0000 seconds\nProcess exited with code 1\nOriginal token count: 17\nOutput:\ntouch: cannot touch '/tmp/m1-exec-marker': Read-only file system\n"
+### c-33
+2026-10-14T19:57:14.613793Z ERROR codex_core::tools::router: error=unsupported call: exec_command
+  tool output to model: function_call_output "unsupported call: exec_command"
+### c-34
+2026-10-14T19:57:18.507823Z ERROR codex_core::tools::router: error=unsupported call: exec_command
+  tool output to model: function_call_output "unsupported call: exec_command"
+### c-35
+  tool output to model: function_call_output "{\"task_name\":\"/root/probe\"}"
+c-31: custom_tool_call functions.exec with tools.exec_command('touch …'), default model
+c-32: CONTROL without NO_TOOLS: function_call exec_command 'touch /tmp/m1-exec-marker' — the command RAN (touch's own error from the read-only sandbox is returned)
+c-33: same call with NO_TOOLS (gpt-5); c-34: same with NO_TOOLS, default model
+c-35: collaboration.spawn_agent; the sub-agent's own request (req03) offers:
+offered: ['functions', 'functions.exec', 'functions.wait', 'functions.request_user_input', 'clock', 'clock.sleep', 'collaboration', 'collaboration.followup_task', 'collaboration.interrupt_agent', 'collaboration.list_agents', 'collaboration.send_message', 'collaboration.spawn_agent', 'collaboration.wait_agent']
+
+Notes
+- "marker mcp: PRESENT" in c-21/c-41 comes from code mode's own tool descriptions (nested MCP-resource tools), not from the planted MCP server: the planted server name ("planted") is absent in c-41, and c-41's skill roots list only the CLI's bundled `.system` skills in the fresh run home (requests/runner-default-model.json.gz, developer message 2).
+- The model-visible context in c-41 is all CLI-built: base instructions, bundled system skills, permissions, collaboration mode, multi-agent role/mode, environment context (cwd, date), then the job input.
+- Tool surface that no config key removes for the default model: code mode `exec` (fails closed: "code-mode host is disabled", c-31), `wait`, `request_user_input`, `clock.sleep`, `collaboration.*`. A spawned sub-agent gets the same surface (c-35, req03), so it cannot execute either.
+
+Request files
+- The four captured request bodies are stored gzipped in requests/ (`gzip -9n`; `zcat` to read). Each is one JSON line of 40–53 KB, which the commit review cannot split into reviewable pieces. requests/SHA256SUMS.txt holds the sha256 of each uncompressed file.
+- Codex reviewed the deployed capture and the sub-agent request in full (codex-m1-review, message 14).

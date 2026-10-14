@@ -1,0 +1,120 @@
+===== M1 verification round 3 raw output (DSH) 2026-10-14T19:05:20.759Z =====
+##### G1. 安装（新二进制，修 fd close-on-exec） #####
+──── G1.1 stop audit-runner.service ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner.service
+exit code: 0   (145ms)
+--- stdout ---
+(空)
+--- stderr ---
+Stopping 'audit-runner.service', but its triggering units are still active:
+audit-runner.socket
+
+>>> G1.1 exit=0: PASS  — exit=0
+──── G1.2 install 二进制 ────
+$ wsl -u root -e /usr/bin/install -m 0755 -o root -g root /mnt/e/rust-agent-browser/reviews/m1-verify/audit-runner /usr/local/lib/audit-runner/audit-runner
+exit code: 0   (220ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> G1.2 exit=0: PASS  — exit=0
+──── G1.3 sha256sum 二进制 ────
+$ wsl -u root -e /usr/bin/sha256sum /usr/local/lib/audit-runner/audit-runner
+exit code: 0   (155ms)
+--- stdout ---
+77467be6db7651ec36456f93c05adc7ad55fb5bba6c0d20be4af389de0fae853  /usr/local/lib/audit-runner/audit-runner
+--- stderr ---
+(空)
+
+>>> G1.3 哈希 = 77467be6…: PASS  — 实测 77467be6db7651ec36456f93c05adc7ad55fb5bba6c0d20be4af389de0fae853
+##### G2. 新二进制仍正确拒绝（冒烟） #####
+──── G2.1 as reviewgate（单元外） ────
+$ wsl -u root -e /usr/bin/sudo -u reviewgate /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner/runner.sock g2-reviewgate hello
+exit code: 0   (249ms)
+--- stdout ---
+{
+  "job_id": "",
+  "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "status": "rejected",
+  "exit_code": null,
+  "error": "peer cgroup /non-systemd is not /system.slice/review-gate.service",
+  "answer": "",
+  "item_types": [],
+  "commands": [],
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T19:05:21.521957325Z",
+  "finished_at": "2026-10-14T19:05:21.521957325Z"
+}
+--- stderr ---
+(空)
+
+>>> G2.1 status=rejected: PASS
+>>> G2.1 原因 = "peer cgroup /non-systemd is not /system.slice/review-gate.service": PASS  — error="peer cgroup /non-systemd is not /system.slice/review-gate.service"
+──── G2.2 journalctl -u audit-runner.service -n 5 ────
+$ wsl -u root -e /usr/bin/journalctl -u audit-runner.service --no-pager -n 5
+exit code: 0   (158ms)
+--- stdout ---
+Oct 15 03:02:09 Win10-dt systemd[1]: Stopping audit-runner.service - audit-runner (milestone audits for review-gate, holds no keys)...
+Oct 15 03:02:09 Win10-dt systemd[1]: audit-runner.service: Deactivated successfully.
+Oct 15 03:02:09 Win10-dt systemd[1]: Stopped audit-runner.service - audit-runner (milestone audits for review-gate, holds no keys).
+Oct 15 03:05:21 Win10-dt systemd[1]: Started audit-runner.service - audit-runner (milestone audits for review-gate, holds no keys).
+Oct 15 03:05:21 Win10-dt audit-runner[250192]: audit-runner 0.1.0 ready
+--- stderr ---
+(空)
+
+##### G3. gate 的日志：以 auditor 身份（不许看到内容） #####
+──── G3.1 as auditor journalctl -u review-gate.service -n 3 ────
+$ wsl -u root -e /usr/bin/sudo -u auditor /usr/bin/journalctl -u review-gate.service --no-pager -n 3
+exit code: 1   (146ms)
+--- stdout --- [按任务书规则：未打印，只做分类统计]
+--- stderr ---
+Hint: You are currently not seeing messages from other users and the system.
+      Users in groups 'adm', 'systemd-journal' can see all messages.
+      Pass -q to turn off this notice.
+No journal files were opened due to insufficient permissions.
+
+--- G3.1 stdout（已确认不含 gate 日志行，可安全贴出）---
+(空)
+>>> G3.1 无 gate 日志行且给出权限提示/No entries: PASS  — exit=1
+──── G3.2 id -nG auditor ────
+$ wsl -u root -e /usr/bin/id -nG auditor
+exit code: 0   (152ms)
+--- stdout ---
+auditor
+--- stderr ---
+(空)
+
+>>> G3.2 只有 auditor（无 adm/systemd-journal）: PASS  — "auditor"
+──── G3.3 test -r relay trace 文件（只测可读，不打印） ────
+$ wsl -u root -e /usr/bin/sudo -u auditor /bin/sh -c test -r /var/lib/reviewgate/relay/traces/2026-10-05_10-02-40.gate.md && echo READABLE || echo not-readable
+exit code: 0   (145ms)
+--- stdout ---
+READABLE
+--- stderr ---
+(空)
+
+>>> G3.3 记录："READABLE"（任务书说 relay trace 目录按设计是 world-readable ⇒ READABLE 是**记录项、不是失败**）
+##### G4. 恢复 #####
+──── G4.1 stop audit-runner.service ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner.service
+exit code: 0   (141ms)
+--- stdout ---
+(空)
+--- stderr ---
+Stopping 'audit-runner.service', but its triggering units are still active:
+audit-runner.socket
+
+>>> G4.1 exit=0: PASS  — exit=0
+──── G4.2 is-active socket service ────
+$ wsl -u root -e /usr/bin/systemctl is-active audit-runner.socket audit-runner.service
+exit code: 0   (158ms)
+--- stdout ---
+active
+inactive
+--- stderr ---
+(空)
+
+>>> G4.2 active/inactive: PASS  — ["active","inactive"]
+
+========== G1–G4 全部完成 ==========

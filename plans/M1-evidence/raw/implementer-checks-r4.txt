@@ -1,0 +1,45 @@
+## 2026-10-15T03:41:14+08:00 round 4 checks as the implementer (administrator, no sudo)
+$ systemctl show -p ControlGroup -p Delegate -p DropInPaths -p FragmentPath review-gate.service
+FragmentPath=/etc/systemd/system/review-gate.service
+DropInPaths=
+ControlGroup=/system.slice/review-gate.service
+Delegate=no
+exit=0
+$ ls /etc/systemd/system/review-gate.service.d /run/systemd/system/review-gate.service.d 2>&1
+ls: cannot access '/etc/systemd/system/review-gate.service.d': No such file or directory
+ls: cannot access '/run/systemd/system/review-gate.service.d': No such file or directory
+exit=2
+$ grep -rniE 'backup|\.bak|snapshot|archive' crates/review-gate/src crates/review-gate/deploy | grep -viE '^\S+:[0-9]+:\s*//' || echo '(no matches)'
+(no matches)
+exit=0
+$ ls -ld /var/lib/reviewgate /var/lib/reviewgate/* /etc/review-gate
+drwxr-xr-x 2 root       root       4096 Oct  5 09:41 /etc/review-gate
+drwxr-xr-x 5 reviewgate reviewgate 4096 Oct 14 02:30 /var/lib/reviewgate
+drwxr-xr-x 3 reviewgate reviewgate 4096 Oct  5 09:41 /var/lib/reviewgate/relay
+drwx------ 6 reviewgate reviewgate 4096 Oct  5 09:41 /var/lib/reviewgate/state
+exit=0
+$ ls -la /var/backups | grep -i review || echo '(nothing review-gate related in /var/backups)'
+(nothing review-gate related in /var/backups)
+exit=0
+$ find / -xdev \( -path /proc -o -path /mnt -o -path /sys \) -prune -o \( -iname '*reviewgate*' -o -iname '*review-gate*' \) -print 2>/dev/null | grep -v '^/home/administrator/projects' 
+/home/administrator/.claude/auto-iterate/state/review-gate-dsh.reviews
+/home/administrator/.claude/auto-iterate/state/review-gate-webtest-docs.reviews
+/home/administrator/.claude/auto-iterate/state/review-gate-dsh.json
+/home/administrator/.claude/auto-iterate/state/review-gate-webtest-docs.json
+/home/administrator/.claude/auto-iterate/state/review-gate-a.reviews
+/home/administrator/.claude/auto-iterate/state/review-gate-a.json
+/home/administrator/.claude/projects/-home-administrator-projects-Chrome-MCP/memory/review-gate-status.md
+/home/administrator/.config/review-gate
+/var/tmp/systemd-private-b79c44ae7c8b4c4d91ad5cbfb8d922db-review-gate.service-PbJHFp
+/var/lib/reviewgate
+/usr/local/bin/review-gate
+/etc/review-gate
+/etc/systemd/system/review-gate.service
+/etc/systemd/system/multi-user.target.wants/review-gate.service
+exit=0
+
+## 2026-10-15T03:48:52+08:00 after round 4 (H3): the implementer still reads the trace dir
+$ ls -ld /var/lib/reviewgate/relay/traces
+drwxr-x--- 2 reviewgate administrator 4096 Oct  7 01:12 /var/lib/reviewgate/relay/traces
+$ test -r /var/lib/reviewgate/relay/traces/2026-10-05_10-02-40.gate.md && echo readable
+readable

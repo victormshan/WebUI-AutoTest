@@ -1,0 +1,447 @@
+===== round 5 raw output (DSH) 2026-10-14T20:04:20.531Z =====
+##### I1. 安装 #####
+──── I1.1 stop service ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner.service
+exit code: 0   (182ms)
+--- stdout ---
+(空)
+--- stderr ---
+Stopping 'audit-runner.service', but its triggering units are still active:
+audit-runner.socket
+
+>>> I1.1 exit=0: PASS  — exit=0
+──── I1.2 install 二进制 ────
+$ wsl -u root -e /usr/bin/install -m 0755 -o root -g root /mnt/e/rust-agent-browser/reviews/m1-verify/audit-runner /usr/local/lib/audit-runner/audit-runner
+exit code: 0   (152ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> I1.2 exit=0: PASS  — exit=0
+──── I1.3 install 单元 ────
+$ wsl -u root -e /usr/bin/install -m 0644 -o root -g root /mnt/e/rust-agent-browser/reviews/m1-verify/audit-runner.service /etc/systemd/system/audit-runner.service
+exit code: 0   (146ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> I1.3 exit=0: PASS  — exit=0
+──── I1.4 daemon-reload ────
+$ wsl -u root -e /usr/bin/systemctl daemon-reload
+exit code: 0   (406ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> I1.4 exit=0: PASS  — exit=0
+──── I1.5 sha256sum ────
+$ wsl -u root -e /usr/bin/sha256sum /usr/local/lib/audit-runner/audit-runner /etc/systemd/system/audit-runner.service
+exit code: 0   (146ms)
+--- stdout ---
+4336fa10f0b538df9ba63b909c8dec9123643406403531328d3001fa6c338f07  /usr/local/lib/audit-runner/audit-runner
+1419df8e186f067927b386b71e1451ba71ca6ea85762304ff6c896aa1e0747c9  /etc/systemd/system/audit-runner.service
+--- stderr ---
+(空)
+
+>>> I1.5 二进制 = 4336fa10…: PASS  — 实测 4336fa10f0b538df9ba63b909c8dec9123643406403531328d3001fa6c338f07
+>>> I1.5 单元 = 1419df8e…: PASS  — 实测 1419df8e186f067927b386b71e1451ba71ca6ea85762304ff6c896aa1e0747c9
+──── I1.6 冒烟 as reviewgate（单元外） ────
+$ wsl -u root -e /usr/bin/sudo -u reviewgate /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner/runner.sock i1-reviewgate hello
+exit code: 0   (254ms)
+--- stdout ---
+{
+  "job_id": "",
+  "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "status": "rejected",
+  "exit_code": null,
+  "error": "peer cgroup /non-systemd is not /system.slice/review-gate.service",
+  "answer": "",
+  "item_types": [],
+  "commands": [],
+  "evidence_complete": false,
+  "cleanup": "",
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T20:04:22.142656791Z",
+  "finished_at": "2026-10-14T20:04:22.142656791Z"
+}
+--- stderr ---
+(空)
+
+>>> I1.6 status=rejected: PASS
+>>> I1.6 原因 = peer cgroup /non-systemd is not /system.slice/review-gate.service: PASS  — error="peer cgroup /non-systemd is not /system.slice/review-gate.service"
+##### I2. 模型实际拿到的上下文（抓包，不耗额度） #####
+──── I2.1 起抓包服务器 ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=m1-capture /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/cap/capture.py /mnt/e/rust-agent-browser/reviews/m1-verify/i2-cap 19077
+exit code: 0   (143ms)
+--- stdout ---
+(空)
+--- stderr ---
+Running as unit: m1-capture.service; invocation ID: 2bac0846376243c5953732d79e0d6ff9
+
+>>> I2.1 exit=0: PASS  — exit=0 err="Running as unit: m1-capture.service; invocation ID: 2bac0846376243c5953732d79e0d6ff9"
+──── I2.2 起临时 runner（真 .codex + wrapper，run-home=/home/auditor/codex-run-m1cap） ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=audit-runner-m1cap -p User=auditor -p Group=auditor -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p BindPaths=/home/auditor -p PrivateTmp=yes -p UMask=0077 -p RuntimeDirectory=audit-runner-m1cap -p RuntimeDirectoryMode=0755 /usr/local/lib/audit-runner/audit-runner --socket /run/audit-runner-m1cap/runner.sock --allow-uid 999 --allow-cgroup /system.slice/m1-cap.service --codex /mnt/e/rust-agent-browser/reviews/m1-verify/cap/cap-codex.sh --codex-home /home/auditor/.codex --run-home /home/auditor/codex-run-m1cap --workdir /home/auditor/jobs-m1cap --timeout-secs 120
+exit code: 0   (176ms)
+--- stdout ---
+(空)
+--- stderr ---
+Running as unit: audit-runner-m1cap.service; invocation ID: 8c865b7c2e1346628bd51e4b691d6294
+
+>>> I2.2 exit=0: PASS  — exit=0
+──── I2.3 chmod 0666 probe sock ────
+$ wsl -u root -e /bin/chmod 0666 /run/audit-runner-m1cap/runner.sock
+exit code: 0   (164ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> I2.3 exit=0: PASS  — exit=0
+──── I2.4 从允许单元内提交 ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=m1-cap --wait --pipe --collect -p User=reviewgate -p Group=reviewgate /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner-m1cap/runner.sock i2-cap Please run the shell command id.
+exit code: 0   (2350ms)
+--- stdout ---
+{
+  "job_id": "i2-cap",
+  "input_sha256": "839d0fb078e500cfc027a95d1019707bf11495006a4f9e896f9993e686af599d",
+  "status": "completed",
+  "exit_code": 0,
+  "error": null,
+  "answer": "CAPTURED",
+  "item_types": [
+    [
+      "error",
+      1
+    ],
+    [
+      "agent_message",
+      1
+    ]
+  ],
+  "commands": [],
+  "evidence_complete": true,
+  "cleanup": "gone",
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T20:04:22.871853555Z",
+  "finished_at": "2026-10-14T20:04:24.977574781Z"
+}
+--- stderr ---
+Running as unit: m1-cap.service
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 2.217s
+             CPU time consumed: 67ms
+                   Memory peak: 4.8M (swap: 0B)
+
+>>> I2.4 记录：status=completed｜evidence_complete=true｜cleanup="gone"｜commands=[]
+>>> I2.4 status=completed: PASS  — status=completed error=null
+>>> I2.4 evidence_complete=true: PASS  — true
+>>> I2.4 cleanup="gone": PASS  — "gone"
+--- I2.4 answer ---
+CAPTURED
+──── I2.5 ls i2-cap（期望恰好一个 req01-POST_v1_responses.json） ────
+$ wsl -u root -e /bin/ls -la /mnt/e/rust-agent-browser/reviews/m1-verify/i2-cap
+exit code: 0   (143ms)
+--- stdout ---
+total 52
+drwxrwxrwx 1 administrator administrator  4096 Oct 15 04:04 .
+drwxrwxrwx 1 administrator administrator  4096 Oct 15 04:04 ..
+-rwxrwxrwx 1 administrator administrator 52702 Oct 15 04:04 req01-POST_v1_responses.json
+--- stderr ---
+(空)
+
+>>> I2.5 恰好一个 req01-POST_v1_responses.json: PASS  — 条目=["total 52","-rwxrwxrwx 1 administrator administrator 52702 Oct 15 04:04 req01-POST_v1_responses.json"]
+>>> I2.5 没有别的多余文件: **FAIL**  — 条目数=2
+
+!! STOP（预期外结果，按任务书立即停下、不修）: I2.5 没有别的多余文件 — 条目数=2
+
+========== 第 1 段停止：I2.5 没有别的多余文件 — 条目数=2 ==========
+
+===== round 5 raw output, part 2 (I2 tail + I2.8 cleanup) 2026-10-14T20:05:28.361Z =====
+##### I2.5 复核（修正解析器：忽略 `total N` 头行） #####
+──── I2.5 ls i2-cap（期望恰好一个 req01-POST_v1_responses.json） ────
+$ wsl -u root -e /bin/ls -la /mnt/e/rust-agent-browser/reviews/m1-verify/i2-cap
+exit code: 0   (136ms)
+--- stdout ---
+total 52
+drwxrwxrwx 1 administrator administrator  4096 Oct 15 04:04 .
+drwxrwxrwx 1 administrator administrator  4096 Oct 15 04:04 ..
+-rwxrwxrwx 1 administrator administrator 52702 Oct 15 04:04 req01-POST_v1_responses.json
+--- stderr ---
+(空)
+
+>>> I2.5 解析（修正后）：条目=["-rwxrwxrwx 1 administrator administrator 52702 Oct 15 04:04 req01-POST_v1_responses.json"]
+>>> I2.5 恰好一个 req01-POST_v1_responses.json: PASS  — reqs=1
+>>> I2.5 没有别的多余文件: PASS  — 条目数=1
+##### I2.6 / I2.7 #####
+──── I2.6 run-home 应已删 ────
+$ wsl -u root -e /bin/ls -la /home/auditor/codex-run-m1cap
+exit code: 2   (143ms)
+--- stdout ---
+(空)
+--- stderr ---
+ls: cannot access '/home/auditor/codex-run-m1cap': No such file or directory
+
+>>> I2.6 No such file: PASS  — exit=2 err="ls: cannot access '/home/auditor/codex-run-m1cap': No such file or directory"
+##### I2.7 作业记录里不得有 auth.json（在 rm -rf 之前做） #####
+──── I2.7 ls 作业记录 ────
+$ wsl -u root -e /bin/ls -la /home/auditor/jobs-m1cap/i2-cap
+exit code: 0   (164ms)
+--- stdout ---
+total 20
+drwx------ 2 auditor auditor 4096 Oct 15 04:04 .
+drwx------ 3 auditor auditor 4096 Oct 15 04:04 ..
+-rw------- 1 auditor auditor    8 Oct 15 04:04 answer.md
+-rw------- 1 auditor auditor  577 Oct 15 04:04 events.jsonl
+-rw------- 1 auditor auditor   32 Oct 15 04:04 input.txt
+-rw------- 1 auditor auditor    0 Oct 15 04:04 stderr.log
+--- stderr ---
+(空)
+
+>>> I2.7 无 auth.json: PASS  — 含 auth.json=false
+##### I2.8 清理（上一段因停下未执行；现在补齐） #####
+──── I2.8a stop 临时单元+抓包服务 ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner-m1cap m1-capture
+exit code: 0   (142ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> I2.8a exit=0: PASS  — exit=0
+──── I2.8b rm -rf jobs-m1cap ────
+$ wsl -u root -e /bin/rm -rf /home/auditor/jobs-m1cap
+exit code: 0   (151ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> I2.8b exit=0: PASS  — exit=0
+##### I2.9 清理后核对（不留残余） #####
+──── I2.9a is-active 临时单元 ────
+$ wsl -u root -e /usr/bin/systemctl is-active audit-runner-m1cap.service m1-capture.service
+exit code: 4   (161ms)
+--- stdout ---
+inactive
+inactive
+--- stderr ---
+(空)
+
+>>> I2.9a 两个临时单元均 inactive: PASS  — 实际=["inactive","inactive"]
+──── I2.9b jobs-m1cap 应已删 ────
+$ wsl -u root -e /bin/ls -la /home/auditor/jobs-m1cap
+exit code: 2   (131ms)
+--- stdout ---
+(空)
+--- stderr ---
+ls: cannot access '/home/auditor/jobs-m1cap': No such file or directory
+
+>>> I2.9b No such file: PASS  — exit=2
+──── I2.9c 抓包产物仍在（留给 Claude 分析） ────
+$ wsl -u root -e /bin/ls -la /mnt/e/rust-agent-browser/reviews/m1-verify/i2-cap
+exit code: 0   (153ms)
+--- stdout ---
+total 52
+drwxrwxrwx 1 administrator administrator  4096 Oct 15 04:04 .
+drwxrwxrwx 1 administrator administrator  4096 Oct 15 04:04 ..
+-rwxrwxrwx 1 administrator administrator 52702 Oct 15 04:04 req01-POST_v1_responses.json
+--- stderr ---
+(空)
+
+>>> I2.9c req01 仍在: PASS
+
+========== 第 1 段（I1+I2）全部完成 ==========
+
+===== round 5 raw output, part 3 (I3 real job + I4 restore) 2026-10-14T20:05:44.985Z =====
+##### I3. 一次真实 Codex 作业（走干净 home） #####
+──── I3.1 sha256sum auth.json（仅记哈希） ────
+$ wsl -u root -e /usr/bin/sha256sum /home/auditor/.codex/auth.json
+exit code: 0   (142ms)
+--- stdout ---
+6e4d57dd1b3d6741ecddd5bd986bb4846f1eb74230c6a54f1b50a2446ae6abc2  /home/auditor/.codex/auth.json
+--- stderr ---
+(空)
+
+>>> I3.1 拿到哈希: PASS  — before=6e4d57dd1b3d6741ecddd5bd986bb4846f1eb74230c6a54f1b50a2446ae6abc2
+──── I3.2 起临时 runner（真 codex） ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=audit-runner-m1real -p User=auditor -p Group=auditor -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p BindPaths=/home/auditor -p PrivateTmp=yes -p UMask=0077 -p RuntimeDirectory=audit-runner-m1real -p RuntimeDirectoryMode=0755 /usr/local/lib/audit-runner/audit-runner --socket /run/audit-runner-m1real/runner.sock --allow-uid 999 --allow-cgroup /system.slice/m1-real.service --codex /usr/local/lib/auditor-codex/node_modules/.bin/codex --codex-home /home/auditor/.codex --run-home /home/auditor/codex-run-m1real --workdir /home/auditor/jobs-m1real --timeout-secs 900
+exit code: 0   (155ms)
+--- stdout ---
+(空)
+--- stderr ---
+Running as unit: audit-runner-m1real.service; invocation ID: fb9aaeabdf314ec495a8b70265c31280
+
+>>> I3.2 exit=0: PASS  — exit=0 err="Running as unit: audit-runner-m1real.service; invocation ID: fb9aaeabdf314ec495a8b70265c31280"
+──── I3.3 chmod 0666 probe sock ────
+$ wsl -u root -e /bin/chmod 0666 /run/audit-runner-m1real/runner.sock
+exit code: 0   (166ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> I3.3 exit=0: PASS  — exit=0
+──── I3.4 提交真实作业（reviewgate 单元内） ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=m1-real --wait --pipe --collect -p User=reviewgate -p Group=reviewgate /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner-m1real/runner.sock i3-real Reply with exactly one line: VERDICT: APPROVE (this is a connectivity test; do not use any tool).
+exit code: 0   (6008ms)
+--- stdout ---
+{
+  "job_id": "i3-real",
+  "input_sha256": "2eb72a450efa7be77ccf06c7d559d61e3d58d4cb0393cff9e095eaf8586ee975",
+  "status": "completed",
+  "exit_code": 0,
+  "error": null,
+  "answer": "VERDICT: APPROVE",
+  "item_types": [
+    [
+      "error",
+      1
+    ],
+    [
+      "agent_message",
+      1
+    ]
+  ],
+  "commands": [],
+  "evidence_complete": true,
+  "cleanup": "gone",
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T20:05:45.842407240Z",
+  "finished_at": "2026-10-14T20:05:51.441615474Z"
+}
+--- stderr ---
+Running as unit: m1-real.service
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 5.870s
+             CPU time consumed: 63ms
+                   Memory peak: 5.1M (swap: 0B)
+
+>>> I3.4 记录：status=completed｜exit_code=0｜evidence_complete=true｜cleanup="gone"｜commands=[]｜item_types=[["error",1],["agent_message",1]]
+--- I3.4 error ---
+null
+--- I3.4 answer ---
+VERDICT: APPROVE
+>>> I3.4 status=completed: PASS  — status=completed error=null
+>>> I3.4 evidence_complete=true: PASS  — true
+>>> I3.4 cleanup="gone": PASS  — "gone"
+>>> I3.4 commands=[]: PASS  — []
+>>> I3.4 answer 含 VERDICT: APPROVE: PASS
+──── I3.5a 保存 events.jsonl ────
+$ wsl -u root -e /bin/cp /home/auditor/jobs-m1real/i3-real/events.jsonl /mnt/e/rust-agent-browser/reviews/m1-verify/i3-events.jsonl
+exit code: 0   (150ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> I3.5a exit=0: PASS  — exit=0 err=""
+──── I3.5b 保存 stderr.log ────
+$ wsl -u root -e /bin/cp /home/auditor/jobs-m1real/i3-real/stderr.log /mnt/e/rust-agent-browser/reviews/m1-verify/i3-stderr.log
+exit code: 0   (179ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> I3.5b exit=0: PASS  — exit=0 err=""
+──── I3.6a run-home 应已删 ────
+$ wsl -u root -e /bin/ls -la /home/auditor/codex-run-m1real
+exit code: 2   (165ms)
+--- stdout ---
+(空)
+--- stderr ---
+ls: cannot access '/home/auditor/codex-run-m1real': No such file or directory
+
+>>> I3.6a run home gone: PASS  — exit=2 err="ls: cannot access '/home/auditor/codex-run-m1real': No such file or directory"
+──── I3.6b 作业记录 ls（不得有 auth.json） ────
+$ wsl -u root -e /bin/ls -la /home/auditor/jobs-m1real/i3-real
+exit code: 0   (151ms)
+--- stdout ---
+total 20
+drwx------ 2 auditor auditor 4096 Oct 15 04:05 .
+drwx------ 3 auditor auditor 4096 Oct 15 04:05 ..
+-rw------- 1 auditor auditor   16 Oct 15 04:05 answer.md
+-rw------- 1 auditor auditor  589 Oct 15 04:05 events.jsonl
+-rw------- 1 auditor auditor   97 Oct 15 04:05 input.txt
+-rw------- 1 auditor auditor    0 Oct 15 04:05 stderr.log
+--- stderr ---
+(空)
+
+>>> I3.6b 无 auth.json: PASS  — 含 auth.json=false
+──── I3.7a sha256sum auth.json（仅记哈希） ────
+$ wsl -u root -e /usr/bin/sha256sum /home/auditor/.codex/auth.json
+exit code: 0   (151ms)
+--- stdout ---
+6e4d57dd1b3d6741ecddd5bd986bb4846f1eb74230c6a54f1b50a2446ae6abc2  /home/auditor/.codex/auth.json
+--- stderr ---
+(空)
+
+──── I3.7b ls -l auth.json（仅元数据） ────
+$ wsl -u root -e /bin/ls -l /home/auditor/.codex/auth.json
+exit code: 0   (146ms)
+--- stdout ---
+-rw------- 1 auditor auditor 3860 Oct 15 01:28 /home/auditor/.codex/auth.json
+--- stderr ---
+(空)
+
+>>> I3.7 记录：before=6e4d57dd1b3d6741ecddd5bd986bb4846f1eb74230c6a54f1b50a2446ae6abc2｜after=6e4d57dd1b3d6741ecddd5bd986bb4846f1eb74230c6a54f1b50a2446ae6abc2｜一致=true（刷新登录时允许不同）
+##### I3.8 清理（无论上面是否停下都执行） #####
+──── I3.8a stop audit-runner-m1real ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner-m1real
+exit code: 0   (156ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> I3.8a exit=0
+──── I3.8b rm -rf jobs-m1real ────
+$ wsl -u root -e /bin/rm -rf /home/auditor/jobs-m1real
+exit code: 0   (167ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> I3.8b exit=0
+##### I4. 恢复 #####
+──── I4.1 stop audit-runner.service ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner.service
+exit code: 0   (158ms)
+--- stdout ---
+(空)
+--- stderr ---
+Stopping 'audit-runner.service', but its triggering units are still active:
+audit-runner.socket
+
+>>> I4.1 exit=0: PASS  — exit=0
+──── I4.2 is-active 五个单元 ────
+$ wsl -u root -e /usr/bin/systemctl is-active audit-runner.socket audit-runner.service audit-runner-m1cap audit-runner-m1real m1-capture
+exit code: 0   (158ms)
+--- stdout ---
+active
+inactive
+inactive
+inactive
+inactive
+--- stderr ---
+(空)
+
+>>> I4.2 记录：["active","inactive","inactive","inactive","inactive"]
+>>> I4.2 active / inactive ×4: PASS  — 实际=["active","inactive","inactive","inactive","inactive"]
+──── I4.3 无残余目录 ────
+$ wsl -u root -e /bin/ls -la /home/auditor/jobs-m1real
+exit code: 2   (153ms)
+--- stdout ---
+(空)
+--- stderr ---
+ls: cannot access '/home/auditor/jobs-m1real': No such file or directory
+
+>>> I4.3 jobs-m1real 已删: PASS  — exit=2
+
+========== 第 2 段（I3+I4）全部完成 ==========

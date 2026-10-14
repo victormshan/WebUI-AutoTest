@@ -1,5 +1,7 @@
 # audit-runner: runs milestone audit jobs for review-gate with the auditor's Codex CLI.
-# Holds no keys. Install the binary as root-owned /usr/local/lib/audit-runner/audit-runner.
+# Holds no keys. Install the binary as root-owned /usr/local/lib/audit-runner/audit-runner, and the
+# Codex CLI as root-owned /usr/local/lib/auditor-codex (npm --prefix), so auditor cannot replace
+# either; auditor keeps only its Codex login (/home/auditor/.codex) and the job records.
 [Unit]
 Description=audit-runner (milestone audits for review-gate, holds no keys)
 Requires=audit-runner.socket
@@ -9,9 +11,11 @@ User=auditor
 Group=auditor
 ExecStart=/usr/local/lib/audit-runner/audit-runner \
   --allow-uid 999 \
-  --allow-exe /usr/local/bin/review-gate \
-  --codex /home/auditor/.local/node_modules/.bin/codex \
+  --allow-cgroup /system.slice/review-gate.service \
+  --codex /usr/local/lib/auditor-codex/node_modules/.bin/codex \
   --codex-home /home/auditor/.codex \
+  --run-home /home/auditor/codex-run \
+  --own-cgroup \
   --workdir /home/auditor/jobs
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -20,6 +24,9 @@ ProtectHome=tmpfs
 BindPaths=/home/auditor
 PrivateTmp=yes
 UMask=0077
+# When the runner stops (it exits after a job whose cleanup it could not confirm), systemd
+# kills every process left in the service's cgroup. This is systemd's default, made explicit.
+KillMode=control-group
 
 [Install]
 WantedBy=multi-user.target

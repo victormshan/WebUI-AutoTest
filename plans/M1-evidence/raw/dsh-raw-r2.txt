@@ -1,0 +1,270 @@
+===== M1 verification round 2 raw output (DSH) 2026-10-14T19:02:05.490Z =====
+##### F1. 安装修好的二进制与单元 #####
+──── F1.1 stop audit-runner.service ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner.service
+exit code: 0   (133ms)
+--- stdout ---
+(空)
+--- stderr ---
+Stopping 'audit-runner.service', but its triggering units are still active:
+audit-runner.socket
+
+>>> F1.1 exit=0: PASS  — exit=0
+──── F1.2 install 二进制 ────
+$ wsl -u root -e /usr/bin/install -m 0755 -o root -g root /mnt/e/rust-agent-browser/reviews/m1-verify/audit-runner /usr/local/lib/audit-runner/audit-runner
+exit code: 0   (456ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> F1.2 exit=0: PASS  — exit=0
+──── F1.3 install service 单元 ────
+$ wsl -u root -e /usr/bin/install -m 0644 -o root -g root /mnt/e/rust-agent-browser/reviews/m1-verify/audit-runner.service /etc/systemd/system/audit-runner.service
+exit code: 0   (169ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> F1.3 exit=0: PASS  — exit=0
+──── F1.4 daemon-reload ────
+$ wsl -u root -e /usr/bin/systemctl daemon-reload
+exit code: 0   (413ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> F1.4 exit=0: PASS  — exit=0
+──── F1.5 sha256sum 二进制与单元 ────
+$ wsl -u root -e /usr/bin/sha256sum /usr/local/lib/audit-runner/audit-runner /etc/systemd/system/audit-runner.service
+exit code: 0   (159ms)
+--- stdout ---
+b5ef7e50b5860da6cc79db2ef6117333eb0a55bfaeb6fd13624ab767f48283aa  /usr/local/lib/audit-runner/audit-runner
+c25599c4ad58cef6546a889ed1a23c24f25f0fe0a52fd47cfe6e4d986b4c2d15  /etc/systemd/system/audit-runner.service
+--- stderr ---
+(空)
+
+>>> F1.5 二进制哈希 = b5ef7e50…: PASS  — 实测 b5ef7e50b5860da6cc79db2ef6117333eb0a55bfaeb6fd13624ab767f48283aa
+>>> F1.5 单元哈希 = c25599c4…: PASS  — 实测 c25599c4ad58cef6546a889ed1a23c24f25f0fe0a52fd47cfe6e4d986b4c2d15
+──── F1.6 is-active socket service ────
+$ wsl -u root -e /usr/bin/systemctl is-active audit-runner.socket audit-runner.service
+exit code: 0   (160ms)
+--- stdout ---
+active
+inactive
+--- stderr ---
+(空)
+
+>>> F1.6 active/inactive: PASS  — ["active","inactive"]
+##### F2. 真实 runner 上的冒名者（这次原因必须对得上） #####
+──── F2.1 as auditor ────
+$ wsl -u root -e /usr/bin/sudo -u auditor /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner/runner.sock f2-auditor hello
+exit code: 0   (245ms)
+--- stdout ---
+{
+  "job_id": "",
+  "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "status": "rejected",
+  "exit_code": null,
+  "error": "peer uid 997 is not allowed",
+  "answer": "",
+  "item_types": [],
+  "commands": [],
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T19:02:07.226657709Z",
+  "finished_at": "2026-10-14T19:02:07.226657709Z"
+}
+--- stderr ---
+(空)
+
+>>> F2.1 status=rejected: PASS
+>>> F2.1 原因 = "peer uid 997 is not allowed": PASS  — "peer uid 997 is not allowed"
+──── F2.2 as reviewgate（不在 gate 单元内） ────
+$ wsl -u root -e /usr/bin/sudo -u reviewgate /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner/runner.sock f2-reviewgate hello
+exit code: 0   (199ms)
+--- stdout ---
+{
+  "job_id": "",
+  "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "status": "rejected",
+  "exit_code": null,
+  "error": "peer cgroup /non-systemd is not /system.slice/review-gate.service",
+  "answer": "",
+  "item_types": [],
+  "commands": [],
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T19:02:07.426304926Z",
+  "finished_at": "2026-10-14T19:02:07.426304926Z"
+}
+--- stderr ---
+(空)
+
+>>> F2.2 status=rejected: PASS
+>>> F2.2 原因形如 peer cgroup … is not /system.slice/review-gate.service: PASS  — error="peer cgroup /non-systemd is not /system.slice/review-gate.service"
+>>> F2.2 明确**不是** "cannot read peer cgroup": PASS  — error="peer cgroup /non-systemd is not /system.slice/review-gate.service"
+──── F2.3 ls -la /home/auditor/jobs ────
+$ wsl -u root -e /bin/ls -la /home/auditor/jobs
+exit code: 0   (150ms)
+--- stdout ---
+total 8
+drwx------ 2 auditor auditor 4096 Oct 15 02:57 .
+drwx------ 6 auditor auditor 4096 Oct 15 02:57 ..
+--- stderr ---
+(空)
+
+>>> F2.3 无 f2-* 作业目录: PASS
+──── F2.4 journalctl -u audit-runner.service -n 10 ────
+$ wsl -u root -e /usr/bin/journalctl -u audit-runner.service --no-pager -n 10
+exit code: 0   (132ms)
+--- stdout ---
+Oct 15 02:57:07 Win10-dt systemd[1]: Started audit-runner.service - audit-runner (milestone audits for review-gate, holds no keys).
+Oct 15 02:57:07 Win10-dt audit-runner[241682]: audit-runner 0.1.0 ready
+Oct 15 03:02:05 Win10-dt systemd[1]: Stopping audit-runner.service - audit-runner (milestone audits for review-gate, holds no keys)...
+Oct 15 03:02:05 Win10-dt systemd[1]: audit-runner.service: Deactivated successfully.
+Oct 15 03:02:05 Win10-dt systemd[1]: Stopped audit-runner.service - audit-runner (milestone audits for review-gate, holds no keys).
+Oct 15 03:02:07 Win10-dt systemd[1]: Started audit-runner.service - audit-runner (milestone audits for review-gate, holds no keys).
+Oct 15 03:02:07 Win10-dt audit-runner[244760]: audit-runner 0.1.0 ready
+--- stderr ---
+(空)
+
+##### F3. 正向路径：允许单元内的进程被接受（不耗额度，codex=/usr/bin/true） #####
+──── F3.1 起临时 runner（允许 cgroup /system.slice/m1-pos.service） ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=audit-runner-m1pos -p User=auditor -p Group=auditor -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p BindPaths=/home/auditor -p PrivateTmp=yes -p UMask=0077 -p RuntimeDirectory=audit-runner-m1pos -p RuntimeDirectoryMode=0755 /usr/local/lib/audit-runner/audit-runner --socket /run/audit-runner-m1pos/runner.sock --allow-uid 999 --allow-cgroup /system.slice/m1-pos.service --codex /usr/bin/true --codex-home /home/auditor/.codex --workdir /home/auditor/jobs-m1pos --timeout-secs 60
+exit code: 0   (152ms)
+--- stdout ---
+(空)
+--- stderr ---
+Running as unit: audit-runner-m1pos.service; invocation ID: 0320a93f20394fa0a9bc67c7ac72347f
+
+>>> F3.1 exit=0: PASS  — exit=0
+──── F3.2 chmod 0666 probe sock ────
+$ wsl -u root -e /bin/chmod 0666 /run/audit-runner-m1pos/runner.sock
+exit code: 0   (150ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> F3.2 exit=0: PASS  — exit=0 err=""
+──── F3.3 允许单元内提交（应被接受 ⇒ failed + no answer） ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=m1-pos --wait --pipe --collect -p User=reviewgate -p Group=reviewgate /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner-m1pos/runner.sock f3-inside hello
+exit code: 0   (230ms)
+--- stdout ---
+{
+  "job_id": "f3-inside",
+  "input_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+  "status": "failed",
+  "exit_code": 0,
+  "error": "codex wrote no answer",
+  "answer": "",
+  "item_types": [],
+  "commands": [],
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T19:02:08.241047095Z",
+  "finished_at": "2026-10-14T19:02:08.242652575Z"
+}
+--- stderr ---
+Running as unit: m1-pos.service
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 112ms
+             CPU time consumed: 48ms
+                   Memory peak: 4.8M (swap: 0B)
+
+>>> F3.3 status=failed（= 被接受，不是 rejected）: PASS  — "failed"
+>>> F3.3 错误含 "no answer": PASS  — error="codex wrote no answer"
+──── F3.4 同 uid 但在单元外（应被拒，cgroup 原因） ────
+$ wsl -u root -e /usr/bin/sudo -u reviewgate /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner-m1pos/runner.sock f3-outside hello
+exit code: 0   (213ms)
+--- stdout ---
+{
+  "job_id": "",
+  "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "status": "rejected",
+  "exit_code": null,
+  "error": "peer cgroup /non-systemd is not /system.slice/m1-pos.service",
+  "answer": "",
+  "item_types": [],
+  "commands": [],
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T19:02:08.461355755Z",
+  "finished_at": "2026-10-14T19:02:08.461355755Z"
+}
+--- stderr ---
+(空)
+
+>>> F3.4 status=rejected: PASS
+>>> F3.4 原因形如 peer cgroup … is not /system.slice/m1-pos.service: PASS  — error="peer cgroup /non-systemd is not /system.slice/m1-pos.service"
+──── F3.5 ls -la 作业目录 ────
+$ wsl -u root -e /bin/ls -la /home/auditor/jobs-m1pos
+exit code: 0   (148ms)
+--- stdout ---
+total 12
+drwx------ 3 auditor auditor 4096 Oct 15 03:02 .
+drwx------ 7 auditor auditor 4096 Oct 15 03:02 ..
+drwx------ 2 auditor auditor 4096 Oct 15 03:02 f3-inside
+--- stderr ---
+(空)
+
+>>> F3.5 f3-inside 存在: PASS
+>>> F3.5 f3-outside 不存在: PASS
+──── F3.5b 留存 f3-inside/events.jsonl（清理前，按你 verdict 交代） ────
+$ wsl -u root -e /bin/cat /home/auditor/jobs-m1pos/f3-inside/events.jsonl
+exit code: 0   (157ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+──── F3.5c 留存 f3-inside/answer.md ────
+$ wsl -u root -e /bin/cat /home/auditor/jobs-m1pos/f3-inside/answer.md
+exit code: 1   (136ms)
+--- stdout ---
+(空)
+--- stderr ---
+cat: /home/auditor/jobs-m1pos/f3-inside/answer.md: No such file or directory
+
+──── F3.6a stop 临时单元 ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner-m1pos
+exit code: 0   (139ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> F3.6a exit=0: PASS  — exit=0
+──── F3.6b rm -rf jobs-m1pos ────
+$ wsl -u root -e /bin/rm -rf /home/auditor/jobs-m1pos
+exit code: 0   (161ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> F3.6b exit=0: PASS  — exit=0
+##### F4. 恢复 #####
+──── F4.1 stop audit-runner.service ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner.service
+exit code: 0   (139ms)
+--- stdout ---
+(空)
+--- stderr ---
+Stopping 'audit-runner.service', but its triggering units are still active:
+audit-runner.socket
+
+>>> F4.1 exit=0: PASS  — exit=0
+──── F4.2 is-active socket service m1pos ────
+$ wsl -u root -e /usr/bin/systemctl is-active audit-runner.socket audit-runner.service audit-runner-m1pos
+exit code: 0   (144ms)
+--- stdout ---
+active
+inactive
+inactive
+--- stderr ---
+(空)
+
+>>> F4.2 active/inactive/inactive: PASS  — ["active","inactive","inactive"]
+
+========== F1–F4 全部完成 ==========

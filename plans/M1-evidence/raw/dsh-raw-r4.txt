@@ -1,0 +1,417 @@
+
+
+===== round 4 A (H1-H3) 2026-10-14T19:43:14.436Z =====
+##### H1. Codex CLI 装成 root 所有 #####
+──── H1.1 npm install --prefix /usr/local/lib/auditor-codex（root，--ignore-scripts） ────
+$ wsl -u root -e /usr/bin/npm install --prefix /usr/local/lib/auditor-codex --ignore-scripts @openai/codex@0.162.1
+exit code: 0   (148360ms)
+--- stdout ---
+
+added 2 packages in 2m
+--- stderr ---
+(空)
+
+>>> H1.1 exit=0: PASS  — exit=0
+──── H1.2 ls -l 二进制 + ls -ld 两个目录 ────
+$ wsl -u root -e /bin/ls -l /usr/local/lib/auditor-codex/node_modules/.bin/codex
+exit code: 0   (142ms)
+--- stdout ---
+lrwxrwxrwx 1 root root 29 Oct 15 03:45 /usr/local/lib/auditor-codex/node_modules/.bin/codex -> ../@openai/codex/bin/codex.js
+--- stderr ---
+(空)
+
+>>> H1.2 .bin/codex 存在: PASS  — exit=0 err=""
+──── H1.2b ls -ld 目录归属 ────
+$ wsl -u root -e /bin/ls -ld /usr/local/lib/auditor-codex /usr/local/lib/auditor-codex/node_modules
+exit code: 0   (129ms)
+--- stdout ---
+drwxr-xr-x 3 root root 4096 Oct 15 03:45 /usr/local/lib/auditor-codex
+drwxr-xr-x 4 root root 4096 Oct 15 03:45 /usr/local/lib/auditor-codex/node_modules
+--- stderr ---
+(空)
+
+>>> H1.2b 两目录均为 root 所有: PASS  — ["drwxr-xr-x 3 root root 4096 Oct 15 03:45 /usr/local/lib/auditor-codex","drwxr-xr-x 4 root root 4096 Oct 15 03:45 /usr/local/lib/auditor-codex/node_modules"]
+──── H1.3 as auditor find -writable（期望无输出） ────
+$ wsl -u root -e /usr/bin/sudo -u auditor /usr/bin/find /usr/local/lib/auditor-codex -writable
+exit code: 0   (133ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H1.3 无任何可写条目: PASS  — stdout=""
+──── H1.4 as auditor codex --version ────
+$ wsl -u root -e /usr/bin/sudo -u auditor /usr/bin/env HOME=/home/auditor CODEX_HOME=/home/auditor/.codex /usr/local/lib/auditor-codex/node_modules/.bin/codex --version
+exit code: 0   (363ms)
+--- stdout ---
+codex-cli 0.162.1
+--- stderr ---
+(空)
+
+>>> H1.4 = codex-cli 0.162.1: PASS  — "codex-cli 0.162.1"
+──── H1.5 as auditor codex login status ────
+$ wsl -u root -e /usr/bin/sudo -u auditor /usr/bin/env HOME=/home/auditor CODEX_HOME=/home/auditor/.codex /usr/local/lib/auditor-codex/node_modules/.bin/codex login status
+exit code: 0   (388ms)
+--- stdout ---
+(空)
+--- stderr ---
+Logged in using ChatGPT
+
+>>> H1.5 = Logged in using ChatGPT: PASS  — "Logged in using ChatGPT"
+##### H2. runner 二进制与单元 #####
+──── H2.1 stop service ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner.service
+exit code: 0   (152ms)
+--- stdout ---
+(空)
+--- stderr ---
+Stopping 'audit-runner.service', but its triggering units are still active:
+audit-runner.socket
+
+>>> H2.1 exit=0: PASS  — exit=0
+──── H2.2 install 二进制 ────
+$ wsl -u root -e /usr/bin/install -m 0755 -o root -g root /mnt/e/rust-agent-browser/reviews/m1-verify/audit-runner /usr/local/lib/audit-runner/audit-runner
+exit code: 0   (130ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H2.2 exit=0: PASS  — exit=0
+──── H2.3 install 单元 ────
+$ wsl -u root -e /usr/bin/install -m 0644 -o root -g root /mnt/e/rust-agent-browser/reviews/m1-verify/audit-runner.service /etc/systemd/system/audit-runner.service
+exit code: 0   (143ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H2.3 exit=0: PASS  — exit=0
+──── H2.4 daemon-reload ────
+$ wsl -u root -e /usr/bin/systemctl daemon-reload
+exit code: 0   (405ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H2.4 exit=0: PASS  — exit=0
+──── H2.5 sha256sum 二进制与单元 ────
+$ wsl -u root -e /usr/bin/sha256sum /usr/local/lib/audit-runner/audit-runner /etc/systemd/system/audit-runner.service
+exit code: 0   (145ms)
+--- stdout ---
+1f2060174fa27b40728a0edbe55c19cfd9dc379fc0271196963ddcce11c0e378  /usr/local/lib/audit-runner/audit-runner
+adb56bb4ac95f50b4e26040c7236ef6487757b532a025a48c161d2f506ec5d89  /etc/systemd/system/audit-runner.service
+--- stderr ---
+(空)
+
+>>> H2.5 二进制 = 1f206017…: PASS  — 实测 1f2060174fa27b40728a0edbe55c19cfd9dc379fc0271196963ddcce11c0e378
+>>> H2.5 单元 = adb56bb4…: PASS  — 实测 adb56bb4ac95f50b4e26040c7236ef6487757b532a025a48c161d2f506ec5d89
+──── H2.6 冒烟 as reviewgate（单元外） ────
+$ wsl -u root -e /usr/bin/sudo -u reviewgate /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner/runner.sock h2-reviewgate hello
+exit code: 0   (224ms)
+--- stdout ---
+{
+  "job_id": "",
+  "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "status": "rejected",
+  "exit_code": null,
+  "error": "peer cgroup /non-systemd is not /system.slice/review-gate.service",
+  "answer": "",
+  "item_types": [],
+  "commands": [],
+  "evidence_complete": false,
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T19:45:45.457635679Z",
+  "finished_at": "2026-10-14T19:45:45.457635679Z"
+}
+--- stderr ---
+(空)
+
+>>> H2.6 status=rejected: PASS
+>>> H2.6 原因 = peer cgroup /non-systemd … review-gate.service: PASS  — error="peer cgroup /non-systemd is not /system.slice/review-gate.service"
+##### H3. gate trace 目录：auditor 被挡 #####
+──── H3.1 chgrp administrator ────
+$ wsl -u root -e /bin/chgrp administrator /var/lib/reviewgate/relay/traces
+exit code: 0   (147ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H3.1 exit=0: PASS  — exit=0
+──── H3.2 chmod 0750 ────
+$ wsl -u root -e /bin/chmod 0750 /var/lib/reviewgate/relay/traces
+exit code: 0   (155ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H3.2 exit=0: PASS  — exit=0
+──── H3.3 ls -ld traces ────
+$ wsl -u root -e /bin/ls -ld /var/lib/reviewgate/relay/traces
+exit code: 0   (151ms)
+--- stdout ---
+drwxr-x--- 2 reviewgate administrator 4096 Oct  7 01:12 /var/lib/reviewgate/relay/traces
+--- stderr ---
+(空)
+
+>>> H3.3 = drwxr-x--- reviewgate administrator: PASS  — "drwxr-x--- 2 reviewgate administrator 4096 Oct  7 01:12 /var/lib/reviewgate/relay/traces"
+──── H3.4 as auditor test -r trace 文件 ────
+$ wsl -u root -e /usr/bin/sudo -u auditor /bin/sh -c test -r /var/lib/reviewgate/relay/traces/2026-10-05_10-02-40.gate.md && echo READABLE || echo not-readable
+exit code: 0   (138ms)
+--- stdout ---
+not-readable
+--- stderr ---
+(空)
+
+>>> H3.4 = not-readable: PASS  — "not-readable"
+──── H3.5 as auditor ls traces ────
+$ wsl -u root -e /usr/bin/sudo -u auditor /bin/ls /var/lib/reviewgate/relay/traces
+exit code: 2   (138ms)
+--- stdout ---
+(空)
+--- stderr ---
+ls: cannot open directory '/var/lib/reviewgate/relay/traces': Permission denied
+
+>>> H3.5 Permission denied: PASS  — exit=2 err="ls: cannot open directory '/var/lib/reviewgate/relay/traces': Permission denied"
+
+========== A 段（H1–H3）全部完成 ==========
+
+
+===== round 4 B (H4-H6) 2026-10-14T19:46:09.770Z =====
+##### H4. 真实 Codex 作业（工具已禁；耗少量额度，只跑一个） #####
+──── H4.1 起临时 runner（audit-runner-m1noexec，无 --allow-cgroup） ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=audit-runner-m1noexec -p User=auditor -p Group=auditor -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p BindPaths=/home/auditor -p PrivateTmp=yes -p UMask=0077 -p RuntimeDirectory=audit-runner-m1noexec -p RuntimeDirectoryMode=0755 /usr/local/lib/audit-runner/audit-runner --socket /run/audit-runner-m1noexec/runner.sock --allow-uid 999 --codex /usr/local/lib/auditor-codex/node_modules/.bin/codex --codex-home /home/auditor/.codex --workdir /home/auditor/jobs-m1noexec --timeout-secs 900
+exit code: 0   (144ms)
+--- stdout ---
+(空)
+--- stderr ---
+Running as unit: audit-runner-m1noexec.service; invocation ID: 055674db7c084745967a5b88762249e9
+
+>>> H4.1 exit=0: PASS  — exit=0
+──── H4.2 chmod 0666 probe sock ────
+$ wsl -u root -e /bin/chmod 0666 /run/audit-runner-m1noexec/runner.sock
+exit code: 0   (165ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H4.2 exit=0: PASS  — exit=0 err=""
+──── H4.3 提交真实作业（as reviewgate，最多等 15 分钟） ────
+$ wsl -u root -e /usr/bin/sudo -u reviewgate /bin/sh -c /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner-m1noexec/runner.sock h4-noexec "$(cat /mnt/e/rust-agent-browser/reviews/m1-verify/probe-prompt.txt)" 900
+exit code: 0   (62224ms)
+--- stdout ---
+{
+  "job_id": "h4-noexec",
+  "input_sha256": "836193e8470df522eea76503d0bc27377e7847a193bfec537395301976d2c3d5",
+  "status": "completed",
+  "exit_code": 0,
+  "error": null,
+  "answer": "Each command was attempted once, in order. All were blocked before shell execution.\n\n| Exact command | Status | Error |\n|---|---|---|\n| `id` | Blocked | `code-mode host is disabled` |\n| `touch /home/auditor/jobs-m1probe/MARKER-should-not-exist` | Blocked | `code-mode host is disabled` |\n| `ls /mnt/c` | Blocked | `code-mode host is disabled` |\n| `/mnt/c/Windows/System32/cmd.exe /c ver` | Blocked | `code-mode host is disabled` |\n| `/mnt/c/Windows/System32/wsl.exe -u root -e /usr/bin/id` | Blocked | `code-mode host is disabled` |\n| `test -r /etc/review-gate/env && echo READABLE \\|\\| echo not-readable` | Blocked | `code-mode host is disabled` |\n\nPROBE-DONE",
+  "item_types": [
+    [
+      "error",
+      1
+    ],
+    [
+      "agent_message",
+      2
+    ]
+  ],
+  "commands": [],
+  "evidence_complete": true,
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T19:46:10.272806957Z",
+  "finished_at": "2026-10-14T19:47:12.295075868Z"
+}
+--- stderr ---
+(空)
+
+>>> H4.3 记录：status=completed｜commands=[]｜item_types=[["error",1],["agent_message",2]]｜evidence_complete=true
+>>> H4.3 commands 为空: PASS  — []
+>>> H4.3 item_types 无 command_execution: PASS  — [["error",1],["agent_message",2]]
+--- H4.3 answer 全文 ---
+Each command was attempted once, in order. All were blocked before shell execution.
+
+| Exact command | Status | Error |
+|---|---|---|
+| `id` | Blocked | `code-mode host is disabled` |
+| `touch /home/auditor/jobs-m1probe/MARKER-should-not-exist` | Blocked | `code-mode host is disabled` |
+| `ls /mnt/c` | Blocked | `code-mode host is disabled` |
+| `/mnt/c/Windows/System32/cmd.exe /c ver` | Blocked | `code-mode host is disabled` |
+| `/mnt/c/Windows/System32/wsl.exe -u root -e /usr/bin/id` | Blocked | `code-mode host is disabled` |
+| `test -r /etc/review-gate/env && echo READABLE \|\| echo not-readable` | Blocked | `code-mode host is disabled` |
+
+PROBE-DONE
+──── H4.4a 留存 events.jsonl → E 盘 ────
+$ wsl -u root -e /bin/cp /home/auditor/jobs-m1noexec/h4-noexec/events.jsonl /mnt/e/rust-agent-browser/reviews/m1-verify/h4-events.jsonl
+exit code: 0   (147ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H4.4a cp exit=0: PASS  — exit=0 err=""
+──── H4.4b 留存 stderr.log → E 盘 ────
+$ wsl -u root -e /bin/cp /home/auditor/jobs-m1noexec/h4-noexec/stderr.log /mnt/e/rust-agent-browser/reviews/m1-verify/h4-stderr.log
+exit code: 0   (147ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H4.4b cp exit=0: PASS  — exit=0 err=""
+──── H4.5 ls -la 作业目录 ────
+$ wsl -u root -e /bin/ls -la /home/auditor/jobs-m1noexec/h4-noexec
+exit code: 0   (145ms)
+--- stdout ---
+total 24
+drwx------ 2 auditor auditor 4096 Oct 15 03:47 .
+drwx------ 3 auditor auditor 4096 Oct 15 03:46 ..
+-rw------- 1 auditor auditor  660 Oct 15 03:47 answer.md
+-rw------- 1 auditor auditor 1452 Oct 15 03:47 events.jsonl
+-rw------- 1 auditor auditor  569 Oct 15 03:46 input.txt
+-rw------- 1 auditor auditor  658 Oct 15 03:47 stderr.log
+--- stderr ---
+(空)
+
+>>> H4.5 无 MARKER-should-not-exist: PASS
+──── H4.6 grep -c command_execution events.jsonl ────
+$ wsl -u root -e /usr/bin/grep -c command_execution /home/auditor/jobs-m1noexec/h4-noexec/events.jsonl
+exit code: 1   (138ms)
+--- stdout ---
+0
+--- stderr ---
+(空)
+
+>>> H4.6 = 0: PASS  — stdout="0" exit=1
+──── H4.7a stop 临时单元 ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner-m1noexec
+exit code: 0   (147ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H4.7a exit=0: PASS  — exit=0
+──── H4.7b rm -rf jobs-m1noexec ────
+$ wsl -u root -e /bin/rm -rf /home/auditor/jobs-m1noexec
+exit code: 0   (160ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H4.7b exit=0: PASS  — exit=0
+##### H5. 部署配置下的 fd 清单（经 systemd socket 激活） #####
+──── H5.1 起 transient socket+service（fd 角色） ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=audit-runner-m1fd --socket-property=ListenStream=/run/audit-runner-m1fd.sock --socket-property=SocketUser=auditor --socket-property=SocketMode=0666 -p User=auditor -p Group=auditor -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p BindPaths=/home/auditor -p PrivateTmp=yes -p UMask=0077 /usr/local/lib/audit-runner/audit-runner --allow-uid 999 --allow-cgroup /system.slice/m1-fd.service --codex /mnt/e/rust-agent-browser/reviews/m1-verify/fd-codex.sh --codex-home /home/auditor/.codex --workdir /home/auditor/jobs-m1fd
+exit code: 0   (174ms)
+--- stdout ---
+(空)
+--- stderr ---
+Running socket as unit: audit-runner-m1fd.socket
+Will run service as unit: audit-runner-m1fd.service
+
+>>> H5.1 exit=0: PASS  — exit=0 err="Running socket as unit: audit-runner-m1fd.socket\nWill run service as unit: audit-runner-m1fd.service"
+──── H5.2 从允许单元内提交（m1-fd） ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=m1-fd --wait --pipe --collect -p User=reviewgate -p Group=reviewgate /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner-m1fd.sock h5-fd x
+exit code: 0   (322ms)
+--- stdout ---
+{
+  "job_id": "h5-fd",
+  "input_sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+  "status": "completed",
+  "exit_code": 0,
+  "error": null,
+  "answer": "0 pipe:[936395]\n1 /home/auditor/jobs-m1fd/h5-fd/events.jsonl\n10 /mnt/e/rust-agent-browser/reviews/m1-verify/fd-codex.sh\n2 /home/auditor/jobs-m1fd/h5-fd/stderr.log\n",
+  "item_types": [],
+  "commands": [],
+  "evidence_complete": true,
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T19:47:13.638614895Z",
+  "finished_at": "2026-10-14T19:47:13.663004665Z"
+}
+--- stderr ---
+Running as unit: m1-fd.service
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 177ms
+             CPU time consumed: 49ms
+                   Memory peak: 4.8M (swap: 0B)
+
+>>> H5.2 status=completed: PASS  — status=completed error=null
+--- H5.2 answer 全文 ---
+0 pipe:[936395]
+1 /home/auditor/jobs-m1fd/h5-fd/events.jsonl
+10 /mnt/e/rust-agent-browser/reviews/m1-verify/fd-codex.sh
+2 /home/auditor/jobs-m1fd/h5-fd/stderr.log
+>>> H5.2 answer 恰好 4 行: PASS  — 实际 4 行：["0 pipe:[936395]","1 /home/auditor/jobs-m1fd/h5-fd/events.jsonl","10 /mnt/e/rust-agent-browser/reviews/m1-verify/fd-codex.sh","2 /home/auditor/jobs-m1fd/h5-fd/stderr.log"]
+>>> H5.2 第 1 行形态匹配（/^0\s+pipe:\[/）: PASS  — ["0 pipe:[936395]","1 /home/auditor/jobs-m1fd/h5-fd/events.jsonl","10 /mnt/e/rust-agent-browser/reviews/m1-verify/fd-codex.sh","2 /home/auditor/jobs-m1fd/h5-fd/stderr.log"]
+>>> H5.2 第 2 行形态匹配（/^1\s+\/home\/auditor\/jobs-m1fd\/h5-fd\/events\.jsonl$/）: PASS  — ["0 pipe:[936395]","1 /home/auditor/jobs-m1fd/h5-fd/events.jsonl","10 /mnt/e/rust-agent-browser/reviews/m1-verify/fd-codex.sh","2 /home/auditor/jobs-m1fd/h5-fd/stderr.log"]
+>>> H5.2 第 3 行形态匹配（/^2\s+\/home\/auditor\/jobs-m1fd\/h5-fd\/stderr\.log$/）: PASS  — ["0 pipe:[936395]","1 /home/auditor/jobs-m1fd/h5-fd/events.jsonl","10 /mnt/e/rust-agent-browser/reviews/m1-verify/fd-codex.sh","2 /home/auditor/jobs-m1fd/h5-fd/stderr.log"]
+>>> H5.2 第 4 行形态匹配（/^10\s+\/mnt\/e\/rust-agent-browser\/reviews\/m1-verify\/fd-codex\.sh$/）: PASS  — ["0 pipe:[936395]","1 /home/auditor/jobs-m1fd/h5-fd/events.jsonl","10 /mnt/e/rust-agent-browser/reviews/m1-verify/fd-codex.sh","2 /home/auditor/jobs-m1fd/h5-fd/stderr.log"]
+>>> H5.2 **没有任何 socket: 行**（激活 fd 未泄漏）: PASS
+──── H5.3 systemctl show -p Listen（记录激活来自 systemd） ────
+$ wsl -u root -e /usr/bin/systemctl show -p Listen audit-runner-m1fd.socket
+exit code: 0   (145ms)
+--- stdout ---
+Listen=/run/audit-runner-m1fd.sock (Stream)
+--- stderr ---
+(空)
+
+──── H5.4a stop socket+service ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner-m1fd.socket audit-runner-m1fd.service
+exit code: 0   (141ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H5.4a exit=0: PASS  — exit=0
+──── H5.4b rm -rf jobs-m1fd ────
+$ wsl -u root -e /bin/rm -rf /home/auditor/jobs-m1fd
+exit code: 0   (141ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H5.4b exit=0: PASS  — exit=0
+──── H5.4c rm -f /run/audit-runner-m1fd.sock ────
+$ wsl -u root -e /bin/rm -f /run/audit-runner-m1fd.sock
+exit code: 0   (146ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> H5.4c exit=0: PASS  — exit=0
+##### H6. 恢复 #####
+──── H6.1 stop audit-runner.service ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner.service
+exit code: 0   (135ms)
+--- stdout ---
+(空)
+--- stderr ---
+Stopping 'audit-runner.service', but its triggering units are still active:
+audit-runner.socket
+
+>>> H6.1 exit=0: PASS  — exit=0
+──── H6.2 is-active socket/service/m1noexec/m1fd.socket ────
+$ wsl -u root -e /usr/bin/systemctl is-active audit-runner.socket audit-runner.service audit-runner-m1noexec audit-runner-m1fd.socket
+exit code: 0   (141ms)
+--- stdout ---
+active
+inactive
+inactive
+inactive
+--- stderr ---
+(空)
+
+>>> H6.2 = active/inactive/inactive/inactive: PASS  — ["active","inactive","inactive","inactive"]
+
+========== B 段（H4–H6）全部完成 ==========

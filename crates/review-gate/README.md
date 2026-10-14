@@ -30,7 +30,7 @@ gives final acceptance. The gate, not the implementer, decides whether a version
 | No external AI available → the review job reports `unavailable` (exit 3); no fallback to Claude | `review run` |
 | 3 rejections in a row → circuit breaker, task paused | `record` |
 | Every approved commit carries a signed attestation; CI verifies it with a pinned key | `record` → git note → `verify-range` |
-| Only the gate writes "外部审核 / review-gate" trace entries | gate-owned `/var/lib/reviewgate/relay/traces/<exprId>.gate.md` (implementer can read, not write); claude-step-relay merges it into the trace (`REVIEW_GATE_TRACE_DIR`) and rejects the reserved roles from anyone else |
+| Only the gate writes "外部审核 / review-gate" trace entries | gate-owned `/var/lib/reviewgate/relay/traces/<exprId>.gate.md` (implementer can read, not write; other users cannot read); claude-step-relay merges it into the trace (`REVIEW_GATE_TRACE_DIR`) and rejects the reserved roles from anyone else |
 
 The guarantees are as strong as the separation between the two system users: the implementer
 must not have sudo to `reviewgate`, must not be in its group, and must not be able to edit the CI
@@ -46,7 +46,7 @@ sudo systemctl restart review-gate
 review-gate pubkey                      # pin this in CI
 ```
 
-`install.sh` creates the `reviewgate` user, `/var/lib/reviewgate/{state (0700), relay/traces (0755)}`,
+`install.sh` creates the `reviewgate` user, `/var/lib/reviewgate/{state (0700), relay/traces (0750, group = the implementer's)}`,
 the client token `/etc/review-gate/client.token` (gate + implementer may read it, neither may
 write it), the reviewer env file (gate only) and the systemd unit `review-gate.service`.
 The gate reads the implementer's repositories, so they must be world-readable (`chmod -R o+rX`).

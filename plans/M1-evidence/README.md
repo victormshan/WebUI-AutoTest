@@ -2,6 +2,8 @@
 
 依据：`plans/milestone-audit-plan.md` 第 4、5 节（模型 A，首版 M1）。
 
+> **说明**：从"已经完成的环境准备"到"变异测试"各节，是 audit-runner 首次提交（f4085de）时的记录，保留作历史。其中的安装路径、登录状态、测试数量都已过时。现状见"后续状态"一节和 `verification.md`（第 3 版）。
+
 ## 已经完成的环境准备（由 DSH 执行，经用户授权，bridge 任务 dsh-m1-auditor-setup）
 - 系统用户 `auditor`：uid 997，`/home/auditor` 权限 0700。
 - 以 auditor 身份安装 Codex CLI 0.162.1（Linux x64）。安装成了 npm 的本地布局，可执行文件是 `/home/auditor/.local/node_modules/.bin/codex`。
@@ -10,7 +12,7 @@
 ## audit-runner（`crates/audit-runner`）
 - **不持有任何密钥。** 签名只由 review-gate 做（方案第 4 节第 1 点）。
 - 只监听本地 unix socket。生产环境由 systemd socket 激活创建 socket：属主 auditor，属组 reviewgate，权限 0660（`deploy/audit-runner.socket`）。
-- **调用方检查**：用 SO_PEERCRED 核对对端 uid 必须是 `--allow-uid`（reviewgate，999）；如果配置了 `--allow-exe`，还要核对 `/proc/<pid>/exe`。不符合就直接拒绝，**不会建作业目录，也不会启动 Codex**。
+- **调用方检查**：用 SO_PEERCRED 核对对端 uid 必须是 `--allow-uid`（reviewgate，999）；如果配置了 `--allow-cgroup`，还要核对对端的 cgroup（`/proc/<pid>/cgroup`，部署为 `/system.slice/review-gate.service`）。最初的 `--allow-exe` 读 `/proc/<pid>/exe`，跨 uid 需要 ptrace 权限，验证时被 DSH 发现会把真实 gate 也拒掉，已改为 cgroup（见 verification.md）。不符合就直接拒绝，**不会建作业目录，也不会启动 Codex**。
 - 每个连接只处理一个作业：一行 JSON 请求（job_id、input、timeout），一行 JSON 回复。
   - job_id 只允许字母、数字和 `-_.`，**每个 id 只能用一次**，重复提交会被拒绝；
   - 输入上限 4 MB；
@@ -43,8 +45,17 @@
 | A3 超时只杀顶层进程 | 超时测试失败（有残留进程）。这次变异留下的 sleep 进程随后已经清理掉了 |
 | A4 作业 id 可以重复使用 | 重放测试失败。第一次跑受到 A3 残留进程的干扰，多失败了一个测试；清理之后单独重跑，只有重放测试失败 |
 
-## 还没做（M1 后续）
-1. 用户登录 auditor 的 Codex；
-2. 安装 runner（root：复制程序、安装 socket 和 service 单元并启用）；
-3. M1 权限验证报告（方案第 5 节列的各项，按实际的服务身份和启动配置逐项给出原始输出）；
-4. 交 Codex 做阶段审查，再过 gate。
+## 后续状态（2026-10-15）
+- 用户已登录 auditor 的 Codex；DSH 按用户授权安装了 runner。
+- 权限验证共 5 轮，见 `verification.md`（第 3 版），原始输出在 `raw/`。
+- Codex 工具面和上下文的抓包证据在 `codex-surface/`。
+- Codex 阶段审查两次判 REWORK，都已按意见修改：
+  - 执行类工具全部关闭；
+  - 每个作业使用干净的 Codex 主目录；
+  - 超时也保留执行记录；
+  - 事件流完整性校验；
+  - 进程组清理只认 ESRCH；
+  - 描述符逐个归类；
+  - 按用户决定，Codex CLI 改为 root 所有，gate 跟踪目录不让 auditor 读。
+- 测试客户端：`crates/audit-runner/tools/client.py`。
+- Codex 阶段审查第 4 轮 APPROVE（codex-m1-review 消息 16）。下一步：过 gate 提交。

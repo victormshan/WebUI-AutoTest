@@ -1,29 +1,53 @@
-
-running 4 tests
+# cargo test -p audit-runner --features fault-injection — 2026-10-15T04:28:16+08:00 (after the third REWORK changes)
+running 9 tests
+test tests::a_command_that_never_completes_is_still_listed ... ok
+test tests::another_users_cgroup_is_readable ... ok
 test tests::digest_is_lowercase_hex_sha256 ... ok
+test tests::event_records_must_be_whole ... ok
 test tests::events_report_item_types_and_commands ... ok
 test tests::job_ids_are_plain_names ... ok
-test tests::only_the_allowed_uid_and_executable_pass ... ok
-
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-
+test tests::only_the_allowed_uid_and_cgroup_pass ... ok
+test tests::group_state_confirms_gone_only_on_esrch ... ok
+test tests::settle_confirms_only_a_gone_group ... ok
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
 running 0 tests
-
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-
-running 6 tests
+running 1 test
+test an_unconfirmed_cleanup_is_never_completed_and_stops_the_runner ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+running 19 tests
+test a_confirmed_cleanup_keeps_the_runner_serving ... ok
+test a_job_id_is_used_once ... ok
+test an_unconfirmed_cleanup_stops_the_runner_after_its_reply ... ok
+test an_unknown_caller_is_refused_before_anything_runs ... ok
 test bad_requests_are_rejected ... ok
 test a_job_runs_with_its_own_digest_and_a_clean_environment ... ok
-test a_job_id_is_used_once ... ok
+test a_login_refreshed_during_the_job_is_kept ... ok
+test an_incomplete_or_invalid_event_record_is_never_completed ... ok
+test own_cgroup_refuses_to_start_outside_a_service ... ok
+test codex_sees_a_clean_home_with_only_the_login ... ok
 test failures_are_reported_never_as_completed ... ok
-test an_unknown_caller_is_refused_before_anything_runs ... ok
+test the_run_home_is_removed_when_the_job_cannot_start_or_the_login_cannot_be_saved ... ok
+test codex_inherits_no_socket_under_socket_activation ... ok
+test without_the_cgroup_sweep_an_escaped_process_survives_the_group_kill ... ok
+test under_systemd_a_process_that_left_the_group_is_ended_too ... ok
+test an_unconfirmed_cleanup_stops_the_runner_when_the_caller_is_gone ... ok
 test a_hanging_codex_times_out ... ok
-
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.04s
-
-
+test a_timeout_keeps_the_record_of_what_codex_started ... ok
+test an_unconfirmed_cleanup_stops_the_runner_when_the_reply_blocks ... ok
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.86s
 running 0 tests
-
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+# cargo test -p audit-runner (release feature set: fault test binary compiled out)
+     Running unittests src/lib.rs (target/debug/deps/audit_runner-a2ead5153a4dbf01)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+     Running unittests src/main.rs (target/debug/deps/audit_runner-49251a7b1f8ed3c8)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/fault.rs (target/debug/deps/fault-9f81b6dea9abef5c)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/runner.rs (target/debug/deps/runner-9dae02d30815e31a)
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.63s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+# cargo clippy -p audit-runner --all-targets --features fault-injection
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.25s

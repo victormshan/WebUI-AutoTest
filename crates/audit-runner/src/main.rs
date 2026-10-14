@@ -23,35 +23,73 @@ struct Cli {
     /// The only uid allowed to submit jobs (review-gate's).
     #[arg(long)]
     allow_uid: u32,
-    /// Executable the submitting process must run (e.g. /usr/local/bin/review-gate).
+    /// cgroup the submitting process must belong to (e.g. /system.slice/review-gate.service).
     #[arg(long)]
-    allow_exe: Option<PathBuf>,
+    allow_cgroup: Option<String>,
     /// The auditor's Codex CLI.
     #[arg(long)]
     codex: PathBuf,
+    /// The auditor's Codex home; only its login (auth.json) is used.
     #[arg(long)]
     codex_home: PathBuf,
+    /// Codex's home during a job, recreated empty (plus the login) for every job.
+    #[arg(long)]
+    run_home: PathBuf,
     /// Per-job directories (input, events, answer).
     #[arg(long)]
     workdir: PathBuf,
+    /// The runner runs in its own systemd service cgroup: after every job, end every other
+    /// process in it and confirm it is empty. Refuses to start outside a `.service` cgroup.
+    #[arg(long)]
+    own_cgroup: bool,
     #[arg(long, default_value_t = 1800)]
     timeout_secs: u64,
     #[arg(long, default_value = "high")]
     reasoning_effort: String,
 }
 
-/// The listening socket systemd passed (LISTEN_FDS=1, fd 3), if any.
-fn activated() -> Option<std::os::unix::net::UnixListener> {
-    let pid_ok = std::env::var("LISTEN_PID").ok()?.parse::<u32>().ok()? == std::process::id();
-    let one = std::env::var("LISTEN_FDS").ok()? == "1";
+/// The listening socket systemd passed (LISTEN_FDS=1, fd 3), if this process was
+/// socket-activated. An error when it was, but fd 3 cannot be made close-on-exec: the runner
+/// then stops rather than run with a socket every Codex process would inherit.
+fn activated() -> anyhow::Result<Option<std::os::unix::net::UnixListener>> {
+    let pid_ok = std::env::var("LISTEN_PID")
+        .ok()
+        .and_then(|p| p.parse::<u32>().ok())
+        == Some(std::process::id());
+    let one = std::env::var("LISTEN_FDS").ok().as_deref() == Some("1");
+    if !(pid_ok && one) {
+        return Ok(None);
+    }
+    // systemd passes fd 3 without close-on-exec; set it, or every Codex process would inherit
+    // the listening socket and could accept the gate's next connection.
+    // SAFETY: fcntl on fd 3 only changes its flags; systemd hands that fd to this process.
+    unsafe {
+        let flags = libc::fcntl(3, libc::F_GETFD);
+        if flags < 0 || libc::fcntl(3, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
+            anyhow::bail!(
+                "cannot set close-on-exec on the activated socket: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
     // SAFETY: systemd hands over fd 3 for exactly this process when both variables match.
-    (pid_ok && one).then(|| unsafe { std::os::unix::net::UnixListener::from_raw_fd(3) })
+    Ok(Some(unsafe {
+        std::os::unix::net::UnixListener::from_raw_fd(3)
+    }))
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let listener = match activated() {
+    if cli.own_cgroup {
+        let path = audit_runner::cgroup_of(std::process::id() as i32)?;
+        anyhow::ensure!(
+            path.ends_with(".service"),
+            "--own-cgroup: not in a systemd service cgroup ({path})"
+        );
+        audit_runner::own_cgroup_procs()?;
+    }
+    let listener = match activated()? {
         Some(l) => {
             l.set_nonblocking(true)?;
             UnixListener::from_std(l)?
@@ -70,11 +108,14 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&cli.workdir)?;
     let cfg = Config {
         allow_uid: cli.allow_uid,
-        allow_exe: cli.allow_exe,
+        allow_cgroup: cli.allow_cgroup,
         codex: cli.codex,
         codex_home: cli.codex_home,
+        run_home: cli.run_home,
         workdir: cli.workdir,
         default_timeout: Duration::from_secs(cli.timeout_secs),
+        reply_timeout: Duration::from_secs(30),
+        own_cgroup: cli.own_cgroup,
         reasoning_effort: cli.reasoning_effort,
     };
     eprintln!("audit-runner {} ready", env!("CARGO_PKG_VERSION"));

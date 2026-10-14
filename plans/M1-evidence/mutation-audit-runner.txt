@@ -20,3 +20,137 @@ test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 === A4 rerun (clean, after removing processes leaked by A3)
 test a_job_id_is_used_once ... FAILED
 test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+
+# Round 2 (2026-10-15, after the M1 verification findings)
+## A5 cgroup check skipped (actual != want ignored)
+test tests::a_command_that_never_completes_is_still_listed ... ok
+test tests::another_users_cgroup_is_readable ... ok
+test tests::digest_is_lowercase_hex_sha256 ... ok
+test tests::events_report_item_types_and_commands ... ok
+test tests::job_ids_are_plain_names ... ok
+test tests::only_the_allowed_uid_and_cgroup_pass ... FAILED
+thread 'tests::only_the_allowed_uid_and_cgroup_pass' (247945) panicked at crates/audit-runner/src/lib.rs:380:18:
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+## A6 FD_CLOEXEC not set on the activated fd 3
+test tests::a_command_that_never_completes_is_still_listed ... ok
+test tests::another_users_cgroup_is_readable ... ok
+test tests::digest_is_lowercase_hex_sha256 ... ok
+test tests::events_report_item_types_and_commands ... ok
+test tests::job_ids_are_plain_names ... ok
+test tests::only_the_allowed_uid_and_cgroup_pass ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test a_job_runs_with_its_own_digest_and_a_clean_environment ... ok
+test a_job_id_is_used_once ... ok
+test an_unknown_caller_is_refused_before_anything_runs ... ok
+test bad_requests_are_rejected ... ok
+test failures_are_reported_never_as_completed ... ok
+test codex_inherits_no_socket_under_socket_activation ... FAILED
+test a_hanging_codex_times_out ... ok
+thread 'codex_inherits_no_socket_under_socket_activation' (250422) panicked at crates/audit-runner/tests/runner.rs:222:5:
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+
+## A7 started-but-never-completed commands dropped
+test tests::another_users_cgroup_is_readable ... ok
+test tests::a_command_that_never_completes_is_still_listed ... FAILED
+test tests::events_report_item_types_and_commands ... ok
+test tests::digest_is_lowercase_hex_sha256 ... ok
+test tests::job_ids_are_plain_names ... ok
+test tests::only_the_allowed_uid_and_cgroup_pass ... ok
+thread 'tests::a_command_that_never_completes_is_still_listed' (249420) panicked at crates/audit-runner/src/lib.rs:410:9:
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p audit-runner --lib`
+
+# Round 3 (2026-10-15, after Codex's M1 REWORK) — each mutation applied alone, then reverted
+## A6 FD_CLOEXEC not set on the activated fd 3
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test codex_inherits_no_socket_under_socket_activation ... FAILED
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+## A8 tool switches (NO_TOOLS) not passed to Codex
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test a_job_runs_with_its_own_digest_and_a_clean_environment ... FAILED
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+## A9 on timeout the event record is dropped
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test a_timeout_keeps_the_record_of_what_codex_started ... FAILED
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+## A10 no wait for the group after the kill
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+## A11 no kill at all on timeout (only the leader is reaped)
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test a_hanging_codex_times_out ... FAILED
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+
+Note on A10: it survives. The group is killed with SIGKILL and the leader reaped before the wait loop, and the killed sleep processes are gone (or zombies with an empty cmdline) by the time the test looks. The loop is a bounded extra guarantee that this test cannot observe. A11 (no group kill at all) is caught. A11 left its sleep processes running; they were killed afterwards.
+
+# Round 4 (2026-10-15, after Codex's second M1 REWORK) — each mutation applied alone, then reverted
+## A12 event record not checked
+test an_incomplete_or_invalid_event_record_is_never_completed ... FAILED
+test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+## A13 any probe error taken as gone
+test tests::group_state_confirms_gone_only_on_esrch ... FAILED
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+## A15 Codex uses the auditor's own home
+test a_login_refreshed_during_the_job_is_kept ... FAILED
+test codex_sees_a_clean_home_with_only_the_login ... FAILED
+test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.07s
+## A16 refreshed login not copied back
+test a_login_refreshed_during_the_job_is_kept ... FAILED
+test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s
+## A17 unconfirmed cleanup still completed
+## A14 settle treats unknown as gone
+test tests::group_state_confirms_gone_only_on_esrch ... FAILED
+test tests::settle_confirms_only_a_gone_group ... FAILED
+test result: FAILED. 7 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+Note on A17: it survives. No integration test can make a job's cleanup unconfirmed (a SIGKILLed group always becomes ESRCH here); the classification itself is covered by group_state_confirms_gone_only_on_esrch and settle_confirms_only_a_gone_group (A13, A14 caught).
+
+# Round 5 (2026-10-15, after Codex's third M1 REWORK and the setsid escape) — each mutation applied alone, then reverted; run with --features fault-injection
+## A17 unconfirmed cleanup still completed
+test an_unconfirmed_cleanup_is_never_completed_and_stops_the_runner ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+## A18 stop dropped when the reply fails
+test an_unconfirmed_cleanup_stops_the_runner_when_the_caller_is_gone ... FAILED
+test result: FAILED. 15 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.02s
+## A19 stop dropped when the reply times out
+test an_unconfirmed_cleanup_stops_the_runner_when_the_reply_blocks ... FAILED
+test result: FAILED. 15 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.04s
+## A20 serve keeps going after an unconfirmed cleanup
+test an_unconfirmed_cleanup_is_never_completed_and_stops_the_runner ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.01s
+## A21 run home left behind when preparing fails
+test the_run_home_is_removed_when_the_job_cannot_start_or_the_login_cannot_be_saved ... FAILED
+test result: FAILED. 15 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.69s
+## A22 run home left behind when saving the login fails
+test the_run_home_is_removed_when_the_job_cannot_start_or_the_login_cannot_be_saved ... FAILED
+test result: FAILED. 15 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.75s
+## A23 no reply timeout
+test an_unconfirmed_cleanup_stops_the_runner_after_its_reply ... FAILED
+test an_unconfirmed_cleanup_stops_the_runner_when_the_reply_blocks ... FAILED
+test result: FAILED. 14 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.05s
+## A13 any probe error taken as gone (re-run after the test fixes)
+test tests::group_state_confirms_gone_only_on_esrch ... FAILED
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+## A20 serve keeps going after an unconfirmed cleanup (re-run after the test fixes)
+test an_unconfirmed_cleanup_is_never_completed_and_stops_the_runner ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.02s
+test an_unconfirmed_cleanup_stops_the_runner_after_its_reply ... FAILED
+test an_unconfirmed_cleanup_stops_the_runner_when_the_caller_is_gone ... FAILED
+test an_unconfirmed_cleanup_stops_the_runner_when_the_reply_blocks ... FAILED
+test result: FAILED. 13 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.05s
+## A24 no cgroup sweep even with --own-cgroup
+test under_systemd_a_process_that_left_the_group_is_ended_too ... FAILED
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.74s
+## A25 sweep result ignored
+## A26 --own-cgroup starts outside a service
+test own_cgroup_refuses_to_start_outside_a_service ... FAILED
+test an_unconfirmed_cleanup_stops_the_runner_when_the_reply_blocks ... FAILED
+test result: FAILED. 17 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.15s
+
+Notes on round 5:
+- A17 (survived in round 4) is now caught by tests/fault.rs.
+- A25 (sweep result ignored) survives: no test makes the cgroup sweep itself fail; the sweep's success path is covered (A24 caught).
+- A26 first hung the suite (the mutant runner started and waited); the test was then bounded (5 s) and the rerun above shows it caught. In that rerun an_unconfirmed_cleanup_stops_the_runner_when_the_reply_blocks also failed once under the mutant's extra load; the unmutated suite passed 8 runs in a row before and after.
+- While writing these tests, a half-applied edit made one test call kill(0, SIGKILL) (a bool used as a pid), which killed the test process group and left sleep processes behind; found by tracing, fixed, the leftovers killed, and the suite then passed 8 consecutive runs.

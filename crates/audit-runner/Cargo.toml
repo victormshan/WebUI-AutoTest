@@ -14,5 +14,10 @@ serde_json.workspace = true
 sha2 = "0.11.0"
 tokio.workspace = true
 
+[features]
+# Test builds only: AUDIT_RUNNER_FAULT=cleanup-unconfirmed makes every job's cleanup unconfirmed
+# (deployment test of the stop-and-let-systemd-clean rule). Release builds leave it off.
+fault-injection = []
+
 [dev-dependencies]
 tempfile = "3"

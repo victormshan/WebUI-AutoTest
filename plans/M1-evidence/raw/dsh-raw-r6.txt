@@ -1,0 +1,432 @@
+===== round 6 raw output (DSH) 2026-10-14T20:28:36.041Z =====
+##### K0. 前置只读核对（披露：非任务书步骤，只读） #####
+──── K0a 现存 sleep 4790（应为空） ────
+$ wsl -u root -e /usr/bin/pgrep -af sleep 4790
+exit code: 1   (158ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> K0a 无残留 sleep 4790: PASS  — 实际=[]
+──── K0b 现存 audit-runner* 单元 ────
+$ wsl -u root -e /usr/bin/systemctl list-units audit-runner* --all --no-legend --no-pager
+exit code: 0   (163ms)
+--- stdout ---
+  audit-runner.service loaded inactive dead      audit-runner (milestone audits for review-gate, holds no keys)
+  audit-runner.socket  loaded active   listening audit-runner socket (milestone audits for review-gate)
+--- stderr ---
+(空)
+
+>>> K0b 记录：
+  audit-runner.service loaded inactive dead      audit-runner (milestone audits for review-gate, holds no keys)
+  audit-runner.socket  loaded active   listening audit-runner socket (milestone audits for review-gate)
+##### K1. 安装生产 runner #####
+──── K1.1 stop service ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner.service
+exit code: 0   (147ms)
+--- stdout ---
+(空)
+--- stderr ---
+Stopping 'audit-runner.service', but its triggering units are still active:
+audit-runner.socket
+
+>>> K1.1 exit=0: PASS  — exit=0
+──── K1.2 install 二进制 ────
+$ wsl -u root -e /usr/bin/install -m 0755 -o root -g root /mnt/e/rust-agent-browser/reviews/m1-verify/audit-runner /usr/local/lib/audit-runner/audit-runner
+exit code: 0   (179ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> K1.2 exit=0: PASS  — exit=0
+──── K1.3 install 单元 ────
+$ wsl -u root -e /usr/bin/install -m 0644 -o root -g root /mnt/e/rust-agent-browser/reviews/m1-verify/audit-runner.service /etc/systemd/system/audit-runner.service
+exit code: 0   (147ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> K1.3 exit=0: PASS  — exit=0
+──── K1.4 daemon-reload ────
+$ wsl -u root -e /usr/bin/systemctl daemon-reload
+exit code: 0   (416ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> K1.4 exit=0: PASS  — exit=0
+──── K1.5 sha256sum ────
+$ wsl -u root -e /usr/bin/sha256sum /usr/local/lib/audit-runner/audit-runner /etc/systemd/system/audit-runner.service
+exit code: 0   (152ms)
+--- stdout ---
+69983378df3bfc3f9fb7bd93c32c54ce5539a19879b88d6b42ba478fee79b9c4  /usr/local/lib/audit-runner/audit-runner
+6150c5123a81adb4b99ebc67977a3c42433993289fb06c01a3732025ecdb4dcf  /etc/systemd/system/audit-runner.service
+--- stderr ---
+(空)
+
+>>> K1.5 二进制 = 69983378…: PASS  — 实测 69983378df3bfc3f9fb7bd93c32c54ce5539a19879b88d6b42ba478fee79b9c4
+>>> K1.5 单元 = 6150c512…: PASS  — 实测 6150c5123a81adb4b99ebc67977a3c42433993289fb06c01a3732025ecdb4dcf
+──── K1.6 生产二进制里不得有故障码（grep -c，期望 stdout=0；exit 1 属正常） ────
+$ wsl -u root -e /usr/bin/grep -c AUDIT_RUNNER_FAULT /usr/local/lib/audit-runner/audit-runner
+exit code: 1   (134ms)
+--- stdout ---
+0
+--- stderr ---
+(空)
+
+>>> K1.6 记录：exit=1（grep -c 计数为 0 时返回 1，属正常）
+>>> K1.6 计数 = 0: PASS  — stdout="0"
+──── K1.7 冒烟 as reviewgate（单元外） ────
+$ wsl -u root -e /usr/bin/sudo -u reviewgate /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner/runner.sock k1-reviewgate hello
+exit code: 0   (254ms)
+--- stdout ---
+{
+  "job_id": "",
+  "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "status": "rejected",
+  "exit_code": null,
+  "error": "peer cgroup /non-systemd is not /system.slice/review-gate.service",
+  "answer": "",
+  "item_types": [],
+  "commands": [],
+  "evidence_complete": false,
+  "cleanup": "",
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T20:28:38.082499980Z",
+  "finished_at": "2026-10-14T20:28:38.082499980Z"
+}
+--- stderr ---
+(空)
+
+>>> K1.7 status=rejected: PASS
+>>> K1.7 原因 = peer cgroup /non-systemd is not /system.slice/review-gate.service: PASS  — error="peer cgroup /non-systemd is not /system.slice/review-gate.service"
+──── K1.8 systemctl show -p KillMode -p ActiveState -p ExecMainStatus ────
+$ wsl -u root -e /usr/bin/systemctl show -p KillMode -p ActiveState -p ExecMainStatus audit-runner.service
+exit code: 0   (142ms)
+--- stdout ---
+ActiveState=active
+ExecMainStatus=0
+KillMode=control-group
+--- stderr ---
+(空)
+
+>>> K1.8 KillMode=control-group: PASS  — KillMode=control-group
+>>> K1.8 ActiveState=active: PASS  — ActiveState=active
+##### K2. cgroup 清扫结束逃逸进程（生产二进制，部署沙箱） #####
+──── K2.1 起 transient socket+service（fake codex = fault-codex.sh） ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=audit-runner-m1esc --socket-property=ListenStream=/run/audit-runner-m1esc.sock --socket-property=SocketUser=auditor --socket-property=SocketMode=0666 -p User=auditor -p Group=auditor -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p BindPaths=/home/auditor -p PrivateTmp=yes -p UMask=0077 -p KillMode=control-group /usr/local/lib/audit-runner/audit-runner --allow-uid 999 --allow-cgroup /system.slice/m1-esc.service --codex /mnt/e/rust-agent-browser/reviews/m1-verify/fault-codex.sh --codex-home /home/auditor/.codex --run-home /home/auditor/codex-run-m1esc --workdir /home/auditor/jobs-m1esc --own-cgroup
+exit code: 0   (163ms)
+--- stdout ---
+(空)
+--- stderr ---
+Running socket as unit: audit-runner-m1esc.socket
+Will run service as unit: audit-runner-m1esc.service
+
+>>> K2.1 exit=0: PASS  — exit=0 err="Running socket as unit: audit-runner-m1esc.socket\nWill run service as unit: audit-runner-m1esc.service"
+──── K2.2 提交 ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=m1-esc --wait --pipe --collect -p User=reviewgate -p Group=reviewgate /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner-m1esc.sock k2-esc x
+exit code: 0   (334ms)
+--- stdout ---
+{
+  "job_id": "k2-esc",
+  "input_sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+  "status": "completed",
+  "exit_code": 0,
+  "error": null,
+  "answer": "VERDICT: APPROVE\nleft-pid=321443\n",
+  "item_types": [],
+  "commands": [],
+  "evidence_complete": true,
+  "cleanup": "gone",
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T20:28:38.650397536Z",
+  "finished_at": "2026-10-14T20:28:38.685023198Z"
+}
+--- stderr ---
+Running as unit: m1-esc.service; invocation ID: b1841991862a4e15a0c8014d0e8de873
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 183ms
+             CPU time consumed: 56ms
+                   Memory peak: 5.1M (swap: 0B)
+
+>>> K2.2 记录：status=completed｜cleanup="gone"｜evidence_complete=true｜exit_code=0
+--- K2.2 answer ---
+VERDICT: APPROVE
+left-pid=321443
+
+>>> K2.2 status=completed: PASS  — status=completed error=null
+>>> K2.2 cleanup="gone": PASS  — "gone"
+>>> K2.2 answer 里有 left-pid=N: PASS  — leftPid=321443
+──── K2.3 cat /proc/321443/cmdline（期望 No such file） ────
+$ wsl -u root -e /bin/cat /proc/321443/cmdline
+exit code: 1   (148ms)
+--- stdout ---
+(空)
+--- stderr ---
+cat: /proc/321443/cmdline: No such file or directory
+
+>>> K2.3 逃逸进程已被清扫: PASS  — exit=1 err="cat: /proc/321443/cmdline: No such file or directory"
+──── K2.4 runner 仍在服务 ────
+$ wsl -u root -e /usr/bin/systemctl show -p ActiveState audit-runner-m1esc.service
+exit code: 0   (160ms)
+--- stdout ---
+ActiveState=active
+--- stderr ---
+(空)
+
+>>> K2.4 ActiveState=active: PASS  — 实测=["ActiveState=active"]
+##### K2.5 清理（无论上面是否停下都执行） #####
+──── K2.5a stop socket+service ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner-m1esc.socket audit-runner-m1esc.service
+exit code: 0   (136ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> K2.5a exit=0
+──── K2.5b rm -rf jobs-m1esc ────
+$ wsl -u root -e /bin/rm -rf /home/auditor/jobs-m1esc
+exit code: 0   (142ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> K2.5b exit=0
+──── K2.5c rm -f sock ────
+$ wsl -u root -e /bin/rm -f /run/audit-runner-m1esc.sock
+exit code: 0   (137ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> K2.5c exit=0
+──── K2.5d 残留 sleep 4790（应为空） ────
+$ wsl -u root -e /usr/bin/pgrep -af sleep 4790
+exit code: 1   (129ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> K2.5d 残留：[]
+
+========== 第 1 段（K1+K2）全部完成 ==========
+
+===== round 6 raw output, part 2 (K3 fault build + K4 restore) 2026-10-14T20:28:59.997Z =====
+##### K3.0 前置只读核对：故障构建的身份（披露：非任务书步骤，只读 E: 上的文件，不安装） #####
+──── K3.0 sha256sum 测试构建两份 ────
+$ wsl -u root -e /usr/bin/sha256sum /mnt/e/rust-agent-browser/reviews/m1-verify/audit-runner-fault /mnt/e/rust-agent-browser/reviews/m1-verify/fault-codex.sh
+exit code: 0   (157ms)
+--- stdout ---
+ceb4013bfcd7b142a3ff92c36d36dfdce2188e44f83e8587ba591a5b5fa9ee63  /mnt/e/rust-agent-browser/reviews/m1-verify/audit-runner-fault
+b9c44d1c5b8218e30382800c6f9494d1373a4941e74de97f917299fab523be78  /mnt/e/rust-agent-browser/reviews/m1-verify/fault-codex.sh
+--- stderr ---
+(空)
+
+>>> K3.0 audit-runner-fault = ceb4013b…: PASS  — 实测 ceb4013bfcd7b142a3ff92c36d36dfdce2188e44f83e8587ba591a5b5fa9ee63
+>>> K3.0 fault-codex.sh = b9c44d1c…: PASS  — 实测 b9c44d1c5b8218e30382800c6f9494d1373a4941e74de97f917299fab523be78
+##### K3. 停机规则（故障构建，无 --own-cgroup） #####
+──── K3.1 起 transient socket+service（故障构建 + AUDIT_RUNNER_FAULT=cleanup-unconfirmed） ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=audit-runner-m1stop --socket-property=ListenStream=/run/audit-runner-m1stop.sock --socket-property=SocketUser=auditor --socket-property=SocketMode=0666 -p User=auditor -p Group=auditor -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p BindPaths=/home/auditor -p PrivateTmp=yes -p UMask=0077 -p KillMode=control-group -p Environment=AUDIT_RUNNER_FAULT=cleanup-unconfirmed /mnt/e/rust-agent-browser/reviews/m1-verify/audit-runner-fault --allow-uid 999 --allow-cgroup /system.slice/m1-stop.service --codex /mnt/e/rust-agent-browser/reviews/m1-verify/fault-codex.sh --codex-home /home/auditor/.codex --run-home /home/auditor/codex-run-m1stop --workdir /home/auditor/jobs-m1stop
+exit code: 0   (144ms)
+--- stdout ---
+(空)
+--- stderr ---
+Running socket as unit: audit-runner-m1stop.socket
+Will run service as unit: audit-runner-m1stop.service
+
+>>> K3.1 exit=0: PASS  — exit=0 err="Running socket as unit: audit-runner-m1stop.socket\nWill run service as unit: audit-runner-m1stop.service"
+──── K3.2 提交 k3-a ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=m1-stop --wait --pipe --collect -p User=reviewgate -p Group=reviewgate /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner-m1stop.sock k3-a x
+exit code: 0   (290ms)
+--- stdout ---
+{
+  "job_id": "k3-a",
+  "input_sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+  "status": "failed",
+  "exit_code": 0,
+  "error": "cleanup not confirmed: injected fault",
+  "answer": "VERDICT: APPROVE\nleft-pid=321587\n",
+  "item_types": [],
+  "commands": [],
+  "evidence_complete": false,
+  "cleanup": "not confirmed: injected fault",
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T20:29:00.543943916Z",
+  "finished_at": "2026-10-14T20:29:00.556097297Z"
+}
+--- stderr ---
+Running as unit: m1-stop.service; invocation ID: bdff5fec68ec47dcbb633204f56b64f0
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 162ms
+             CPU time consumed: 49ms
+                   Memory peak: 5.1M (swap: 0B)
+
+>>> K3.2 记录：status=failed｜cleanup="not confirmed: injected fault"｜exit_code=0｜error="cleanup not confirmed: injected fault"
+--- K3.2 answer ---
+VERDICT: APPROVE
+left-pid=321587
+
+>>> K3.2 status=failed: PASS  — status=failed
+>>> K3.2 cleanup="not confirmed: injected fault": PASS  — "not confirmed: injected fault"
+>>> K3.2 有 left-pid=N: PASS  — leftPid=321587
+（K3.3 等 2s 让 systemd 收尾）
+──── K3.3a cat /proc/321587/cmdline（期望 No such file） ────
+$ wsl -u root -e /bin/cat /proc/321587/cmdline
+exit code: 1   (181ms)
+--- stdout ---
+(空)
+--- stderr ---
+cat: /proc/321587/cmdline: No such file or directory
+
+>>> K3.3a 逃逸进程已被 systemd 清掉: PASS  — exit=1 err="cat: /proc/321587/cmdline: No such file or directory"
+──── K3.3b systemctl show -p ActiveState -p Result -p ExecMainStatus ────
+$ wsl -u root -e /usr/bin/systemctl show -p ActiveState -p Result -p ExecMainStatus audit-runner-m1stop.service
+exit code: 0   (140ms)
+--- stdout ---
+ActiveState=failed
+Result=exit-code
+ExecMainStatus=1
+--- stderr ---
+(空)
+
+>>> K3.3b 非 active: PASS  — ActiveState=failed
+>>> K3.3b Result=exit-code: PASS  — Result=exit-code
+>>> K3.3b ExecMainStatus=1: PASS  — ExecMainStatus=1
+──── K3.3c journalctl -u audit-runner-m1stop.service -n 15 ────
+$ wsl -u root -e /usr/bin/journalctl -u audit-runner-m1stop.service --no-pager -n 15
+exit code: 0   (133ms)
+--- stdout ---
+Oct 15 04:29:00 Win10-dt systemd[1]: Started audit-runner-m1stop.service - [systemd-run] /mnt/e/rust-agent-browser/reviews/m1-verify/audit-runner-fault --allow-uid 999 --allow-cgroup /system.slice/m1-stop.service --codex /mnt/e/rust-agent-browser/reviews/m1-verify/fault-codex.sh --codex-home /home/auditor/.codex --run-home /home/auditor/codex-run-m1stop --workdir /home/auditor/jobs-m1stop.
+Oct 15 04:29:00 Win10-dt audit-runner-fault[321584]: audit-runner 0.1.0 ready
+Oct 15 04:29:00 Win10-dt audit-runner-fault[321584]: Error: a job's process group was not confirmed gone; stopping so systemd ends the cgroup
+Oct 15 04:29:00 Win10-dt systemd[1]: audit-runner-m1stop.service: Main process exited, code=exited, status=1/FAILURE
+Oct 15 04:29:00 Win10-dt systemd[1]: audit-runner-m1stop.service: Failed with result 'exit-code'.
+--- stderr ---
+(空)
+
+──── K3.4 复位后同一 socket 再提交 k3-b（socket 激活恢复） ────
+$ wsl -u root -e /usr/bin/systemd-run --unit=m1-stop --wait --pipe --collect -p User=reviewgate -p Group=reviewgate /usr/bin/python3 /mnt/e/rust-agent-browser/reviews/m1-verify/client.py /run/audit-runner-m1stop.sock k3-b x
+exit code: 0   (291ms)
+--- stdout ---
+{
+  "job_id": "k3-b",
+  "input_sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+  "status": "failed",
+  "exit_code": 0,
+  "error": "cleanup not confirmed: injected fault",
+  "answer": "VERDICT: APPROVE\nleft-pid=321618\n",
+  "item_types": [],
+  "commands": [],
+  "evidence_complete": false,
+  "cleanup": "not confirmed: injected fault",
+  "runner_version": "0.1.0",
+  "started_at": "2026-10-14T20:29:03.439366556Z",
+  "finished_at": "2026-10-14T20:29:03.451292939Z"
+}
+--- stderr ---
+Running as unit: m1-stop.service; invocation ID: e357dbecf6124a1e954dba2dbeb6ac51
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 166ms
+             CPU time consumed: 50ms
+                   Memory peak: 5.1M (swap: 0B)
+
+>>> K3.4 记录：status=failed｜cleanup="not confirmed: injected fault"｜exit_code=0
+>>> K3.4 status=failed: PASS  — status=failed
+>>> K3.4 cleanup="not confirmed: injected fault": PASS  — "not confirmed: injected fault"
+##### K3.5 清理（无论上面是否停下都执行） #####
+──── K3.5a stop socket+service ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner-m1stop.socket audit-runner-m1stop.service
+exit code: 0   (153ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> K3.5a exit=0
+──── K3.5b reset-failed ────
+$ wsl -u root -e /usr/bin/systemctl reset-failed audit-runner-m1stop.service audit-runner-m1stop.socket
+exit code: 1   (151ms)
+--- stdout ---
+(空)
+--- stderr ---
+Failed to reset failed state of unit audit-runner-m1stop.socket: Unit audit-runner-m1stop.socket not loaded.
+
+>>> K3.5b exit=1
+──── K3.5c rm -rf jobs-m1stop codex-run-m1stop ────
+$ wsl -u root -e /bin/rm -rf /home/auditor/jobs-m1stop /home/auditor/codex-run-m1stop
+exit code: 0   (129ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> K3.5c exit=0
+──── K3.5d rm -f sock ────
+$ wsl -u root -e /bin/rm -f /run/audit-runner-m1stop.sock
+exit code: 0   (130ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> K3.5d exit=0
+──── K3.5e 先报告：残留 sleep 4790 ────
+$ wsl -u root -e /usr/bin/pgrep -af sleep 4790
+exit code: 1   (136ms)
+--- stdout ---
+(空)
+--- stderr ---
+(空)
+
+>>> K3.5e 无残留 sleep 4790: PASS
+##### K4. 恢复 #####
+──── K4.1 stop audit-runner.service ────
+$ wsl -u root -e /usr/bin/systemctl stop audit-runner.service
+exit code: 0   (134ms)
+--- stdout ---
+(空)
+--- stderr ---
+Stopping 'audit-runner.service', but its triggering units are still active:
+audit-runner.socket
+
+>>> K4.1 exit=0: PASS  — exit=0
+──── K4.2 is-active 四个单元 ────
+$ wsl -u root -e /usr/bin/systemctl is-active audit-runner.socket audit-runner.service audit-runner-m1esc.service audit-runner-m1stop.service
+exit code: 0   (159ms)
+--- stdout ---
+active
+inactive
+inactive
+inactive
+--- stderr ---
+(空)
+
+>>> K4.2 记录：["active","inactive","inactive","inactive"]
+>>> K4.2 active / inactive ×3: PASS  — 实际=["active","inactive","inactive","inactive"]
+──── K4.3 最后一枚只读核对：残留单元与进程 ────
+$ wsl -u root -e /bin/sh -c /usr/bin/systemctl list-units "audit-runner*" --all --no-legend --no-pager; /usr/bin/pgrep -af "sleep 4790" || true
+exit code: 0   (153ms)
+--- stdout ---
+  audit-runner.service loaded inactive dead      audit-runner (milestone audits for review-gate, holds no keys)
+  audit-runner.socket  loaded active   listening audit-runner socket (milestone audits for review-gate)
+321654 /bin/sh -c /usr/bin/systemctl list-units "audit-runner*" --all --no-legend --no-pager; /usr/bin/pgrep -af "sleep 4790" || true
+--- stderr ---
+(空)
+
+>>> K4.3 记录：
+  audit-runner.service loaded inactive dead      audit-runner (milestone audits for review-gate, holds no keys)
+  audit-runner.socket  loaded active   listening audit-runner socket (milestone audits for review-gate)
+321654 /bin/sh -c /usr/bin/systemctl list-units "audit-runner*" --all --no-legend --no-pager; /usr/bin/pgrep -af "sleep 4790" || true
+
+========== 第 2 段（K3+K4）全部完成 ==========
