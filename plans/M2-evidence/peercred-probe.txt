@@ -1,0 +1,50 @@
+# M2 design probe: who does the client see through a systemd socket-activated socket? (2026-10-15T09:04:51+08:00, as administrator, systemd --user)
+
+## 1. SO_PEERCRED on the client side (srv.py accepts on the activated fd 3)
+SO_PEERCRED seen by client: pid 292 uid 1000 /usr/lib/systemd/systemd --user 
+runner pid=373059 uid=1000
+=> SO_PEERCRED names the process that created the listening socket (the systemd manager), not the runner.
+
+## 2. SO_PASSCRED / SCM_CREDENTIALS on the data the runner sends (srv2.py: own = sends its own creds; forge = claims pid 1)
+### own
+SCM_CREDENTIALS: pid 373066 uid 1000 cgroup 0::/user.slice/user-1000.slice/user@1000.service/app.slice/m2-pc2-own.service
+data: b'hello\n'
+### forge
+SCM_CREDENTIALS: pid 373073 uid 1000 cgroup 0::/user.slice/user-1000.slice/user@1000.service/app.slice/m2-pc2-forge.service
+data: b'sendmsg refused: [Errno 1] Operation not permitted\n'
+=> With SO_PASSCRED the kernel attaches the sender's real pid/uid to what it sends; a forged pid is refused (EPERM) and the real credentials still arrive. The pid's cgroup names the runner's service.
+
+## scripts
+### srv.py
+import socket,os,struct,sys,time
+# socket-activated: fd 3
+s=socket.socket(fileno=3)
+c,_=s.accept()
+c.sendall(f"runner pid={os.getpid()} uid={os.getuid()}\n".encode())
+time.sleep(0.5)
+### cli.py
+import socket,struct,sys
+c=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); c.connect(sys.argv[1])
+pid,uid,gid=struct.unpack('3i',c.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
+print("SO_PEERCRED seen by client: pid",pid,"uid",uid, open(f"/proc/{pid}/cmdline").read().replace('\0',' ') if pid else "")
+print(c.recv(200).decode().strip())
+### srv2.py
+import socket,os,struct,time,sys
+s=socket.socket(fileno=3); c,_=s.accept()
+mode=sys.argv[1]
+pid=os.getpid() if mode=="own" else 1   # "forge": claim to be pid 1
+cred=struct.pack('3i',pid,os.getuid(),os.getgid())
+try:
+    c.sendmsg([b"hello\n"],[(socket.SOL_SOCKET,socket.SCM_CREDENTIALS,cred)])
+except OSError as e:
+    c.sendall(f"sendmsg refused: {e}\n".encode())
+time.sleep(0.5)
+### cli2.py
+import socket,struct,sys
+c=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+c.setsockopt(socket.SOL_SOCKET,socket.SO_PASSCRED,1); c.connect(sys.argv[1])
+msg,anc,flags,_=c.recvmsg(100,socket.CMSG_SPACE(12))
+for lvl,typ,data in anc:
+    if typ==socket.SCM_CREDENTIALS:
+        pid,uid,gid=struct.unpack('3i',data); print("SCM_CREDENTIALS: pid",pid,"uid",uid,"cgroup",open(f"/proc/{pid}/cgroup").read().strip())
+print("data:",msg)

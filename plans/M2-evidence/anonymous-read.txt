@@ -1,0 +1,5 @@
+# anonymous read of the remote (2026-10-15T09:04:53+08:00)
+$ GIT_TERMINAL_PROMPT=0 git -c credential.helper= ls-remote https://github.com/victormshan/WebUI-AutoTest.git HEAD refs/notes/review-gate
+64673749d7b0b573ad575be79ff9bc30a6d0b3bc	HEAD
+146c55db548d38c4388994d481680d69f8d58a41	refs/notes/review-gate
+exit=0
