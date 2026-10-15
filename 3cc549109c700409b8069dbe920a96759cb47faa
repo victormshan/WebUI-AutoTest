@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-design
+version: 1/3
+commit: 3cc549109c700409b8069dbe920a96759cb47faa
+tree: 18b1c69fd656ed77aafd6c4e6e8cab74fea2174c
+parent: fb2bbbe2b216dda93314ce71601690e79993b2b2
+review: v1-1
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-15T02:06:06Z
+signature: 1cxIkRkcTZm/Pdp7o3s3WImpdRUnJu3WCEkm5ZsMRja+kkLbNEY3LyGsRMKMwpBozhRlQR2PbTBQkSQY6j+6BA==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
