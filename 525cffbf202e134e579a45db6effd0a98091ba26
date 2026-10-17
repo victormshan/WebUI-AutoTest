@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-step1-records
+version: 1/3
+commit: 525cffbf202e134e579a45db6effd0a98091ba26
+tree: 780c1a6f0677861f62a6414f7f34bac941a7d417
+parent: 3cc549109c700409b8069dbe920a96759cb47faa
+review: v1-3
+reviewer: manual/manual
+verdict: approved
+at: 2026-10-17T23:35:22Z
+signature: dXF8Bz8rz72texArBacagGyuKM7IFIbpZ7rMADuHcnOYGbq62Y/Xv3EkahRZOW+eb2mnsG+KS/lJTdYWoMIAAA==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
