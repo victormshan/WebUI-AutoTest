@@ -1,0 +1,56 @@
+# M2 step 1 mutations (record chain + state derivation)
+Each mutation applied alone to crates/review-gate/src/milestone/{derive,record}.rs, then reverted; cargo test -p review-gate --lib milestone.
+
+## D1 audit of a non-current request accepted
+test milestone::derive::tests::a_late_result_neither_resolves_nor_counts ... FAILED
+test milestone::derive::tests::a_rebaseline_ends_approvals_and_pending_requests_but_keeps_conditions_and_count ... FAILED
+test result: FAILED. 17 passed; 2 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.08s
+## D2 terminal state rewritable
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.08s
+## D3 open blocking conditions ignored
+test milestone::derive::tests::a_superseding_phase_keeps_open_conditions_and_the_count ... FAILED
+test milestone::derive::tests::approve_cannot_skip_an_open_blocking_condition ... FAILED
+test result: FAILED. 17 passed; 2 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.08s
+## D4 archival ignored
+test milestone::derive::tests::a_waiver_releases_only_once_archived ... FAILED
+test milestone::derive::tests::an_approval_that_is_not_archived_does_not_release ... FAILED
+test milestone::derive::tests::unarchived_source_handling_cannot_release ... FAILED
+test result: FAILED. 16 passed; 3 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.09s
+## D5 baseline mismatch at release ignored
+test milestone::derive::tests::a_rebaseline_ends_approvals_and_pending_requests_but_keeps_conditions_and_count ... FAILED
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.08s
+## D6 rebaseline does not end a pending request
+test milestone::derive::tests::a_rebaseline_ends_approvals_and_pending_requests_but_keeps_conditions_and_count ... FAILED
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.08s
+## D7 invalid audits count
+test milestone::derive::tests::invalid_audits_and_run_failures_do_not_count ... FAILED
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.08s
+## D8 superseding phase inherits nothing
+test milestone::derive::tests::a_superseding_phase_keeps_open_conditions_and_the_count ... FAILED
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.09s
+## D9 revoke ignored
+test milestone::derive::tests::an_unarchived_revoke_ends_the_approval_at_once ... FAILED
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.08s
+## D10 resolution from any audit
+test milestone::derive::tests::a_late_result_neither_resolves_nor_counts ... FAILED
+test milestone::derive::tests::a_rebaseline_ends_approvals_and_pending_requests_but_keeps_conditions_and_count ... FAILED
+test result: FAILED. 17 passed; 2 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.08s
+## R1 signature not checked
+test milestone::record::tests::tampering_is_caught_record_by_record ... FAILED
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.02s
+## R2 links not checked
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.08s
+## D2 terminal state rewritable (rerun, stronger test)
+test milestone::derive::tests::a_terminal_state_is_never_rewritten ... FAILED
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.10s
+## R2 links not checked (rerun, stronger test)
+test milestone::record::tests::tampering_is_caught_record_by_record ... FAILED
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.12s
+## D11 malformed records read as empty values
+test milestone::derive::tests::a_record_missing_a_field_is_never_read_as_empty_and_stops_release ... FAILED
+test result: FAILED. 20 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.10s
+## D12 inherited conditions lose their lineage
+test milestone::derive::tests::inherited_conditions_keep_their_lineage ... FAILED
+test result: FAILED. 20 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.10s
+
+First pass: D2 and R2 survived (weak tests), then the tests were strengthened and both are caught (reruns). D11, D12 were added after the gate review of the first version (malformed records, condition lineage).

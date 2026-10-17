@@ -55,6 +55,43 @@ impl Keypair {
     pub fn public_b64(&self) -> String {
         B64.encode(self.signing.verifying_key().to_bytes())
     }
+
+    /// Signs arbitrary bytes (callers add their own domain prefix); base64 signature.
+    pub fn sign_bytes(&self, msg: &[u8]) -> String {
+        B64.encode(self.signing.sign(msg).to_bytes())
+    }
+
+    pub fn verifying_key(&self) -> VerifyingKey {
+        self.signing.verifying_key()
+    }
+
+    /// Test and tooling keys from a fixed seed.
+    pub fn from_seed(seed: [u8; 32]) -> Self {
+        Self {
+            signing: SigningKey::from_bytes(&seed),
+        }
+    }
+}
+
+/// Short id of a public key: the first 16 hex digits of sha256 over its 32 bytes.
+pub fn key_id(key: &VerifyingKey) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(key.to_bytes())
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Checks a base64 ed25519 signature over `msg`.
+pub fn verify_bytes(key: &VerifyingKey, msg: &[u8], sig_b64: &str) -> Result<()> {
+    use ed25519_dalek::Verifier;
+    let bytes = B64
+        .decode(sig_b64.trim())
+        .context("signature is not base64")?;
+    let sig = Signature::from_slice(&bytes).context("signature must be 64 bytes")?;
+    key.verify(msg, &sig).context("bad signature")?;
+    Ok(())
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
