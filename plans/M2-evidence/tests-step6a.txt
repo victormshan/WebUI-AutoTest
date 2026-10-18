@@ -87,3 +87,58 @@ Notes:
   catches a kept descriptor. This is the only change outside the three new modules and attest.rs.
 - Version 1 of this file showed "cargo fmt --check: DIRTY" and was submitted anyway (gate review
   v1-1 found it). Version 2 is formatted; the check above is clean.
+
+
+=== Version 2 (Codex implementation review of 5c33588, n=7: REWORK, P1) ===
+A linked task whose parent chain was broken or circular dropped out of the phase, and sources_known
+and independent came out wrongly true. Fixed in sources.rs: membership now follows known parent
+edges with visited sets. Prefix and linked seeds are always members, a link brings its known ancestors,
+and every seed brings its descendants. Broken chains are reported by the phase's own check.
+
+Five full runs on the version-2 tree:
+run 1:
+test result: ok. 137 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 11.22s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test result: ok. 137 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 21.02s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test result: ok. 137 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 7.09s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 4:
+test result: ok. 137 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 7.38s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 5:
+test result: ok. 137 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 8.16s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+milestone::sources tests by name:
+test milestone::sources::tests::a_clean_phase_is_known_and_independent ... ok
+test milestone::sources::tests::a_broken_link_of_a_superseded_phase_carries_over ... ok
+test milestone::sources::tests::a_link_to_another_phase_matches_without_joining_this_one ... ok
+test milestone::sources::tests::a_linked_task_in_a_cycle_brings_the_cycle ... ok
+test milestone::sources::tests::a_link_brings_its_ancestors_and_descendants ... ok
+test milestone::sources::tests::a_linked_task_with_a_broken_chain_stays_a_member ... ok
+test milestone::sources::tests::an_unreadable_bridge_is_unknown_sources ... ok
+test milestone::sources::tests::bad_links_and_ignores_are_unknown_sources ... ok
+test milestone::sources::tests::descendants_of_a_prefix_task_with_a_broken_chain_count ... ok
+test milestone::sources::tests::overlapping_rules_conflict_instead_of_first_match ... ok
+test milestone::sources::tests::first_table_maps_as_the_design_says ... ok
+test milestone::sources::tests::broken_and_circular_chains_are_unknown_sources ... ok
+test milestone::sources::tests::ignores_count_for_their_phase_and_its_successors_only ... ok
+test milestone::sources::tests::known_ancestors_and_descendants_of_a_broken_link_count ... ok
+test milestone::sources::tests::independence_is_checked_on_every_participant_and_the_auditor ... ok
+test milestone::sources::tests::independence_needs_attestations_and_mapped_participants ... ok
+test milestone::sources::tests::trailer_names ... ok
+test milestone::sources::tests::tasks_of_no_phase_are_unmatched_tasks_of_another_phase_are_not ... ok
+test milestone::sources::tests::the_window_is_closed_and_never_inverted ... ok
+test milestone::sources::tests::reads_a_real_bridge_through_the_observer_routes ... ok
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 119 filtered out; finished in 0.07s
+
+$ cargo clippy -p review-gate -p agent-bridge --all-targets: 0 warnings/errors
+$ cargo fmt -p review-gate -p agent-bridge --check: clean

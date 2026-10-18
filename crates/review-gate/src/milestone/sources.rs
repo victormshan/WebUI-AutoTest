@@ -368,33 +368,50 @@ pub fn judge(i: &Inputs) -> Outcome {
                 .keys()
                 .map(|id| (*id, ancestors(id, &tasks)))
                 .collect();
-            // Each registered phase's own tasks: id prefix or a link, then their descendants;
-            // for a link also its ancestors.
+            // Children of each task, along the parent edges that exist.
+            let mut children: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+            for (id, t) in &tasks {
+                if let Some(p) = t.parent.as_deref() {
+                    children.entry(p).or_default().push(id);
+                }
+            }
+            // Each registered phase's own tasks. Seeds are the tasks matched by id prefix and
+            // the linked tasks that exist: members whatever their own parent chain looks like.
+            // A linked task also brings its ancestors, as far as known parent edges reach; every
+            // seed brings its descendants. Membership never depends on a chain being intact: a
+            // broken or circular chain is reported below, and the participants of every task
+            // that can be found still count. Visited sets end every walk on a cycle.
             let own = |x: &str| -> BTreeSet<String> {
                 let prefix = format!("{x}-");
-                let links = linked.get(x);
-                let mut seeds: BTreeSet<&str> = tasks
+                let mut seeds: Vec<&str> = tasks
                     .keys()
                     .copied()
                     .filter(|id| id.starts_with(&prefix))
                     .collect();
                 let mut out: BTreeSet<String> = BTreeSet::new();
-                // Matched by prefix: a member whatever its own parent chain looks like (a broken
-                // chain is reported below, and its participants still count).
-                out.extend(seeds.iter().map(|s| s.to_string()));
-                for l in links.into_iter().flatten() {
-                    if let Some(Ok(chain)) = chains.get(l.as_str()) {
-                        out.extend(chain.iter().map(|s| s.to_string()));
-                    }
-                    if tasks.contains_key(l.as_str()) {
-                        seeds.insert(l.as_str());
+                for l in linked.get(x).into_iter().flatten() {
+                    let Some((&l, _)) = tasks.get_key_value(l.as_str()) else {
+                        continue; // reported above as a link to a missing task
+                    };
+                    seeds.push(l);
+                    let mut seen = BTreeSet::from([l]);
+                    let mut cur = l;
+                    while let Some(p) = tasks.get(cur).and_then(|t| t.parent.as_deref()) {
+                        let Some((&p, _)) = tasks.get_key_value(p) else {
+                            break;
+                        };
+                        if !seen.insert(p) {
+                            break;
+                        }
+                        out.insert(p.to_string());
+                        cur = p;
                     }
                 }
-                for (id, chain) in &chains {
-                    if let Ok(chain) = chain
-                        && chain.iter().any(|a| seeds.contains(a))
-                    {
-                        out.insert(id.to_string());
+                let mut seen: BTreeSet<&str> = BTreeSet::new();
+                while let Some(t) = seeds.pop() {
+                    if seen.insert(t) {
+                        out.insert(t.to_string());
+                        seeds.extend(children.get(t).into_iter().flatten().copied());
                     }
                 }
                 out
@@ -1113,5 +1130,110 @@ mod tests {
             read_bridge(&http, "http://127.0.0.1:9", "ot").await,
             Err(agent_bridge::observe::CollectError::Transport(_))
         ));
+    }
+
+    /// Shared asserts: `members` are in the phase, the sources are unknown for `why`, and the
+    /// openai auditor is not independent of codex in them.
+    fn broken_link_outcome(o: &Outcome, members: &[&str], why: &str) {
+        for m in members {
+            assert!(o.tasks.contains(*m), "{m} is a member: {:?}", o.tasks);
+            assert!(
+                o.participants
+                    .iter()
+                    .any(|p| p.seen_in == *m && p.name == "codex"),
+                "{m}'s participants count"
+            );
+        }
+        assert!(!o.sources_known);
+        assert!(
+            o.sources_reasons.iter().any(|r| r.contains(why)),
+            "{:?}",
+            o.sources_reasons
+        );
+        assert!(!o.independent);
+        assert!(
+            o.independence_reasons
+                .iter()
+                .any(|r| r.contains("codex") && r.contains("openai"))
+        );
+    }
+
+    fn without_z() -> Case {
+        let mut c = Case::new();
+        c.tasks.retain(|(t, _)| t.id != "z");
+        c
+    }
+
+    #[test]
+    fn a_linked_task_with_a_broken_chain_stays_a_member() {
+        // Not the implementer's and not prefixed: only the link makes it ours (Codex review of
+        // 5c33588, P1: it used to vanish, with sources known and independent).
+        let mut c = without_z();
+        c.tasks
+            .push(task("linked-orphan", Some("gone"), "dsh", "codex", 3, &[]));
+        c.add(
+            "p",
+            "task_linked",
+            json!({"task": "linked-orphan", "reason": "r"}),
+        );
+        broken_link_outcome(&c.run(), &["linked-orphan"], "gone does not exist");
+    }
+
+    #[test]
+    fn a_linked_task_in_a_cycle_brings_the_cycle() {
+        let mut c = without_z();
+        c.tasks
+            .push(task("linked-a", Some("linked-b"), "dsh", "codex", 3, &[]));
+        c.tasks
+            .push(task("linked-b", Some("linked-a"), "dsh", "codex", 3, &[]));
+        c.add(
+            "p",
+            "task_linked",
+            json!({"task": "linked-a", "reason": "r"}),
+        );
+        broken_link_outcome(&c.run(), &["linked-a", "linked-b"], "circular");
+    }
+
+    #[test]
+    fn known_ancestors_and_descendants_of_a_broken_link_count() {
+        // gone ← r1 ← mid ← kid ← grandkid; the link names mid.
+        let mut c = without_z();
+        c.tasks
+            .push(task("r1", Some("gone"), "dsh", "codex", -40, &[]));
+        c.tasks
+            .push(task("mid", Some("r1"), "dsh", "codex", -39, &[]));
+        c.tasks
+            .push(task("kid", Some("mid"), "dsh", "codex", 4, &[]));
+        c.tasks
+            .push(task("grandkid", Some("kid"), "dsh", "codex", 5, &[]));
+        c.add("p", "task_linked", json!({"task": "mid", "reason": "r"}));
+        broken_link_outcome(
+            &c.run(),
+            &["r1", "mid", "kid", "grandkid"],
+            "gone does not exist",
+        );
+    }
+
+    #[test]
+    fn descendants_of_a_prefix_task_with_a_broken_chain_count() {
+        let mut c = without_z();
+        c.tasks
+            .push(task("p-top", Some("gone"), "dsh", "codex", 3, &[]));
+        c.tasks
+            .push(task("under", Some("p-top"), "dsh", "codex", 4, &[]));
+        broken_link_outcome(&c.run(), &["p-top", "under"], "gone does not exist");
+    }
+
+    #[test]
+    fn a_broken_link_of_a_superseded_phase_carries_over() {
+        let mut c = without_z();
+        c.tasks
+            .push(task("linked-orphan", Some("gone"), "dsh", "codex", 3, &[]));
+        c.add(
+            "o",
+            "task_linked",
+            json!({"task": "linked-orphan", "reason": "r"}),
+        );
+        broken_link_outcome(&c.run(), &["linked-orphan"], "gone does not exist");
     }
 }
