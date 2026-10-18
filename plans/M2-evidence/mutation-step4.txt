@@ -1,0 +1,29 @@
+# M2 step 4 mutations (runner client, reverse authentication), 2026-10-18T12:54:00+08:00
+Each applied alone, then reverted; cargo test -p review-gate --lib milestone::runner.
+
+## R1 credentials only from the first piece
+test milestone::runner::tests::a_reply_written_by_two_processes_is_refused ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 0.23s
+## R2 a piece without credentials is accepted
+test milestone::runner::tests::a_reply_without_credentials_is_refused ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 1.75s
+## R3 uid not checked
+test milestone::runner::tests::the_wrong_uid_or_cgroup_is_refused ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 1.74s
+## R4 cgroup not checked
+test milestone::runner::tests::the_wrong_uid_or_cgroup_is_refused ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 1.76s
+## R5 a gone sender is accepted
+test milestone::runner::tests::a_sender_that_is_gone_when_the_reply_is_in_is_not_authenticated ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 1.74s
+## R6 truncated control data accepted
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 88 filtered out; finished in 1.76s
+## R6 truncated control data accepted (rerun after adding a_reply_whose_control_data_does_not_fit_is_refused)
+test milestone::runner::tests::a_reply_whose_control_data_does_not_fit_is_refused ... FAILED
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 1.74s
+## R7 passed file descriptors accepted
+test milestone::runner::tests::passed_file_descriptors_are_closed_and_the_reply_refused ... FAILED
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out; finished in 1.75s
+
+R6 first survived (no test produced MSG_CTRUNC); a_reply_whose_control_data_does_not_fit_is_refused (a sender passing 12 fds) catches it. R1-R5 and R7 caught.
+Scope: the senders here are this test process or python3 children under the same uid. The real cross-uid path (gate 999 -> socket-activated runner 997 in /system.slice/audit-runner.service) is a deployment acceptance item (step 8), not claimed here.
