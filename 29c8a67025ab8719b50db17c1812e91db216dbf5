@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-step2-ledger
+version: 1/3
+commit: 29c8a67025ab8719b50db17c1812e91db216dbf5
+tree: 625adaf6a8e15316139cbbf4e331cac73ccdf2c2
+parent: ddf7f4aefa0ca76765fc77f095de14f1d30e9615
+review: v1-1
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-18T04:37:26Z
+signature: iPXEfVNQw/3cvU+Gh2jvV0yozDn1NVR9Mnli7xMju7UUaQTKCQsIeC1SrSJ5W6/76Kz7Q7u1lzkEnzU7208JBA==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
