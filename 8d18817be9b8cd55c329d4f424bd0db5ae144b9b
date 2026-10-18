@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-step5-bridge-observer
+version: 1/3
+commit: 8d18817be9b8cd55c329d4f424bd0db5ae144b9b
+tree: b7ba62a8929035e691f2a95d49056afc84607710
+parent: 16e96c5e7f940de28ebb9ac0b3124ddf73cfcb27
+review: v1-1
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-18T05:55:41Z
+signature: f+5WLoJHHzETwNpQCvwyncoOQj7uXk/AiA+bJ2PMdoF49T++lsJPZDVsx1bMeIV24+IxmLzmLL62Oc9Q4DVHBA==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
