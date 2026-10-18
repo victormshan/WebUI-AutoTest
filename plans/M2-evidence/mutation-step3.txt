@@ -1,0 +1,22 @@
+# M2 step 3 mutations (sync + publish), 2026-10-18T12:40:10+08:00
+Each applied alone, then reverted; cargo test -p review-gate --lib milestone::sync.
+
+## S1 checkpoint not required on the remote
+test milestone::sync::tests::stops_on_truncation_rewrite_divergence_tampering_and_no_reach ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 82 filtered out; finished in 0.23s
+## S2 divergence not detected
+test milestone::sync::tests::stops_on_truncation_rewrite_divergence_tampering_and_no_reach ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 82 filtered out; finished in 0.24s
+## S3 remote log not verified
+test milestone::sync::tests::stops_on_truncation_rewrite_divergence_tampering_and_no_reach ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 82 filtered out; finished in 0.23s
+## S4 unreachable read as missing
+test milestone::sync::tests::an_unreachable_remote_is_never_read_as_empty ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 82 filtered out; finished in 0.24s
+## S5 publish overwrites a remote that is not a prefix
+test milestone::sync::tests::publish_refuses_to_overwrite_a_newer_or_different_remote ... FAILED
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 82 filtered out; finished in 0.24s
+## S6 note stored with -m (whitespace rewritten)
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 82 filtered out; finished in 0.23s
+
+S6 survives and is equivalent for every log this code writes: a canonical log has no trailing whitespace and no blank lines, so git's stripspace (used by notes add -m) leaves it unchanged and adds back the final newline. Storing the log as a blob and attaching it with -C keeps the bytes exact for any content; the round-trip test checks byte equality.
