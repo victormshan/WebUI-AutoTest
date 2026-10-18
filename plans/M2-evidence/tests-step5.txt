@@ -1,0 +1,85 @@
+M2 step 5 — agent-bridge read-only observers: test runs (base 16e96c5, CARGO_TARGET_DIR shared)
+
+run 1:
+     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP/target/debug/deps/agent_bridge-88ae72f3514c6861)
+test service::tests::a_silent_receiver_is_nudged_then_the_user_is_told ... FAILED
+test result: FAILED. 74 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.50s
+run 2:
+     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP/target/debug/deps/agent_bridge-88ae72f3514c6861)
+test result: ok. 75 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.48s
+     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP/target/debug/deps/agent_bridge-b31f9f91982c0bba)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/serve_observers.rs (/home/administrator/projects/Chrome-MCP/target/debug/deps/serve_observers-904ee74ef9b17d0c)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP/target/debug/deps/agent_bridge-88ae72f3514c6861)
+test result: ok. 75 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.38s
+     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP/target/debug/deps/agent_bridge-b31f9f91982c0bba)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/serve_observers.rs (/home/administrator/projects/Chrome-MCP/target/debug/deps/serve_observers-904ee74ef9b17d0c)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 4:
+     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP/target/debug/deps/agent_bridge-88ae72f3514c6861)
+test result: ok. 75 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.67s
+     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP/target/debug/deps/agent_bridge-b31f9f91982c0bba)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/serve_observers.rs (/home/administrator/projects/Chrome-MCP/target/debug/deps/serve_observers-904ee74ef9b17d0c)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 5:
+     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP/target/debug/deps/agent_bridge-88ae72f3514c6861)
+test service::tests::monitor_rewakes_once_and_marks_stalls ... FAILED
+test result: FAILED. 74 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.27s
+
+observe tests by name (run 5):
+test observe::tests::missing_default_file_means_none_but_an_explicit_one_must_exist ... ok
+test observe::tests::parse_errors_never_quote_the_file ... ok
+test observe::tests::paging_is_exclusive_and_ends_with_none ... ok
+test observe::tests::observers_parse_strictly ... ok
+test observe::tests::roles_never_share_a_name_or_a_hash ... ok
+test observe::tests::unreadable_file_is_an_error ... ok
+test observe::tests::participants_include_every_sender ... ok
+test observe::tests::revision_covers_every_task_and_nothing_else ... ok
+test service::observe_tests::collect_refuses_what_it_cannot_trust ... ok
+test service::observe_tests::incomplete_history_is_refused ... ok
+test service::observe_tests::observer_reads_metadata_only ... ok
+test service::observe_tests::only_observers_reach_the_observe_routes ... ok
+test service::observe_tests::route_list_matches_the_router_source ... ok
+test service::observe_tests::collect_rereads_after_a_change_and_gives_up_on_churn ... ok
+test service::observe_tests::limits_and_queries_are_checked ... ok
+test service::observe_tests::paging_walks_everything_once ... ok
+test service::observe_tests::revision_survives_a_restart_and_follows_any_change ... ok
+test service::observe_tests::an_observer_token_does_nothing_else ... ok
+test service::observe_tests::collect_reads_everything_at_one_revision ... ok
+test service::observe_tests::observer_requests_change_nothing ... ok
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 1.51s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test an_unreadable_observers_file_stops_start_up ... ok
+test an_isolated_state_never_reads_the_home_observers ... ok
+test a_bad_observers_file_stops_start_up_before_any_state_is_written ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.15s
+test an_unreadable_observers_file_stops_start_up ... ok
+test an_isolated_state_never_reads_the_home_observers ... ok
+test the_default_state_reads_the_default_file_and_an_explicit_path_is_used ... ok
+test a_bad_observers_file_stops_start_up_before_any_state_is_written ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+clippy --all-targets: 0 warnings/errors
+cargo fmt --check: clean
+whoami: administrator (uid 1000); the 0000-file tests ran, no SKIPPED line above
+
+Read-only check on a copy of the live bridge state (2026-10-18; copy in the scratchpad, removed afterwards; debug build of this change on 127.0.0.1:7999 with throwaway tokens; the live service was not touched):
+  list 200: 109 tasks, next=null; every detail at the same revision, message_metadata count == message_count, last n == last_n, detail task == list entry: 109 checked, 0 mismatches
+  GET /v1/health with the observer token: 403
+
+Failure in run 1, recorded as it happened: service::tests::a_silent_receiver_is_nudged_then_the_user_is_told
+(an existing test, unchanged by this step; it does not use observers) failed once. Its panic text
+was not captured. The test steps the monitor and waits on fixed 300 ms sleeps (settle()) for mock
+pushes. Re-runs afterwards:
+- this change, that test alone: 0/30 failed;
+- this change, full lib suite: 0/10 failed (plus runs 2-5 above);
+- base 16e96c5 in a separate worktree, full lib suite: 0/15 failed.
+This step's only change on that path is the outer observer_gate (one sha256 per request).
+Not fixed or skipped here; noted as a timing-sensitive existing test.

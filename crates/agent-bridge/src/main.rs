@@ -47,6 +47,12 @@ enum Cmd {
         /// — only with the default --state: any other state directory pushes only with --notify
         #[arg(long)]
         notify: Option<PathBuf>,
+        /// Read-only observers: JSON object name → sha256 of its token (they may only list task
+        /// metadata, see observe.rs). Default: ~/.config/agent-bridge/observers.json if it exists
+        /// — only with the default --state: any other state directory has observers only with
+        /// --observers, and a path given here must exist
+        #[arg(long)]
+        observers: Option<PathBuf>,
         /// Read-only mirror of every message (e.g. /mnt/d/cc-tasks/claude-bridge/tasks)
         #[arg(long)]
         mirror: Option<PathBuf>,
@@ -470,6 +476,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             listen,
             agents,
             notify,
+            observers,
             mirror,
             step_relay_dir,
         } => {
@@ -495,6 +502,18 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     .with_context(|| format!("agent {agent}: expected a 64-hex-digit sha256"))?;
                 tokens.push((agent.clone(), h));
             }
+            // Observers are checked before anything opens or writes state.
+            let observers = match observers {
+                Some(p) => agent_bridge::observe::load_observers(&p, true)?,
+                None if isolated => vec![],
+                None => agent_bridge::observe::load_observers(
+                    &home().join(".config/agent-bridge/observers.json"),
+                    false,
+                )?,
+            };
+            agent_bridge::observe::check_distinct(&tokens, &observers)?;
+            let observer_names: Vec<&str> = observers.iter().map(|(o, _)| o.as_str()).collect();
+            eprintln!("agent-bridge: read-only observers {observer_names:?}");
             let names: Vec<&str> = map.keys().map(String::as_str).collect();
             let bridge = Bridge::open(&state, &names)?;
             if bridge.bad_lines > 0 {
@@ -529,7 +548,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 "agent-bridge: push wake-ups for {:?}",
                 targets.keys().collect::<Vec<_>>()
             );
-            let mut app = AppState::new(bridge, tokens)?.with_push(targets);
+            let mut app = AppState::new(bridge, tokens)?
+                .with_push(targets)
+                .with_observers(observers)?;
             if let Some(m) = mirror {
                 eprintln!("agent-bridge: read-only mirror at {}", m.display());
                 app = app.with_mirror(m);

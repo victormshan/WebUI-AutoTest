@@ -1,0 +1,30 @@
+M2 step 5 — mutation testing (each mutant applied alone, full agent-bridge test suite run, source restored)
+
+G1 gate allows HEAD => CAUGHT service::observe_tests::an_observer_token_does_nothing_else
+G2 gate prefix-only => CAUGHT service::observe_tests::an_observer_token_does_nothing_else,service::observe_tests::only_observers_reach_the_observe_routes
+G3 agents reach observe => CAUGHT service::observe_tests::only_observers_reach_the_observe_routes
+G4 anonymous reach observe => CAUGHT service::observe_tests::only_observers_reach_the_observe_routes
+G5 observer token seen as agent => CAUGHT service::observe_tests::incomplete_history_is_refused,service::observe_tests::an_observer_token_does_nothing_else,service::observe_tests::collect_rereads_after_a_change_and_gives_up_on_churn,service::observe_tests::limits_and_queries_are_checked
+G6 gate before fallback => CAUGHT service::observe_tests::an_observer_token_does_nothing_else,service::observe_tests::only_observers_reach_the_observe_routes
+H1 incomplete history served => CAUGHT service::observe_tests::incomplete_history_is_refused
+H2 limit max inclusive off by one => CAUGHT service::observe_tests::collect_rereads_after_a_change_and_gives_up_on_churn,service::observe_tests::limits_and_queries_are_checked,service::observe_tests::collect_reads_everything_at_one_revision
+H3 limit zero allowed => CAUGHT service::observe_tests::limits_and_queries_are_checked,service::observe_tests::observer_requests_change_nothing
+R1 revision over tasks only => CAUGHT observe::tests::revision_covers_every_task_and_nothing_else
+P1 list paging inclusive => CAUGHT observe::tests::paging_is_exclusive_and_ends_with_none,service::observe_tests::observer_reads_metadata_only,service::observe_tests::paging_walks_everything_once
+P2 message paging inclusive => CAUGHT observe::tests::paging_is_exclusive_and_ends_with_none,service::observe_tests::paging_walks_everything_once
+P3 participants senders dropped => CAUGHT observe::tests::participants_include_every_sender
+C1 parse duplicate allowed => CAUGHT observe::tests::observers_parse_strictly
+C2 hex ASCII check dropped => CAUGHT observe::tests::observers_parse_strictly
+C3 observer may share agent hash => CAUGHT observe::tests::roles_never_share_a_name_or_a_hash
+C4 isolated reads HOME file => CAUGHT an_isolated_state_never_reads_the_home_observers
+C5 explicit missing tolerated => CAUGHT a_bad_observers_file_stops_start_up_before_any_state_is_written
+K1 collect: 503 not special => CAUGHT service::observe_tests::collect_refuses_what_it_cannot_trust
+K2 collect: complete ignored => CAUGHT service::observe_tests::collect_refuses_what_it_cannot_trust
+K3 collect: order unchecked => CAUGHT service::observe_tests::collect_refuses_what_it_cannot_trust
+K4 collect: next unchecked => CAUGHT service::observe_tests::collect_refuses_what_it_cannot_trust
+K5 collect: detail vs list unchecked => CAUGHT service::observe_tests::collect_refuses_what_it_cannot_trust
+K6 collect: count unchecked => CAUGHT service::observe_tests::collect_refuses_what_it_cannot_trust
+K7 collect: no final re-read => CAUGHT service::observe_tests::collect_rereads_after_a_change_and_gives_up_on_churn
+C6 observers after Bridge::open => CAUGHT a_bad_observers_file_stops_start_up_before_any_state_is_written,an_unreadable_observers_file_stops_start_up
+
+Note: the first C6 mutant was written wrongly (it did not move the observer loading, only added a clone) and survived; it was replaced by a real move of the loading block after Bridge::open, which is caught (line above). 26 of 26 real mutants caught.

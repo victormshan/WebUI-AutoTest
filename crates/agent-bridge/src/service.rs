@@ -152,6 +152,8 @@ pub struct AppState {
     inner: Mutex<Inner>,
     /// (agent, sha256(token))
     tokens: Vec<(String, [u8; 32])>,
+    /// (observer, sha256(token)): read-only, not participants (`observe.rs`).
+    observers: Vec<(String, [u8; 32])>,
     /// Woken whenever a message is stored.
     news: Notify,
     /// Agents woken by push (agent → notify target).
@@ -190,7 +192,8 @@ pub fn hex(b: &[u8]) -> String {
 
 pub fn parse_hex32(s: &str) -> Option<[u8; 32]> {
     let s = s.trim();
-    if s.len() != 64 {
+    // ASCII first: slicing below is by byte, and 64 bytes of other text are not 64 digits.
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let mut out = [0u8; 32];
@@ -229,6 +232,7 @@ impl AppState {
                 alerts: Vec::new(),
             }),
             tokens,
+            observers: Vec::new(),
             news: Notify::new(),
             targets: BTreeMap::new(),
             timing: Timing::default(),
@@ -236,6 +240,13 @@ impl AppState {
             copier: Copier::spawn(None),
             step_relay: None,
         })
+    }
+
+    /// Read-only observers (`observe.rs`); none may share a name or token hash with an agent.
+    pub fn with_observers(mut self, observers: Vec<(String, [u8; 32])>) -> anyhow::Result<Self> {
+        crate::observe::check_distinct(&self.tokens, &observers)?;
+        self.observers = observers;
+        Ok(self)
     }
 
     /// Writes a read-only copy of every message under `dir` (see `mirror.rs`).
@@ -712,6 +723,58 @@ impl AppState {
         found
     }
 
+    /// Who a bearer token belongs to, constant-time over the tokens of both roles. Reads nothing
+    /// and writes nothing else.
+    fn role_for(&self, header_value: Option<&str>) -> Role {
+        let Some(token) = header_value.and_then(|h| h.strip_prefix("Bearer ")) else {
+            return Role::Anonymous;
+        };
+        let given = sha256(token);
+        let mut found = Role::Invalid;
+        let tagged = self
+            .tokens
+            .iter()
+            .map(|(_, h)| (h, false))
+            .chain(self.observers.iter().map(|(_, h)| (h, true)));
+        for (h, observer) in tagged {
+            let diff = h
+                .iter()
+                .zip(given.iter())
+                .fold(0u8, |acc, (x, y)| acc | (x ^ y));
+            if diff == 0 {
+                found = if observer {
+                    Role::Observer
+                } else {
+                    Role::Agent
+                };
+            }
+        }
+        found
+    }
+
+    /// Everything in memory a request could change besides the bridge itself (tests compare it
+    /// before and after observer requests).
+    #[cfg(test)]
+    fn side_state(&self) -> String {
+        let g = self.lock();
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            g.presence
+                .iter()
+                .map(|(a, p)| (a, format!("{p:?}")))
+                .collect::<Vec<_>>(),
+            g.waiters,
+            g.wakes,
+            g.pushed,
+            g.nudges,
+            g.rewoken,
+            g.stalled,
+            g.stall_notice,
+            g.asked,
+            g.alerts,
+        )
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -779,6 +842,17 @@ type ApiResult<T> = Result<Json<T>, ApiError>;
 #[derive(Clone)]
 struct Caller(String);
 
+/// An observer request the gate let through (`observer_gate`).
+#[derive(Clone)]
+struct ObserverCaller;
+
+enum Role {
+    Anonymous,
+    Invalid,
+    Agent,
+    Observer,
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     let api = Router::new()
         .route("/v1/tasks", get(list_tasks).post(create_task))
@@ -791,11 +865,164 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/user/asked", post(user_asked))
         .route("/v1/presence", post(presence))
         .layer(middleware::from_fn_with_state(state.clone(), auth));
+    // Not under `auth`: only `observer_gate` admits them, and they never touch presence.
+    let observe = Router::new()
+        .route(OBSERVE_LIST, get(observe_list))
+        .route("/v1/observe/tasks/{id}", get(observe_detail));
     Router::new()
         .route("/v1/health", get(health))
         .merge(api)
+        .merge(observe)
+        .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "no such route".into()) })
         .layer(DefaultBodyLimit::max(2 << 20))
+        // Last, so it wraps every route, the fallback and the 405 answers too.
+        .layer(middleware::from_fn_with_state(state.clone(), observer_gate))
         .with_state(state)
+}
+
+const OBSERVE_LIST: &str = "/v1/observe/tasks";
+
+/// Runs before routing results reach any handler. An observer token may be used for exactly
+/// `GET /v1/observe/tasks` and `GET /v1/observe/tasks/<one segment>`: anything else (HEAD,
+/// health, unknown paths, other methods) is 403 here, before a handler or a presence update.
+/// Agents are refused the observe routes (403), and without a valid token they are 401. Every
+/// other request goes on unchanged (agent routes keep their own `auth`).
+async fn observer_gate(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let observe_path = path == "/v1/observe" || path.starts_with("/v1/observe/");
+    let exact = path == OBSERVE_LIST
+        || path
+            .strip_prefix("/v1/observe/tasks/")
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'));
+    let role = s.role_for(
+        req.headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok()),
+    );
+    match role {
+        Role::Observer if req.method() == axum::http::Method::GET && exact => {
+            req.extensions_mut().insert(ObserverCaller);
+            next.run(req).await
+        }
+        Role::Observer => ApiError(
+            StatusCode::FORBIDDEN,
+            "an observer may only GET /v1/observe/tasks[/<id>]".into(),
+        )
+        .into_response(),
+        Role::Agent if observe_path => ApiError(
+            StatusCode::FORBIDDEN,
+            "the observe routes are for observers only".into(),
+        )
+        .into_response(),
+        Role::Anonymous | Role::Invalid if observe_path => ApiError(
+            StatusCode::UNAUTHORIZED,
+            "missing or wrong bearer token".into(),
+        )
+        .into_response(),
+        _ => next.run(req).await,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObserveListQuery {
+    after: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObserveDetailQuery {
+    after_n: Option<u32>,
+    limit: Option<usize>,
+}
+
+fn observe_limit(limit: Option<usize>, default: usize, max: usize) -> Result<usize, ApiError> {
+    match limit.unwrap_or(default) {
+        l @ 1.. if l <= max => Ok(l),
+        _ => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("limit must be 1..={max}"),
+        )),
+    }
+}
+
+/// 503 when the loaded history skipped unreadable lines: no answer to build an audit on.
+fn observe_incomplete(b: &Bridge) -> Option<Response> {
+    (b.bad_lines > 0).then(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "history_incomplete", "badLines": b.bad_lines })),
+        )
+            .into_response()
+    })
+}
+
+async fn observe_list(
+    State(s): State<Arc<AppState>>,
+    Extension(ObserverCaller): Extension<ObserverCaller>,
+    q: Result<Query<ObserveListQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let Ok(Query(q)) = q else {
+        return ApiError(StatusCode::BAD_REQUEST, "bad query".into()).into_response();
+    };
+    let limit = match observe_limit(
+        q.limit,
+        crate::observe::LIST_LIMIT_DEFAULT,
+        crate::observe::LIST_LIMIT_MAX,
+    ) {
+        Ok(l) => l,
+        Err(e) => return e.into_response(),
+    };
+    if q.after.as_deref().is_some_and(|a| !crate::valid_id(a)) {
+        return ApiError(StatusCode::BAD_REQUEST, "after is not a task id".into()).into_response();
+    }
+    let g = s.lock();
+    if let Some(r) = observe_incomplete(&g.bridge) {
+        return r;
+    }
+    let all = crate::observe::observe_all(&g.bridge);
+    let (tasks, next) = crate::observe::list_page(&all, q.after.as_deref(), limit);
+    Json(json!({
+        "revision": crate::observe::revision(&all), "complete": true, "tasks": tasks, "next": next,
+    }))
+    .into_response()
+}
+
+async fn observe_detail(
+    State(s): State<Arc<AppState>>,
+    Extension(ObserverCaller): Extension<ObserverCaller>,
+    id: Result<Path<String>, axum::extract::rejection::PathRejection>,
+    q: Result<Query<ObserveDetailQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let (Ok(Path(id)), Ok(Query(q))) = (id, q) else {
+        return ApiError(StatusCode::BAD_REQUEST, "bad path or query".into()).into_response();
+    };
+    if !crate::valid_id(&id) {
+        return ApiError(StatusCode::BAD_REQUEST, "not a task id".into()).into_response();
+    }
+    let limit = match observe_limit(
+        q.limit,
+        crate::observe::DETAIL_LIMIT_DEFAULT,
+        crate::observe::DETAIL_LIMIT_MAX,
+    ) {
+        Ok(l) => l,
+        Err(e) => return e.into_response(),
+    };
+    let g = s.lock();
+    if let Some(r) = observe_incomplete(&g.bridge) {
+        return r;
+    }
+    let all = crate::observe::observe_all(&g.bridge);
+    let Some((task, msgs)) = all.iter().find(|(t, _)| t.id == id) else {
+        return ApiError(StatusCode::NOT_FOUND, format!("no task {id}")).into_response();
+    };
+    let (page, next_n) = crate::observe::message_page(msgs, q.after_n, limit);
+    Json(json!({
+        "revision": crate::observe::revision(&all), "complete": true, "task": task,
+        "message_metadata": page, "next_n": next_n,
+    }))
+    .into_response()
 }
 
 pub async fn serve(state: Arc<AppState>, listener: tokio::net::TcpListener) -> std::io::Result<()> {
@@ -2762,5 +2989,735 @@ pub(crate) mod tests {
             m["implicit_read"],
             json!({ "task": "t", "from": 3, "to": 3 })
         );
+    }
+}
+
+#[cfg(test)]
+mod observe_tests {
+    use super::tests::{CLAUDE, DSH, Env};
+    use super::*;
+    use crate::observe::{self, CollectError};
+
+    const OBS: &str = "observer-token-0123456789abcdef0123456789";
+
+    fn app(dir: &std::path::Path) -> AppState {
+        let bridge = Bridge::open(dir.join("state"), &["claude", "dsh"]).unwrap();
+        AppState::new(
+            bridge,
+            vec![
+                ("claude".into(), sha256(CLAUDE)),
+                ("dsh".into(), sha256(DSH)),
+            ],
+        )
+        .unwrap()
+        .with_observers(vec![("review-gate".into(), sha256(OBS))])
+        .unwrap()
+    }
+
+    async fn serve_app(dir: tempfile::TempDir, state: AppState) -> (Env, Arc<AppState>) {
+        let state = Arc::new(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(serve(state.clone(), listener));
+        (
+            Env {
+                _dir: dir,
+                url,
+                http: reqwest::Client::new(),
+            },
+            state,
+        )
+    }
+
+    async fn start() -> (Env, Arc<AppState>) {
+        let dir = tempfile::tempdir().unwrap();
+        let st = app(dir.path());
+        serve_app(dir, st).await
+    }
+
+    fn task_body(id: &str) -> Value {
+        json!({ "id": id, "kind": "task", "protocol": PROTOCOL, "body": "secret body text",
+                "meta": { "to": "dsh", "title": "do it" } })
+    }
+
+    async fn task_with_messages(e: &Env, id: &str, acks: usize) {
+        assert_eq!(e.post(CLAUDE, "/v1/tasks", task_body(id)).await.0, 200);
+        if acks > 0 {
+            let (st, v) = e
+                .post(
+                    DSH,
+                    &format!("/v1/tasks/{id}/messages"),
+                    json!({ "kind": "ack", "protocol": PROTOCOL, "body": "ack body" }),
+                )
+                .await;
+            assert_eq!(st, 200, "{v}");
+        }
+        for i in 1..acks {
+            let (st, v) = e
+                .post(
+                    DSH,
+                    &format!("/v1/tasks/{id}/messages"),
+                    json!({ "kind": "progress", "protocol": PROTOCOL, "body": format!("p{i}") }),
+                )
+                .await;
+            assert_eq!(st, 200, "{v}");
+        }
+    }
+
+    async fn raw(e: &Env, token: Option<&str>, method: reqwest::Method, path: &str) -> u16 {
+        let mut r = e.http.request(method, format!("{}{path}", e.url));
+        if let Some(t) = token {
+            r = r.bearer_auth(t);
+        }
+        r.send().await.unwrap().status().as_u16()
+    }
+
+    /// One GET with `path` exactly as given (no client-side normalising); returns the status.
+    async fn wire(e: &Env, token: &str, path: &str) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let addr = e.url.strip_prefix("http://").unwrap();
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        c.write_all(format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).await.unwrap();
+        out.split(' ').nth(1).unwrap().parse().unwrap()
+    }
+
+    fn keys(v: &Value) -> BTreeSet<String> {
+        v.as_object().unwrap().keys().cloned().collect()
+    }
+
+    fn set(k: &[&str]) -> BTreeSet<String> {
+        k.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Every route the router registers, by method (kept in step with the source below).
+    const ROUTES: &[(&str, &str)] = &[
+        ("GET", "/v1/tasks"),
+        ("POST", "/v1/tasks"),
+        ("GET", "/v1/tasks/{id}"),
+        ("POST", "/v1/tasks/{id}/messages"),
+        ("GET", "/v1/inbox"),
+        ("POST", "/v1/inbox/ack"),
+        ("GET", "/v1/user/pending"),
+        ("POST", "/v1/user/decisions"),
+        ("POST", "/v1/user/asked"),
+        ("POST", "/v1/presence"),
+        ("GET", "/v1/health"),
+        ("GET", "/v1/observe/tasks"),
+        ("GET", "/v1/observe/tasks/{id}"),
+    ];
+
+    #[test]
+    fn route_list_matches_the_router_source() {
+        let src = include_str!("service.rs");
+        let body =
+            &src[src.find("pub fn router(").unwrap()..src.find("const OBSERVE_LIST").unwrap()];
+        let mut found = BTreeSet::new();
+        for part in body.split(".route(").skip(1) {
+            let path = match part.trim_start().strip_prefix('"') {
+                Some(r) => r.split('"').next().unwrap().to_string(),
+                None => OBSERVE_LIST.to_string(),
+            };
+            found.insert(path);
+        }
+        let listed: BTreeSet<String> = ROUTES.iter().map(|(_, p)| p.to_string()).collect();
+        assert_eq!(found, listed, "a route was added without a line in ROUTES");
+    }
+
+    #[tokio::test]
+    async fn observer_reads_metadata_only() {
+        let (e, _) = start().await;
+        task_with_messages(&e, "p-1", 0).await;
+        let mut child = task_body("t1");
+        child["meta"]["parent"] = json!("p-1");
+        assert_eq!(e.post(CLAUDE, "/v1/tasks", child).await.0, 200);
+        for k in ["ack", "progress"] {
+            let (st, v) = e
+                .post(
+                    DSH,
+                    "/v1/tasks/t1/messages",
+                    json!({ "kind": k, "protocol": PROTOCOL, "body": "ack body" }),
+                )
+                .await;
+            assert_eq!(st, 200, "{v}");
+        }
+        let (st, v) = e.get(OBS, "/v1/observe/tasks?after=p-1").await;
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(keys(&v), set(&["revision", "complete", "tasks", "next"]));
+        assert_eq!(v["complete"], true);
+        assert_eq!(v["next"], Value::Null);
+        let t = &v["tasks"][0];
+        assert_eq!(
+            keys(t),
+            set(&[
+                "id",
+                "parent",
+                "from",
+                "to",
+                "state",
+                "created_at",
+                "updated_at",
+                "message_count",
+                "last_n",
+                "participants"
+            ])
+        );
+        assert_eq!(
+            (t["id"].as_str(), t["parent"].as_str()),
+            (Some("t1"), Some("p-1"))
+        );
+        assert_eq!(
+            (t["message_count"].as_u64(), t["last_n"].as_u64()),
+            (Some(3), Some(3))
+        );
+        assert_eq!(t["participants"], json!(["claude", "dsh"]));
+        let (st, d) = e.get(OBS, "/v1/observe/tasks/t1").await;
+        assert_eq!(st, 200, "{d}");
+        assert_eq!(
+            keys(&d),
+            set(&["revision", "complete", "task", "message_metadata", "next_n"])
+        );
+        assert_eq!(&d["task"], t);
+        assert_eq!(d["revision"], v["revision"]);
+        let ms = d["message_metadata"].as_array().unwrap();
+        assert_eq!(ms.len(), 3);
+        for m in ms {
+            assert_eq!(keys(m), set(&["n", "from", "kind", "at"]));
+        }
+        assert_eq!(
+            (ms[0]["kind"].as_str(), ms[1]["from"].as_str()),
+            (Some("task"), Some("dsh"))
+        );
+        let all = format!("{v}{d}");
+        for leak in ["secret body text", "ack body", "do it"] {
+            assert!(!all.contains(leak), "{leak} leaked");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_observer_token_does_nothing_else() {
+        let (e, _) = start().await;
+        task_with_messages(&e, "t1", 1).await;
+        use reqwest::Method as M;
+        let mut cases: Vec<(M, String)> = ROUTES
+            .iter()
+            .filter(|(_, p)| !p.starts_with("/v1/observe/"))
+            .map(|(m, p)| (m.parse().unwrap(), p.replace("{id}", "t1")))
+            .collect();
+        for (m, p) in [
+            (M::HEAD, "/v1/health"),
+            (M::HEAD, "/v1/observe/tasks"),
+            (M::HEAD, "/v1/observe/tasks/t1"),
+            (M::POST, "/v1/observe/tasks"),
+            (M::PUT, "/v1/observe/tasks"),
+            (M::DELETE, "/v1/observe/tasks/t1"),
+            (M::POST, "/v1/observe/tasks/t1"),
+            (M::GET, "/v1/observe"),
+            (M::GET, "/v1/observe/"),
+            (M::GET, "/v1/observe/tasks/"),
+            (M::GET, "/v1/observe/tasks/t1/"),
+            (M::GET, "/v1/observe/tasks/t1/messages"),
+            (M::GET, "/v1/observe/other"),
+            (M::GET, "/v1/nothing-here"),
+            (M::GET, "/"),
+            (M::GET, "/v1/tasks/t1/messages"),
+            (M::PATCH, "/v1/tasks"),
+        ] {
+            cases.push((m, p.to_string()));
+        }
+        for (m, p) in cases {
+            assert_eq!(raw(&e, Some(OBS), m.clone(), &p).await, 403, "{m} {p}");
+        }
+        // The same paths still answer as before for everyone else.
+        assert_eq!(raw(&e, None, M::GET, "/v1/health").await, 200);
+        assert_eq!(raw(&e, Some(CLAUDE), M::GET, "/v1/nothing-here").await, 404);
+        assert_eq!(raw(&e, Some(CLAUDE), M::PATCH, "/v1/tasks").await, 405);
+        assert_eq!(raw(&e, None, M::GET, "/v1/tasks").await, 401);
+    }
+
+    #[tokio::test]
+    async fn only_observers_reach_the_observe_routes() {
+        use reqwest::Method as M;
+        let (e, _) = start().await;
+        task_with_messages(&e, "t1", 1).await;
+        for p in [
+            "/v1/observe/tasks",
+            "/v1/observe/tasks/t1",
+            "/v1/observe/tasks/nope",
+            "/v1/observe",
+        ] {
+            assert_eq!(raw(&e, Some(CLAUDE), M::GET, p).await, 403, "agent {p}");
+            assert_eq!(raw(&e, Some(DSH), M::HEAD, p).await, 403, "agent HEAD {p}");
+            assert_eq!(raw(&e, None, M::GET, p).await, 401, "anonymous {p}");
+            assert_eq!(raw(&e, Some("wrong"), M::GET, p).await, 401, "invalid {p}");
+        }
+        assert_eq!(
+            raw(&e, Some(OBS), M::GET, "/v1/observe/tasks/nope").await,
+            404
+        );
+        assert_eq!(
+            raw(&e, Some(OBS), M::GET, "/v1/observe/tasks/a%2Fb").await,
+            400
+        );
+        assert_eq!(
+            raw(&e, Some(OBS), M::GET, "/v1/observe/tasks/a%20b").await,
+            400
+        );
+        // reqwest resolves dot segments before sending; say them on the wire as they are.
+        for p in [
+            "/v1/observe/tasks/..",
+            "/v1/observe/tasks/%2E%2E",
+            "/v1/observe/tasks/.hidden",
+        ] {
+            assert_eq!(wire(&e, OBS, p).await, 400, "{p}");
+        }
+        assert_eq!(wire(&e, OBS, "/v1/observe/tasks/../../tasks").await, 403);
+    }
+
+    #[tokio::test]
+    async fn limits_and_queries_are_checked() {
+        use reqwest::Method as M;
+        let (e, _) = start().await;
+        task_with_messages(&e, "t1", 1).await;
+        for (p, want) in [
+            ("/v1/observe/tasks?limit=0", 400),
+            ("/v1/observe/tasks?limit=1", 200),
+            ("/v1/observe/tasks?limit=200", 200),
+            ("/v1/observe/tasks?limit=201", 400),
+            ("/v1/observe/tasks?limit=x", 400),
+            ("/v1/observe/tasks?after=a%2Fb", 400),
+            ("/v1/observe/tasks?after=t0", 200),
+            ("/v1/observe/tasks?other=1", 400),
+            ("/v1/observe/tasks/t1?limit=0", 400),
+            ("/v1/observe/tasks/t1?limit=201", 200),
+            ("/v1/observe/tasks/t1?limit=500", 200),
+            ("/v1/observe/tasks/t1?limit=501", 400),
+            ("/v1/observe/tasks/t1?after_n=-1", 400),
+            ("/v1/observe/tasks/t1?after=t0", 400),
+        ] {
+            assert_eq!(raw(&e, Some(OBS), M::GET, p).await, want, "{p}");
+        }
+    }
+
+    #[tokio::test]
+    async fn paging_walks_everything_once() {
+        let (e, _) = start().await;
+        for id in ["c", "a", "e", "b", "d"] {
+            task_with_messages(&e, id, 0).await;
+        }
+        task_with_messages(&e, "f", 5).await;
+        let mut ids = Vec::new();
+        let mut path = "/v1/observe/tasks?limit=2".to_string();
+        loop {
+            let (st, v) = e.get(OBS, &path).await;
+            assert_eq!(st, 200);
+            for t in v["tasks"].as_array().unwrap() {
+                ids.push(t["id"].as_str().unwrap().to_string());
+            }
+            match v["next"].as_str() {
+                Some(n) => path = format!("/v1/observe/tasks?limit=2&after={n}"),
+                None => break,
+            }
+        }
+        assert_eq!(ids, ["a", "b", "c", "d", "e", "f"]);
+        let (_, d) = e.get(OBS, "/v1/observe/tasks/f?limit=4").await;
+        assert_eq!(d["message_metadata"].as_array().unwrap().len(), 4);
+        assert_eq!(d["next_n"], 4);
+        let (_, d) = e.get(OBS, "/v1/observe/tasks/f?limit=4&after_n=4").await;
+        let ns: Vec<u64> = d["message_metadata"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["n"].as_u64().unwrap())
+            .collect();
+        assert_eq!((ns, d["next_n"].clone()), (vec![5, 6], Value::Null));
+    }
+
+    fn files(dir: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).unwrap() {
+                let p = entry.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.insert(p.display().to_string(), std::fs::read(&p).unwrap());
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn observer_requests_change_nothing() {
+        use reqwest::Method as M;
+        let (url, calls) = super::tests::mock_notify(true).await;
+        let dir = tempfile::tempdir().unwrap();
+        let token_file = dir.path().join("dsh-notify.token");
+        std::fs::write(&token_file, "notify-token-0123456789abcdef0123456789\n").unwrap();
+        let st = app(dir.path()).with_push(BTreeMap::from([(
+            "dsh".to_string(),
+            Target {
+                url,
+                token_file,
+                transport: notify::Transport::Native,
+            },
+        )]));
+        let root = dir.path().to_path_buf();
+        let (e, state) = serve_app(dir, st).await;
+        task_with_messages(&e, "t1", 2).await;
+        super::tests::settle().await;
+        state.tick(Utc::now() + chrono::Duration::hours(2));
+        super::tests::settle().await;
+        let (disk, mem, pushes) = (
+            files(&root),
+            state.side_state(),
+            calls.lock().unwrap().len(),
+        );
+        for p in [
+            "/v1/observe/tasks",
+            "/v1/observe/tasks/t1",
+            "/v1/observe/tasks/nope",
+            "/v1/health",
+            "/v1/inbox",
+            "/v1/observe/tasks?limit=0",
+        ] {
+            raw(&e, Some(OBS), M::GET, p).await;
+            raw(&e, Some(OBS), M::HEAD, p).await;
+            raw(&e, Some(OBS), M::POST, p).await;
+        }
+        raw(&e, Some(CLAUDE), M::GET, "/v1/observe/tasks").await;
+        raw(&e, Some("wrong"), M::GET, "/v1/observe/tasks").await;
+        super::tests::settle().await;
+        assert_eq!(state.side_state(), mem, "memory changed");
+        assert!(files(&root) == disk, "disk changed");
+        assert_eq!(calls.lock().unwrap().len(), pushes, "a push was made");
+        // An agent's own request still records presence (the check above is not vacuous).
+        e.get(CLAUDE, "/v1/tasks").await;
+        assert_ne!(state.side_state(), mem);
+    }
+
+    #[tokio::test]
+    async fn incomplete_history_is_refused() {
+        use reqwest::Method as M;
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let st = app(dir.path());
+            let mut g = st.lock();
+            g.bridge
+                .create_task(
+                    "t1",
+                    "claude",
+                    serde_json::from_value(json!({
+                        "protocol": PROTOCOL, "body": "b", "meta": { "to": "dsh", "title": "x" }
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("state/tasks/t1.jsonl"))
+            .unwrap();
+        writeln!(f, "garbage").unwrap();
+        drop(f);
+        let st = app(dir.path());
+        let (e, _) = serve_app(dir, st).await;
+        for p in [
+            "/v1/observe/tasks",
+            "/v1/observe/tasks/t1",
+            "/v1/observe/tasks/nope",
+        ] {
+            let (code, v) = e.get(OBS, p).await;
+            assert_eq!(
+                (code, v["error"].as_str()),
+                (503, Some("history_incomplete")),
+                "{p}"
+            );
+        }
+        assert_eq!(raw(&e, Some(CLAUDE), M::GET, "/v1/tasks").await, 200);
+    }
+
+    async fn via(e: &Env, path: String) -> Result<(u16, Value), String> {
+        Ok(e.get(OBS, &path).await)
+    }
+
+    #[tokio::test]
+    async fn collect_reads_everything_at_one_revision() {
+        let (e, _) = start().await;
+        for i in 0..7 {
+            task_with_messages(&e, &format!("t{i}"), i).await;
+        }
+        let c = observe::collect(|p| via(&e, p)).await.unwrap();
+        assert_eq!(c.tasks.len(), 7);
+        assert_eq!(c.tasks[3].1.len(), 4);
+        let (_, v) = e.get(OBS, "/v1/observe/tasks").await;
+        assert_eq!(v["revision"].as_str(), Some(c.revision.as_str()));
+    }
+
+    #[tokio::test]
+    async fn revision_survives_a_restart_and_follows_any_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let st = app(&root);
+        let (e, state) = serve_app(dir, st).await;
+        for id in ["a", "m", "z"] {
+            task_with_messages(&e, id, 1).await;
+        }
+        let r0 = e.get(OBS, "/v1/observe/tasks?limit=1").await.1["revision"].clone();
+        drop(state);
+        let again = app(&root);
+        let r1 = {
+            let g = again.lock();
+            observe::revision(&observe::observe_all(&g.bridge))
+        };
+        assert_eq!(r0.as_str(), Some(r1.as_str()), "restart, same content");
+        // A change on the last page shows on the first.
+        e.post(
+            DSH,
+            "/v1/tasks/z/messages",
+            json!({ "kind": "progress", "protocol": PROTOCOL, "body": "x" }),
+        )
+        .await;
+        let r2 = e.get(OBS, "/v1/observe/tasks?limit=1").await.1["revision"].clone();
+        assert_ne!(r0, r2);
+        // A task inserted before a cursor too.
+        task_with_messages(&e, "0", 0).await;
+        let r3 = e.get(OBS, "/v1/observe/tasks?limit=1&after=m").await.1["revision"].clone();
+        assert_ne!(r2, r3);
+    }
+
+    #[tokio::test]
+    async fn collect_rereads_after_a_change_and_gives_up_on_churn() {
+        let (e, _) = start().await;
+        for id in ["a", "b", "c"] {
+            task_with_messages(&e, id, 1).await;
+        }
+        // One change after the first page: a second round succeeds, and sees it.
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let c = observe::collect(|p| {
+            let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let e = &e;
+            async move {
+                let r = e.get(OBS, &p).await;
+                if n == 0 {
+                    e.post(
+                        DSH,
+                        "/v1/tasks/c/messages",
+                        json!({ "kind": "progress", "protocol": PROTOCOL, "body": "x" }),
+                    )
+                    .await;
+                }
+                Ok(r)
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(c.tasks[2].1.len(), 3);
+        // A change after the last detail page is caught only by the final re-read of the list:
+        // a clean read is 1 list page + 3 details + 1 re-read.
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let c = observe::collect(|p| {
+            let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let e = &e;
+            async move {
+                let r = e.get(OBS, &p).await;
+                if n == 3 {
+                    e.post(
+                        DSH,
+                        "/v1/tasks/a/messages",
+                        json!({ "kind": "progress", "protocol": PROTOCOL, "body": "y" }),
+                    )
+                    .await;
+                }
+                Ok(r)
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            10,
+            "read twice"
+        );
+        assert_eq!(c.tasks[0].1.len(), 3);
+        // A change on every round's first request: never one revision.
+        let k = std::sync::atomic::AtomicUsize::new(0);
+        let r = observe::collect(|p| {
+            let e = &e;
+            let n = k.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                let r = e.get(OBS, &p).await;
+                let id = format!("n{n}");
+                task_with_messages(e, &id, 0).await;
+                Ok(r)
+            }
+        })
+        .await;
+        assert_eq!(r, Err(CollectError::Unstable));
+    }
+
+    type Pages = Vec<(&'static str, u16, Value)>;
+
+    /// A fake service: answers from `pages` by path.
+    async fn collect_from(
+        pages: Vec<(&'static str, u16, Value)>,
+    ) -> Result<observe::Collected, CollectError> {
+        let pages = std::sync::Mutex::new(pages);
+        observe::collect(|p| {
+            let found = pages
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(k, _, _)| *k == p)
+                .map(|(_, s, v)| (*s, v.clone()));
+            async move { found.ok_or(format!("unexpected {p}")) }
+        })
+        .await
+    }
+
+    fn t(id: &str, count: u32) -> Value {
+        json!({ "id": id, "parent": null, "from": "claude", "to": "dsh", "state": "open",
+                "created_at": "2026-10-18T00:00:00Z", "updated_at": "2026-10-18T00:00:00Z",
+                "message_count": count, "last_n": count, "participants": ["claude", "dsh"] })
+    }
+
+    fn m(n: u32) -> Value {
+        json!({ "n": n, "from": "claude", "kind": "task", "at": "2026-10-18T00:00:00Z" })
+    }
+
+    const L: &str = "/v1/observe/tasks?limit=200";
+
+    fn list(tasks: Vec<Value>, next: Value) -> Value {
+        json!({ "revision": "r", "complete": true, "tasks": tasks, "next": next })
+    }
+
+    fn detail(task: Value, msgs: Vec<Value>, next: Value) -> Value {
+        json!({ "revision": "r", "complete": true, "task": task, "message_metadata": msgs, "next_n": next })
+    }
+
+    #[tokio::test]
+    async fn collect_refuses_what_it_cannot_trust() {
+        let ok_a = (
+            "/v1/observe/tasks/a?limit=500",
+            200,
+            detail(t("a", 1), vec![m(1)], Value::Null),
+        );
+        // The good case first, so the failures below are about one thing each.
+        assert!(
+            collect_from(vec![
+                (L, 200, list(vec![t("a", 1)], Value::Null)),
+                ok_a.clone()
+            ])
+            .await
+            .is_ok()
+        );
+        let cases: Vec<(&str, Pages, CollectError)> = vec![
+            ("503", vec![(L, 503, json!({}))], CollectError::Incomplete),
+            (
+                "complete false",
+                vec![(
+                    L,
+                    200,
+                    json!({ "revision": "r", "complete": false, "tasks": [], "next": null }),
+                )],
+                CollectError::Protocol("complete is not true".into()),
+            ),
+            (
+                "other status",
+                vec![(L, 403, json!({}))],
+                CollectError::Protocol("status 403".into()),
+            ),
+            (
+                "repeated task",
+                vec![
+                    (L, 200, list(vec![t("a", 1), t("a", 1)], Value::Null)),
+                    ok_a.clone(),
+                ],
+                CollectError::Protocol("task a out of order or repeated".into()),
+            ),
+            (
+                "cursor not moving",
+                vec![
+                    (L, 200, list(vec![t("a", 1)], json!("a"))),
+                    (
+                        "/v1/observe/tasks?limit=200&after=a",
+                        200,
+                        list(vec![t("a", 1)], Value::Null),
+                    ),
+                    ok_a.clone(),
+                ],
+                CollectError::Protocol("task a out of order or repeated".into()),
+            ),
+            (
+                "next not last",
+                vec![(L, 200, list(vec![t("a", 1)], json!("b")))],
+                CollectError::Protocol("next is not the last task of the page".into()),
+            ),
+            (
+                "count mismatch",
+                vec![
+                    (L, 200, list(vec![t("a", 2)], Value::Null)),
+                    (
+                        "/v1/observe/tasks/a?limit=500",
+                        200,
+                        detail(t("a", 2), vec![m(1)], Value::Null),
+                    ),
+                ],
+                CollectError::Protocol("task a: 1 messages listed, message_count 2".into()),
+            ),
+            (
+                "repeated message",
+                vec![
+                    (L, 200, list(vec![t("a", 2)], Value::Null)),
+                    (
+                        "/v1/observe/tasks/a?limit=500",
+                        200,
+                        detail(t("a", 2), vec![m(1), m(1)], Value::Null),
+                    ),
+                ],
+                CollectError::Protocol("task a: message 1 out of order or repeated".into()),
+            ),
+            (
+                "detail differs",
+                vec![
+                    (L, 200, list(vec![t("a", 1)], Value::Null)),
+                    (
+                        "/v1/observe/tasks/a?limit=500",
+                        200,
+                        detail(t("a", 2), vec![m(1)], Value::Null),
+                    ),
+                ],
+                CollectError::Protocol("task a differs from the list at one revision".into()),
+            ),
+            (
+                "unknown field",
+                vec![(
+                    L,
+                    200,
+                    list(
+                        vec![{
+                            let mut x = t("a", 1);
+                            x["body"] = json!("b");
+                            x
+                        }],
+                        Value::Null,
+                    ),
+                )],
+                CollectError::Protocol(String::new()),
+            ),
+        ];
+        for (name, pages, want) in cases {
+            let got = collect_from(pages).await.unwrap_err();
+            match (&want, &got) {
+                (CollectError::Protocol(w), CollectError::Protocol(g)) => {
+                    assert!(g.contains(w.as_str()), "{name}: {g}")
+                }
+                _ => assert_eq!(got, want, "{name}"),
+            }
+        }
     }
 }
