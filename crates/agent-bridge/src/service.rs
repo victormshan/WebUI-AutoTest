@@ -3144,25 +3144,11 @@ mod observe_tests {
         }
         let (st, v) = e.get(OBS, "/v1/observe/tasks?after=p-1").await;
         assert_eq!(st, 200, "{v}");
-        assert_eq!(keys(&v), set(&["revision", "complete", "tasks", "next"]));
+        assert_eq!(keys(&v), set(observe::LIST_KEYS));
         assert_eq!(v["complete"], true);
         assert_eq!(v["next"], Value::Null);
         let t = &v["tasks"][0];
-        assert_eq!(
-            keys(t),
-            set(&[
-                "id",
-                "parent",
-                "from",
-                "to",
-                "state",
-                "created_at",
-                "updated_at",
-                "message_count",
-                "last_n",
-                "participants"
-            ])
-        );
+        assert_eq!(keys(t), set(observe::TASK_KEYS));
         assert_eq!(
             (t["id"].as_str(), t["parent"].as_str()),
             (Some("t1"), Some("p-1"))
@@ -3591,12 +3577,35 @@ mod observe_tests {
 
     const L: &str = "/v1/observe/tasks?limit=200";
 
+    fn without(mut v: Value, k: &str) -> Value {
+        v.as_object_mut().unwrap().remove(k).expect("key present");
+        v
+    }
+
     fn list(tasks: Vec<Value>, next: Value) -> Value {
         json!({ "revision": "r", "complete": true, "tasks": tasks, "next": next })
     }
 
     fn detail(task: Value, msgs: Vec<Value>, next: Value) -> Value {
         json!({ "revision": "r", "complete": true, "task": task, "message_metadata": msgs, "next_n": next })
+    }
+
+    #[tokio::test]
+    async fn the_final_re_read_is_checked_like_the_first() {
+        // Same revision both times, but the re-read lacks `next`: refused, not an empty result.
+        let answers = std::sync::Mutex::new(vec![
+            json!({ "revision": "r", "complete": true, "tasks": [] }),
+            list(vec![], Value::Null),
+        ]);
+        let r = observe::collect(|_| {
+            let v = answers.lock().unwrap().pop().unwrap();
+            async move { Ok((200, v)) }
+        })
+        .await;
+        match r {
+            Err(CollectError::Protocol(why)) => assert!(why.starts_with("list: keys"), "{why}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -3708,6 +3717,91 @@ mod observe_tests {
                     ),
                 )],
                 CollectError::Protocol(String::new()),
+            ),
+            // A missing key is not a null (R1, Codex review of 8d18817): every shape below
+            // differs from a valid answer by one key.
+            (
+                "list without next, stable",
+                vec![(
+                    L,
+                    200,
+                    json!({ "revision": "r", "complete": true, "tasks": [] }),
+                )],
+                CollectError::Protocol("list: keys".into()),
+            ),
+            (
+                "list without next, with a task",
+                vec![
+                    (L, 200, without(list(vec![t("a", 1)], Value::Null), "next")),
+                    ok_a.clone(),
+                ],
+                CollectError::Protocol("list: keys".into()),
+            ),
+            (
+                "detail without next_n",
+                vec![
+                    (L, 200, list(vec![t("a", 1)], Value::Null)),
+                    (
+                        "/v1/observe/tasks/a?limit=500",
+                        200,
+                        without(detail(t("a", 1), vec![m(1)], Value::Null), "next_n"),
+                    ),
+                ],
+                CollectError::Protocol("detail: keys".into()),
+            ),
+            (
+                "list with an extra key",
+                vec![(L, 200, {
+                    let mut v = list(vec![], Value::Null);
+                    v["body"] = json!("b");
+                    v
+                })],
+                CollectError::Protocol("list: keys".into()),
+            ),
+            (
+                "detail with an extra key",
+                vec![
+                    (L, 200, list(vec![t("a", 1)], Value::Null)),
+                    ("/v1/observe/tasks/a?limit=500", 200, {
+                        let mut v = detail(t("a", 1), vec![m(1)], Value::Null);
+                        v["body"] = json!("b");
+                        v
+                    }),
+                ],
+                CollectError::Protocol("detail: keys".into()),
+            ),
+            (
+                "task without parent",
+                vec![(
+                    L,
+                    200,
+                    list(vec![without(t("a", 1), "parent")], Value::Null),
+                )],
+                CollectError::Protocol("task: keys".into()),
+            ),
+            (
+                "detail task without parent",
+                vec![
+                    (L, 200, list(vec![t("a", 1)], Value::Null)),
+                    (
+                        "/v1/observe/tasks/a?limit=500",
+                        200,
+                        detail(without(t("a", 1), "parent"), vec![m(1)], Value::Null),
+                    ),
+                ],
+                CollectError::Protocol("task: keys".into()),
+            ),
+            (
+                "message with an extra key",
+                vec![
+                    (L, 200, list(vec![t("a", 1)], Value::Null)),
+                    ("/v1/observe/tasks/a?limit=500", 200, {
+                        let mut x = m(1);
+                        x["body"] = json!("b");
+                        detail(t("a", 1), vec![x], Value::Null)
+                    }),
+                ],
+                CollectError::Protocol("message: keys".into()),
             ),
         ];
         for (name, pages, want) in cases {

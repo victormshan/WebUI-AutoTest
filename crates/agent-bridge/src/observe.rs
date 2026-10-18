@@ -36,6 +36,23 @@ pub const DETAIL_LIMIT_DEFAULT: usize = 200;
 pub const DETAIL_LIMIT_MAX: usize = 500;
 /// Prefix of the digest input; a change of the format below changes it.
 pub const REVISION_FORMAT: &str = "agent-bridge-observe v1\n";
+/// The exact keys of each object the observe routes answer with. [`collect`] refuses an object
+/// with a key missing or added: a missing `next` must not read as a last page.
+pub const LIST_KEYS: &[&str] = &["revision", "complete", "tasks", "next"];
+pub const DETAIL_KEYS: &[&str] = &["revision", "complete", "task", "message_metadata", "next_n"];
+pub const TASK_KEYS: &[&str] = &[
+    "id",
+    "parent",
+    "from",
+    "to",
+    "state",
+    "created_at",
+    "updated_at",
+    "message_count",
+    "last_n",
+    "participants",
+];
+pub const MESSAGE_KEYS: &[&str] = &["n", "from", "kind", "at"];
 /// Rounds [`collect`] retries a read that changed under it before giving up.
 pub const COLLECT_ROUNDS: usize = 3;
 
@@ -323,9 +340,48 @@ fn same_revision(v: &Value, rev: &mut Option<String>) -> Result<bool, CollectErr
     }
 }
 
+/// `v` is an object with exactly `keys` (a null value counts as present; a missing key does not).
+fn exact_keys(v: &Value, keys: &[&str], what: &str) -> Result<(), CollectError> {
+    let o = v
+        .as_object()
+        .ok_or_else(|| protocol(format!("{what}: not an object")))?;
+    if o.len() != keys.len() || keys.iter().any(|k| !o.contains_key(*k)) {
+        let got: Vec<&String> = o.keys().collect();
+        return Err(protocol(format!("{what}: keys {got:?}, expected {keys:?}")));
+    }
+    Ok(())
+}
+
+/// A list or detail answer: the envelope and every task and message object in it have exactly
+/// their keys.
+fn check_shape(v: &Value, detail: bool) -> Result<(), CollectError> {
+    let tasks: Vec<&Value> = if detail {
+        exact_keys(v, DETAIL_KEYS, "detail")?;
+        let ms = v["message_metadata"]
+            .as_array()
+            .ok_or_else(|| protocol("message_metadata: not an array"))?;
+        for m in ms {
+            exact_keys(m, MESSAGE_KEYS, "message")?;
+        }
+        vec![&v["task"]]
+    } else {
+        exact_keys(v, LIST_KEYS, "list")?;
+        v["tasks"]
+            .as_array()
+            .ok_or_else(|| protocol("tasks: not an array"))?
+            .iter()
+            .collect()
+    };
+    for t in tasks {
+        exact_keys(t, TASK_KEYS, "task")?;
+    }
+    Ok(())
+}
+
+/// The value of `k`, which must be present (`check_shape` has made sure of that).
 fn field<T: serde::de::DeserializeOwned>(v: &Value, k: &str) -> Result<T, CollectError> {
-    serde_json::from_value(v.get(k).cloned().unwrap_or(Value::Null))
-        .map_err(|e| protocol(format!("{k}: {e}")))
+    let x = v.get(k).ok_or_else(|| protocol(format!("{k}: missing")))?;
+    serde_json::from_value(x.clone()).map_err(|e| protocol(format!("{k}: {e}")))
 }
 
 async fn attempt<F, Fut>(get: &mut F) -> Result<Collected, Attempt>
@@ -343,6 +399,7 @@ where
             Some(a) => format!("{first_page}&after={a}"),
         };
         let v = fetch(get, path).await?;
+        check_shape(&v, false)?;
         if !same_revision(&v, &mut rev)? {
             return Err(Attempt::Changed);
         }
@@ -376,6 +433,7 @@ where
                 path.push_str(&format!("&after_n={n}"));
             }
             let v = fetch(get, path).await?;
+            check_shape(&v, true)?;
             if !same_revision(&v, &mut rev)? {
                 return Err(Attempt::Changed);
             }
@@ -426,6 +484,7 @@ where
     }
     // The first page again: anything changed anywhere since the start changes the revision.
     let v = fetch(get, first_page).await?;
+    check_shape(&v, false)?;
     if !same_revision(&v, &mut rev)? {
         return Err(Attempt::Changed);
     }

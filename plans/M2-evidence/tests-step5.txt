@@ -74,12 +74,24 @@ Read-only check on a copy of the live bridge state (2026-10-18; copy in the scra
   list 200: 109 tasks, next=null; every detail at the same revision, message_metadata count == message_count, last n == last_n, detail task == list entry: 109 checked, 0 mismatches
   GET /v1/health with the observer token: 403
 
-Failure in run 1, recorded as it happened: service::tests::a_silent_receiver_is_nudged_then_the_user_is_told
-(an existing test, unchanged by this step; it does not use observers) failed once. Its panic text
-was not captured. The test steps the monitor and waits on fixed 300 ms sleeps (settle()) for mock
-pushes. Re-runs afterwards:
-- this change, that test alone: 0/30 failed;
-- this change, full lib suite: 0/10 failed (plus runs 2-5 above);
-- base 16e96c5 in a separate worktree, full lib suite: 0/15 failed.
-This step's only change on that path is the outer observer_gate (one sha256 per request).
-Not fixed or skipped here; noted as a timing-sensitive existing test.
+Failures in runs 1-5, recorded as they happened (corrected in version 2: the first version
+reported only the first; Codex review of 8d18817, R2). Two existing tests failed, once each. Both
+are unchanged by this step and use no observer:
+- run 1: service::tests::a_silent_receiver_is_nudged_then_the_user_is_told
+- run 5: service::tests::monitor_rewakes_once_and_marks_stalls
+Their panic texts were not captured then. Both step the monitor and wait on fixed 300 ms sleeps
+(settle()) for mock pushes.
+
+Measurements afterwards (2026-10-18). The base is 16e96c5, in a separate worktree with its own
+target dir. "Change" is the version-2 tree.
+- that test alone, version 1: 0/30 failed;
+- full lib suite, one at a time: change 0/40 + 0/10 (version 1), base 0/15 + 0/40;
+- full lib suite, two suites at once, 20 rounds each:
+  - change: 0/40 suites failed;
+  - base: 2/40 suites failed, both in the same round. The panic text was captured:
+      service::tests::a_silent_receiver_is_nudged_then_the_user_is_told
+      panicked at crates/agent-bridge/src/service.rs:2033:9  left: 1  right: 3
+    That is the "three nudges" assertion after settle().
+So a_silent_receiver… fails on the base without this step's code, under load: it is timing-sensitive
+before this change. monitor_rewakes_once_and_marks_stalls did not fail again in any of these runs,
+on change or base; its run-5 failure stays unexplained. Neither test is fixed, skipped or changed here.
