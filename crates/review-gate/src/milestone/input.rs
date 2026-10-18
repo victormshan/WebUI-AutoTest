@@ -223,6 +223,27 @@ impl Isolated {
         }
     }
 
+    /// The bare repository itself (for code that runs git there, such as attestation checks).
+    pub fn path(&self) -> PathBuf {
+        self.dir.path().join("repo.git")
+    }
+
+    /// Whether `a` is an ancestor of `b` (or the same commit). Any git failure other than "no"
+    /// is an error, never read as false.
+    pub fn is_ancestor(&self, a: &str, b: &str) -> Result<bool> {
+        let mut c = self.cmd();
+        c.args(["merge-base", "--is-ancestor", a, b]);
+        let out = c.output().context("running git merge-base")?;
+        match out.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => bail!(
+                "git merge-base --is-ancestor failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        }
+    }
+
     pub fn blob(&self, id: &str) -> Result<Vec<u8>> {
         self.git_s(&["cat-file", "blob", id], "cat-file blob")
     }

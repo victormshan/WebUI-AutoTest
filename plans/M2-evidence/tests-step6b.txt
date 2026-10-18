@@ -1,0 +1,165 @@
+M2 step 6b — the request flow (flow.rs), Ledger::transact/import, derive supersession fixes, Isolated::path/is_ancestor: test runs (base 5cf99fb, 2026-10-18, administrator uid 1000)
+
+run 1:
+test result: ok. 165 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 10.65s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test result: ok. 165 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 10.68s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test result: ok. 165 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 10.63s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 4:
+test result: ok. 165 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 10.56s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 5:
+test result: ok. 165 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 11.43s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+new and changed tests by name:
+test milestone::derive::tests::a_late_result_neither_resolves_nor_counts ... ok
+test milestone::derive::tests::a_terminal_state_is_never_rewritten ... ok
+test milestone::derive::tests::a_reused_request_id_is_malformed_and_cannot_pick_up_an_old_result ... ok
+test milestone::derive::tests::a_request_on_an_old_baseline_or_without_independence_never_releases ... ok
+test milestone::derive::tests::a_superseding_phase_keeps_open_conditions_and_the_count ... ok
+test milestone::derive::tests::a_valid_audit_condition_with_a_boolean_blocking_flag_is_accepted ... ok
+test milestone::derive::tests::a_condition_without_its_blocking_flag_is_malformed_not_non_blocking ... ok
+test milestone::derive::tests::a_rebaseline_ends_approvals_and_pending_requests_but_keeps_conditions_and_count ... ok
+test milestone::derive::tests::an_approval_that_is_not_archived_does_not_release ... ok
+test milestone::derive::tests::a_waiver_releases_only_once_archived ... ok
+test milestone::derive::tests::a_record_missing_a_field_is_never_read_as_empty_and_stops_release ... ok
+test milestone::derive::tests::an_approved_archived_request_releases ... ok
+test milestone::derive::tests::an_unarchived_new_request_ends_the_old_approval_at_once ... ok
+test milestone::derive::tests::an_unarchived_revoke_ends_the_approval_at_once ... ok
+test milestone::derive::tests::an_unregistered_phase_never_releases ... ok
+test milestone::derive::tests::approve_cannot_skip_an_open_blocking_condition ... ok
+test milestone::derive::tests::inherited_conditions_keep_their_lineage ... ok
+test milestone::derive::tests::inheritance_cutoff_holds_for_the_first_record_and_several_levels ... ok
+test milestone::derive::tests::invalid_audits_and_run_failures_do_not_count ... ok
+test milestone::derive::tests::only_the_first_valid_audit_of_a_request_counts ... ok
+test milestone::derive::tests::an_approval_of_a_revoked_request_does_not_end_the_run ... ok
+test milestone::derive::tests::a_waiver_that_completes_a_release_also_ends_the_run ... ok
+test milestone::derive::tests::inheritance_is_fixed_at_registration ... ok
+test milestone::derive::tests::unarchived_source_handling_cannot_release ... ok
+test milestone::derive::tests::unknown_implementation_sources_stop_release_and_a_missing_flag_is_malformed ... ok
+test milestone::derive::tests::three_rejections_pause_until_the_user_resumes ... ok
+test milestone::derive::tests::superseding_must_name_an_earlier_phase_once ... ok
+test milestone::derive::tests::the_count_resets_on_release_not_on_an_approval_that_leaves_a_blocking_condition_open ... ok
+test milestone::flow::tests::a_changed_snapshot_is_never_sent ... ok
+test milestone::flow::tests::a_request_without_independence_or_sources_is_refused_and_writes_nothing ... ok
+test milestone::flow::tests::a_runner_that_is_not_the_expected_one_is_a_failed_job ... ok
+test milestone::flow::tests::a_result_after_cancel_is_kept_as_late_without_effect ... ok
+test milestone::flow::tests::a_second_request_while_one_is_pending_is_refused ... ok
+test milestone::flow::tests::admin_steps_check_their_preconditions ... ok
+test milestone::flow::tests::an_unreachable_remote_stops_requests ... ok
+test milestone::flow::tests::a_crash_inside_the_confirm_group_is_completed ... ok
+test milestone::flow::tests::an_admin_process_never_closes_a_running_request ... ok
+test milestone::flow::tests::only_one_service_and_a_restart_closes_jobless_pending_requests ... ok
+test milestone::flow::tests::request_ids_fit_the_runner ... ok
+test milestone::flow::tests::head_only_moves_forward ... ok
+test milestone::flow::tests::range_and_signature_rules_are_checked_before_anything_is_recorded ... ok
+test milestone::flow::tests::a_log_that_changed_while_preparing_is_prepared_again ... ok
+test milestone::flow::tests::a_request_runs_records_and_releases_once_archived ... ok
+test milestone::ledger::tests::a_checkpoint_ahead_of_a_rolled_back_log_stops_and_is_never_lowered ... ok
+test milestone::ledger::tests::a_cut_off_line_is_an_error_and_is_not_truncated ... ok
+test milestone::ledger::tests::a_stopped_log_refuses_a_transaction ... ok
+test milestone::ledger::tests::a_tampered_log_is_an_error ... ok
+test milestone::ledger::tests::a_checkpoint_hash_conflict_stops ... ok
+test milestone::ledger::tests::a_crash_inside_a_transaction_leaves_a_prefix_of_the_group ... ok
+test milestone::ledger::tests::appends_chain_and_survive_a_reload ... ok
+test milestone::ledger::tests::a_transaction_checks_under_the_lock_and_writes_the_whole_group ... ok
+test milestone::flow::tests::records_that_are_not_what_the_job_calls_for_stop_recovery ... ok
+test milestone::ledger::tests::an_archived_record_naming_a_position_off_the_chain_stops ... ok
+test milestone::ledger::tests::archiving_never_lowers_the_checkpoint ... ok
+test milestone::ledger::tests::archiving_writes_the_record_first_then_the_checkpoint ... ok
+test milestone::ledger::tests::crash_gap_temporary_checkpoint_not_renamed_is_ignored ... ok
+test milestone::ledger::tests::crash_gap_archived_written_checkpoint_not_yet_is_rebuilt_from_the_log ... ok
+test milestone::ledger::tests::import_classifies_again_under_the_lock_and_never_writes_otherwise ... ok
+test milestone::ledger::tests::importing_a_longer_remote_copies_its_records_byte_for_byte ... ok
+test milestone::flow::tests::superseding_cancels_the_old_request_and_freezes_what_is_inherited ... ok
+test milestone::flow::tests::a_crash_inside_the_result_group_is_completed_exactly ... ok
+test milestone::flow::tests::bad_results_are_recorded_as_failed_without_effect ... ok
+test milestone::flow::tests::the_request_line_must_fit_what_the_runner_reads ... ok
+test milestone::ledger::tests::concurrent_appenders_keep_one_chain ... ok
+test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 103 filtered out; finished in 6.08s
+
+$ cargo clippy -p review-gate --all-targets: 0 warnings/errors
+$ cargo fmt -p review-gate -p agent-bridge --check: clean
+
+Notes:
+- The flow tests date their fixture commits 2030-01-01. The agreed window for unmatched bridge
+  tasks runs from the phase registration to head's commit time (sources.rs, 6a). Work committed
+  before registration therefore reads as an inverted window and every request is refused. The
+  tests keep to the agreed rule; the rule itself is raised with Codex in the implementation review.
+- Found while testing and fixed: a request whose base..head holds no commits (head equal to base)
+  was accepted; it is now refused ("holds no commits: nothing to audit").
+
+
+=== Version 2 (after gate review v1-1, REJECTED) ===
+Changes:
+- Flow::open refuses a relative state directory, so every parent directory fsynced on the way
+  (snapshot sealing) is a real one; new test the_state_directory_must_be_absolute.
+- rebaseline checks again, under the lock, that the phase's registered task book is the one whose
+  hash it computed outside the lock.
+Five full runs on the version-2 tree:
+run 1:
+test result: ok. 166 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 11.24s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test result: ok. 166 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 11.01s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test result: ok. 166 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 10.81s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 4:
+test result: ok. 166 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 10.85s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 5:
+test result: ok. 166 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 10.64s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo clippy -p review-gate --all-targets: 0 warnings/errors
+$ cargo fmt -p review-gate --check: clean
+
+
+=== Version 3 (after gate review v1-2, REJECTED; reviewed by DSH under the user's rule) ===
+Changes:
+- recover() repeats its passes until nothing is left (a confirm group and a job group cut short
+  together are completed in one call); test one_recovery_completes_a_confirm_group_and_a_job_group_together.
+- recovery: a condition_resolved after the job with no audit on file is a mismatch; test
+  a_resolution_without_its_audit_stops_recovery.
+- owner.json is written durably (file and directory fsynced).
+- confirm takes both phases' locks in name order, and checks again that the task book at base has
+  the hash the application recorded; test confirm_checks_the_task_book_again.
+Five full runs on the version-3 tree:
+run 1:
+test result: ok. 169 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 11.66s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test result: ok. 169 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 11.54s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test result: ok. 169 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 11.36s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 4:
+test result: ok. 169 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 11.37s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 5:
+test result: ok. 169 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 11.54s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo clippy -p review-gate --all-targets: 0 warnings/errors
+$ cargo fmt -p review-gate --check: clean

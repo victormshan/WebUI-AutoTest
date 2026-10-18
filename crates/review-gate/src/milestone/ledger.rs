@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::record::{Draft, Record, parse_log, seal, verify_chain};
+use super::sync::{Remote, Sync, classify};
 use crate::attest::Keypair;
 
 /// The last archived position: every record up to `seq` is known to be on the remote.
@@ -42,6 +43,28 @@ pub struct Ledger {
     dir: PathBuf,
     repo: String,
     key: VerifyingKey,
+    /// Fault injection: a transaction stops (as a crash would) after writing this many records.
+    #[cfg(test)]
+    crash_after: std::sync::atomic::AtomicUsize,
+}
+
+/// What a transaction decides on the snapshot it was given.
+pub struct Tx<T> {
+    /// Appended in order, each sealed on the one before.
+    pub drafts: Vec<Draft>,
+    pub out: T,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TxError {
+    /// The log needs the user or the remote: nothing is written.
+    #[error("the milestone log is stopped: {0}")]
+    Stopped(String),
+    /// The transaction's own checks refused, on the state under the lock: nothing is written.
+    #[error("{0}")]
+    Refused(String),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 impl Ledger {
@@ -52,6 +75,8 @@ impl Ledger {
             dir,
             repo: repo.to_string(),
             key,
+            #[cfg(test)]
+            crash_after: std::sync::atomic::AtomicUsize::new(usize::MAX),
         })
     }
 
@@ -210,6 +235,86 @@ impl Ledger {
             File::open(&self.dir)?.sync_all()?;
         }
         Ok(r)
+    }
+
+    /// One transaction (§3.7, and the 6b plan): under the lock, load and verify the log, let `f`
+    /// check its preconditions on that very snapshot and say what to append, then append all of
+    /// it, each record fsynced. `f` refusing, or a stopped log, writes nothing. A crash in the
+    /// middle leaves a prefix of the group on disk; the caller's recovery completes it.
+    pub fn transact<T>(
+        &self,
+        kp: &Keypair,
+        at: &str,
+        f: impl FnOnce(&Snapshot) -> std::result::Result<Tx<T>, String>,
+    ) -> std::result::Result<(T, Vec<Record>), TxError> {
+        let _lock = self.lock()?;
+        let mut snap = self.load_locked()?;
+        if let Some(why) = &snap.stop {
+            return Err(TxError::Stopped(why.clone()));
+        }
+        let tx = f(&snap).map_err(TxError::Refused)?;
+        let mut written = Vec::new();
+        for d in tx.drafts {
+            #[cfg(test)]
+            if written.len() == self.crash_after.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(TxError::Other(anyhow::anyhow!(
+                    "injected crash after {} records",
+                    written.len()
+                )));
+            }
+            let r = self.append_locked(kp, at, &snap, d)?;
+            snap.records.push(r.clone());
+            written.push(r);
+        }
+        Ok((tx.out, written))
+    }
+
+    /// Stops the next transactions after `n` records (fault injection; `usize::MAX`: never).
+    #[cfg(test)]
+    pub fn crash_after(&self, n: usize) {
+        self.crash_after
+            .store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Brings the remote's extra records in as they are (§3.6, "L is a prefix of R"): under the
+    /// lock the remote is classified again against the log as it is now, never against an
+    /// earlier read; only `RemoteAhead` writes, and it writes the remote records byte for byte
+    /// (no new seal), each checked to read back with its own hash, and fsynced. Returns the
+    /// classification it acted on.
+    pub fn import(&self, remote: &Remote) -> Result<Sync> {
+        let _lock = self.lock()?;
+        let snap = self.load_locked()?;
+        if let Some(why) = &snap.stop {
+            return Ok(Sync::Stop(format!("local log stopped: {why}")));
+        }
+        let cp = (snap.checkpoint > 0).then(|| Checkpoint {
+            seq: snap.checkpoint,
+            hash: snap.records[snap.checkpoint as usize - 1].hash.clone(),
+        });
+        let sync = classify(&snap.records, remote, cp.as_ref(), &self.key, &self.repo);
+        if let Sync::RemoteAhead { extra } = &sync {
+            let mut all = snap.records.clone();
+            all.extend(extra.iter().cloned());
+            verify_chain(&all, &self.key, &self.repo)?;
+            let new = !self.log_path().exists();
+            let mut f = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.log_path())?;
+            for r in extra {
+                let line = r.to_line()?;
+                let back = parse_log(&format!("{line}\n"))?;
+                if back.len() != 1 || back[0].compute_hash()? != r.hash || back[0] != *r {
+                    bail!("remote record {} does not survive a round trip", r.seq);
+                }
+                f.write_all(format!("{line}\n").as_bytes())?;
+                f.sync_all()?;
+            }
+            if new {
+                File::open(&self.dir)?.sync_all()?;
+            }
+        }
+        Ok(sync)
     }
 
     /// Records that the remote holds the chain up to `seq` (with `hash`): first the `archived`
@@ -554,5 +659,154 @@ mod tests {
         )
         .unwrap_err()
         .to_string()
+    }
+
+    fn draft(i: u64) -> Draft {
+        Draft {
+            kind: "note".into(),
+            phase: "p".into(),
+            body: json!({"i": i}),
+        }
+    }
+
+    #[test]
+    fn a_transaction_checks_under_the_lock_and_writes_the_whole_group() {
+        let d = tempfile::tempdir().unwrap();
+        let l = ledger(d.path());
+        note(&l, 1);
+        let (seen, written) = l
+            .transact(&kp(), "t", |snap| {
+                Ok(Tx {
+                    drafts: vec![draft(2), draft(3)],
+                    out: snap.records.len(),
+                })
+            })
+            .unwrap();
+        assert_eq!(seen, 1, "the closure saw the log as it is under the lock");
+        assert_eq!(written.iter().map(|r| r.seq).collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(written[1].prev, written[0].hash, "sealed one on the other");
+        assert_eq!(l.load().unwrap().records.len(), 3);
+        // A refusal writes nothing.
+        let before = fs::read(d.path().join("log.jsonl")).unwrap();
+        let e = l
+            .transact::<()>(&kp(), "t", |_| Err("already pending".into()))
+            .unwrap_err();
+        assert!(matches!(e, TxError::Refused(ref w) if w == "already pending"));
+        assert_eq!(fs::read(d.path().join("log.jsonl")).unwrap(), before);
+    }
+
+    #[test]
+    fn a_crash_inside_a_transaction_leaves_a_prefix_of_the_group() {
+        for k in 0..3 {
+            let d = tempfile::tempdir().unwrap();
+            let l = ledger(d.path());
+            note(&l, 1);
+            l.crash_after(k);
+            let e = l
+                .transact(&kp(), "t", |_| {
+                    Ok(Tx {
+                        drafts: vec![draft(2), draft(3), draft(4)],
+                        out: (),
+                    })
+                })
+                .unwrap_err();
+            assert!(e.to_string().contains("injected crash"), "{e}");
+            l.crash_after(usize::MAX);
+            let s = ledger(d.path()).load().unwrap();
+            assert_eq!(
+                s.records.len(),
+                1 + k,
+                "a verified prefix of the group, k={k}"
+            );
+            assert_eq!(s.stop, None);
+        }
+    }
+
+    #[test]
+    fn a_stopped_log_refuses_a_transaction() {
+        let d = tempfile::tempdir().unwrap();
+        let l = ledger(d.path());
+        note(&l, 1);
+        fs::write(d.path().join("checkpoint.json"), r#"{"seq":9,"hash":"x"}"#).unwrap();
+        let e = l
+            .transact(&kp(), "t", |_| {
+                Ok(Tx {
+                    drafts: vec![draft(2)],
+                    out: (),
+                })
+            })
+            .unwrap_err();
+        assert!(matches!(e, TxError::Stopped(_)), "{e}");
+    }
+
+    /// A second ledger (the remote's chain) built from the same key.
+    fn remote_with(n: u64) -> (tempfile::TempDir, String) {
+        let d = tempfile::tempdir().unwrap();
+        let r = ledger(d.path());
+        for i in 1..=n {
+            note(&r, i);
+        }
+        let text = fs::read_to_string(d.path().join("log.jsonl")).unwrap();
+        (d, text)
+    }
+
+    #[test]
+    fn importing_a_longer_remote_copies_its_records_byte_for_byte() {
+        let (_r, text) = remote_with(3);
+        let d = tempfile::tempdir().unwrap();
+        // The local log holds the remote's first record.
+        fs::write(
+            d.path().join("log.jsonl"),
+            text.lines().next().unwrap().to_string() + "\n",
+        )
+        .unwrap();
+        let l = ledger(d.path());
+        let sync = l.import(&Remote::Log(text.clone())).unwrap();
+        assert!(matches!(sync, Sync::RemoteAhead { ref extra } if extra.len() == 2));
+        assert_eq!(
+            fs::read_to_string(d.path().join("log.jsonl")).unwrap(),
+            text
+        );
+        // Nothing more to import now.
+        assert_eq!(l.import(&Remote::Log(text)).unwrap(), Sync::Equal);
+    }
+
+    #[test]
+    fn import_classifies_again_under_the_lock_and_never_writes_otherwise() {
+        let (_r, text) = remote_with(2);
+        let d = tempfile::tempdir().unwrap();
+        fs::write(
+            d.path().join("log.jsonl"),
+            text.lines().next().unwrap().to_string() + "\n",
+        )
+        .unwrap();
+        let l = ledger(d.path());
+        // The local log grew its own record 2 after an earlier read: now they diverge.
+        note(&l, 99);
+        let before = fs::read(d.path().join("log.jsonl")).unwrap();
+        assert!(matches!(
+            l.import(&Remote::Log(text.clone())).unwrap(),
+            Sync::Stop(_)
+        ));
+        assert_eq!(fs::read(d.path().join("log.jsonl")).unwrap(), before);
+        // A tampered remote record: refused, nothing written.
+        let d2 = tempfile::tempdir().unwrap();
+        fs::write(
+            d2.path().join("log.jsonl"),
+            text.lines().next().unwrap().to_string() + "\n",
+        )
+        .unwrap();
+        let l2 = ledger(d2.path());
+        let bad = text.replace("\"i\":2", "\"i\":3");
+        assert!(matches!(
+            l2.import(&Remote::Log(bad)).unwrap(),
+            Sync::Stop(_)
+        ));
+        assert_eq!(l2.load().unwrap().records.len(), 1);
+        // Unreachable: Stop, nothing written.
+        assert!(matches!(
+            l2.import(&Remote::Unreachable("down".into())).unwrap(),
+            Sync::Stop(_)
+        ));
     }
 }

@@ -1,0 +1,60 @@
+M2 step 6b — mutation testing (each mutant applied alone, 'cargo test -p review-gate --lib milestone::', source restored; all on the final tree)
+
+F1 independence/sources not refused => CAUGHT milestone::flow::tests::a_request_without_independence_or_sources_is_refused_and_writes_nothing,milestone::flow::tests::range_and_signature_rules_are_checked_before_anything_is_recorded
+F2 stale tail not detected => CAUGHT milestone::flow::tests::a_log_that_changed_while_preparing_is_prepared_again
+F3 empty range allowed => CAUGHT milestone::flow::tests::range_and_signature_rules_are_checked_before_anything_is_recorded
+F4 base ancestry unchecked => CAUGHT milestone::flow::tests::range_and_signature_rules_are_checked_before_anything_is_recorded
+F5 head may move back => CAUGHT milestone::flow::tests::head_only_moves_forward
+F6 runner line unchecked => CAUGHT milestone::flow::tests::the_request_line_must_fit_what_the_runner_reads
+F7 job_id binding unchecked => CAUGHT milestone::flow::tests::bad_results_are_recorded_as_failed_without_effect
+F8 input binding unchecked => CAUGHT milestone::flow::tests::bad_results_are_recorded_as_failed_without_effect
+F9 invalid answer accepted => CAUGHT milestone::flow::tests::bad_results_are_recorded_as_failed_without_effect
+F10 extra records not a mismatch => SURVIVED
+F11 differing records not a mismatch => CAUGHT milestone::flow::tests::records_that_are_not_what_the_job_calls_for_stop_recovery
+F12 confirm recovery skips phase_superseded => CAUGHT milestone::flow::tests::a_crash_inside_the_confirm_group_is_completed
+F13 confirm recovery skips the cancel => CAUGHT milestone::flow::tests::a_crash_inside_the_confirm_group_is_completed
+F14 restart leaves jobless pending open => CAUGHT milestone::flow::tests::only_one_service_and_a_restart_closes_jobless_pending_requests
+F15 second service allowed => CAUGHT milestone::flow::tests::only_one_service_and_a_restart_closes_jobless_pending_requests
+F16 admin on superseded allowed => CAUGHT milestone::flow::tests::superseding_cancels_the_old_request_and_freezes_what_is_inherited
+F17 changed snapshot sent => CAUGHT milestone::flow::tests::a_changed_snapshot_is_never_sent
+F18 confirm leaves old pending open => CAUGHT milestone::flow::tests::a_crash_inside_the_confirm_group_is_completed,milestone::flow::tests::superseding_cancels_the_old_request_and_freezes_what_is_inherited
+F19 resume when not paused => CAUGHT milestone::flow::tests::admin_steps_check_their_preconditions
+F20 vendor version not checked => CAUGHT milestone::flow::tests::admin_steps_check_their_preconditions
+F21 late result applied => CAUGHT milestone::flow::tests::a_result_after_cancel_is_kept_as_late_without_effect,milestone::flow::tests::superseding_cancels_the_old_request_and_freezes_what_is_inherited
+D1 inherit from the whole chain => CAUGHT milestone::derive::tests::inheritance_cutoff_holds_for_the_first_record_and_several_levels,milestone::derive::tests::superseding_must_name_an_earlier_phase_once,milestone::derive::tests::inheritance_is_fixed_at_registration
+D2 prefix includes the registration => CAUGHT milestone::derive::tests::superseding_must_name_an_earlier_phase_once
+D3 double registration allowed => CAUGHT milestone::derive::tests::superseding_must_name_an_earlier_phase_once
+D4 supersedes an unregistered phase => CAUGHT milestone::derive::tests::superseding_must_name_an_earlier_phase_once
+D5 two supersessions allowed => CAUGHT milestone::derive::tests::superseding_must_name_an_earlier_phase_once
+D6 registration does not supersede => CAUGHT milestone::derive::tests::superseding_must_name_an_earlier_phase_once
+
+F10 survives as an equivalent mutant. It removes the "more records on file than the result calls
+for" check, but recovery only runs for a Pending request, and a Pending request can have no
+request_closed on file. Every due group ends with request_closed, so when there are more records
+on file than are due, the one at the last due position is not a request_closed. The per-record
+comparison (F11, caught) then refuses it. The length check is kept as a second line.
+
+The first run (before the tests were strengthened) left F6, F12 and D5 alive, and F15 did not
+compile. The tests were changed, and F15 rewritten, as follows:
+- F6: the line-size test used a file so big that the input limit refused it first. It is now
+  sized so only the runner-line check can refuse it.
+- F12: the confirm-crash test now writes an unrelated record between the crash and the recovery.
+- D5: a case with two conflicting phase_superseded records on their own was added.
+- F15: the mutant was malformed. It now removes the refusal of a second service.
+Caught: 26 of 27; the one survivor is equivalent (above).
+
+
+=== Version 2 ===
+F22 relative state directory allowed => CAUGHT milestone::flow::tests::the_state_directory_must_be_absolute
+Not mutated: the rebaseline recheck. A registration is never rewritten (records are append-only
+and a second registration of a phase is malformed), so the task book it finds under the lock is
+always the one found outside it. The check is a guard; no test can make it fail.
+
+=== Version 3 ===
+F23 recovery runs one pass only => CAUGHT milestone::flow::tests::one_recovery_completes_a_confirm_group_and_a_job_group_together
+F24 resolutions without an audit ignored => CAUGHT milestone::flow::tests::a_resolution_without_its_audit_stops_recovery
+F25 confirm does not recheck the task book => CAUGHT milestone::flow::tests::confirm_checks_the_task_book_again
+Note: F23 first survived, because its test called confirm(), which runs recovery itself, before
+the recovery under test. The test was rewritten to leave both groups cut short with no operation
+in between. F24 hung the whole suite once, on that earlier test; with the rewritten test it is
+caught. Totals: 26 of 27 (version 1) plus F22 to F25, all caught; 1 equivalent survivor (F10).

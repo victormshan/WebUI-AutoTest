@@ -213,14 +213,31 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
         }
         match r.kind.as_str() {
             "phase_registered" => {
+                if registration_seq.is_some() {
+                    bad.push(format!("record {}: phase {phase} registered twice", r.seq));
+                    continue;
+                }
                 st.registered = true;
                 registration_seq = Some(r.seq);
                 st.baseline_seq = Some(r.seq);
-                // A superseding phase inherits the open conditions and the count (§3.1).
-                if let Some(old) = b.get("supersedes").and_then(Value::as_str)
-                    && depth < 16
-                {
-                    let prev = derive_inner(records, old, checkpoint, depth + 1);
+                // A superseding phase inherits the open conditions and the count (§3.1) as they
+                // stood when it was registered: only the records before its registration count,
+                // so nothing the old phase gets later (a late result, a waiver, a resume) changes
+                // what was inherited. The old phase must have been registered before, which also
+                // rules out superseding oneself and cycles.
+                if let Some(old) = b.get("supersedes").and_then(Value::as_str) {
+                    let before = &records[..records.partition_point(|x| x.seq < r.seq)];
+                    let known = before
+                        .iter()
+                        .any(|x| x.kind == "phase_registered" && x.phase == old);
+                    if !known || depth >= 16 {
+                        bad.push(format!(
+                            "record {}: supersedes {old:?}, which was not registered before",
+                            r.seq
+                        ));
+                        continue;
+                    }
+                    let prev = derive_inner(before, old, checkpoint, depth + 1);
                     st.count = prev.count;
                     for mut c in prev.conditions.into_iter().filter(|c| c.closed.is_none()) {
                         // Keep the lineage: where the condition came from, through which phase.
@@ -243,7 +260,16 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
                     });
                 }
             }
-            "phase_superseded" => st.superseded_by = Some(s(b, "by").into()),
+            "phase_superseded" => {
+                let by = s(b, "by");
+                match &st.superseded_by {
+                    Some(x) if x != by => bad.push(format!(
+                        "record {}: phase {phase} superseded by both {x} and {by}",
+                        r.seq
+                    )),
+                    _ => st.superseded_by = Some(by.into()),
+                }
+            }
             "baseline_changed" => {
                 st.baseline_seq = Some(r.seq);
                 // The current release ends; an unfinished request on the old baseline ends.
@@ -392,6 +418,22 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
         }
         if st.count >= THRESHOLD {
             st.paused = true;
+        }
+    }
+
+    // A phase is superseded as soon as either record says so: the new phase's registration
+    // (written first) or the old phase's `phase_superseded`. Both must name the same phase.
+    for r in records.iter().filter(|r| {
+        r.phase != phase
+            && r.kind == "phase_registered"
+            && r.body.get("supersedes").and_then(Value::as_str) == Some(phase)
+    }) {
+        match &st.superseded_by {
+            Some(x) if *x != r.phase => bad.push(format!(
+                "phase {phase} superseded by both {x} and {} (record {})",
+                r.phase, r.seq
+            )),
+            _ => st.superseded_by = Some(r.phase.clone()),
         }
     }
 
@@ -1208,5 +1250,157 @@ mod tests {
         l.close("p", "r1", "completed");
         let st = l.state("p", l.last());
         assert!(!st.released && !st.registered);
+    }
+
+    fn supersede(l: &mut Log, new: &str, old: &str, conds: &[&str]) -> u64 {
+        let conditions: Vec<Value> = conds
+            .iter()
+            .map(|c| json!({"id": c, "text": format!("acceptance {c}")}))
+            .collect();
+        l.add(
+            new,
+            "phase_registered",
+            json!({"supersedes": old, "conditions": conditions}),
+        )
+    }
+
+    fn open_ids(st: &PhaseState) -> Vec<String> {
+        st.conditions
+            .iter()
+            .filter(|c| c.closed.is_none())
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn inheritance_is_fixed_at_registration() {
+        // old: c1 open, one REWORK; new registered; then old gets a late approval resolving
+        // c1, a waiver and a resume. None of it reaches new.
+        let mut l = Log::new();
+        let reg = l.register("old", &["c1", "c2"]);
+        l.request("old", "r1", reg);
+        l.audit("old", "r1", "REWORK", &[]);
+        l.close("old", "r1", "completed");
+        l.request("old", "r2", reg);
+        supersede(&mut l, "new", "old", &[]);
+        let at_registration = l.state("new", l.last());
+        assert_eq!(at_registration.count, 1);
+        assert_eq!(open_ids(&at_registration), ["c1", "c2"]);
+        l.audit("old", "r2", "APPROVE", &["c1"]);
+        l.close("old", "r2", "completed");
+        l.add(
+            "old",
+            "condition_waived",
+            json!({"condition": "c2", "reason": "late"}),
+        );
+        l.add("old", "resume", json!({}));
+        let later = l.state("new", l.last());
+        assert_eq!(
+            later.count, 1,
+            "the old phase's resume does not reset new's count"
+        );
+        assert_eq!(
+            open_ids(&later),
+            ["c1", "c2"],
+            "late resolutions are not inherited"
+        );
+        // The old phase is superseded by new's registration alone, before any
+        // phase_superseded record.
+        let old = l.state("old", l.last());
+        assert_eq!(old.superseded_by.as_deref(), Some("new"));
+        assert!(!old.released);
+    }
+
+    #[test]
+    fn inheritance_cutoff_holds_for_the_first_record_and_several_levels() {
+        // The phase registered as record 1 has nothing before it to inherit from.
+        let mut l = Log::new();
+        let first = l.register("a", &["ca"]);
+        assert_eq!(first, 1);
+        // a → b → c: each inherits what was open just before its own registration.
+        supersede(&mut l, "b", "a", &["cb"]);
+        l.add(
+            "a",
+            "condition_waived",
+            json!({"condition": "ca", "reason": "after b"}),
+        );
+        supersede(&mut l, "c", "b", &["cc"]);
+        l.add(
+            "b",
+            "condition_waived",
+            json!({"condition": "cb", "reason": "after c"}),
+        );
+        let c = l.state("c", l.last());
+        assert_eq!(open_ids(&c), ["ca", "cb", "cc"]);
+        assert!(
+            c.reasons.iter().all(|r| !r.contains("malformed")),
+            "{:?}",
+            c.reasons
+        );
+    }
+
+    #[test]
+    fn superseding_must_name_an_earlier_phase_once() {
+        // Superseding a phase not registered before (itself, a later one, an unknown one).
+        for (old, label) in [
+            ("self", "itself"),
+            ("later", "a later phase"),
+            ("ghost", "unknown"),
+        ] {
+            let mut l = Log::new();
+            supersede(&mut l, "self", old, &[]);
+            l.register("later", &[]);
+            let st = l.state("self", l.last());
+            assert!(
+                st.reasons
+                    .iter()
+                    .any(|r| r.contains("was not registered before")),
+                "{label}: {:?}",
+                st.reasons
+            );
+        }
+        // Registered twice.
+        let mut l = Log::new();
+        l.register("p", &[]);
+        l.register("p", &[]);
+        assert!(
+            l.state("p", l.last())
+                .reasons
+                .iter()
+                .any(|r| r.contains("registered twice"))
+        );
+        // Superseded by two phases.
+        let mut l = Log::new();
+        l.register("old", &[]);
+        supersede(&mut l, "n1", "old", &[]);
+        supersede(&mut l, "n2", "old", &[]);
+        assert!(
+            l.state("old", l.last())
+                .reasons
+                .iter()
+                .any(|r| r.contains("superseded by both"))
+        );
+        // The two records disagree.
+        let mut l = Log::new();
+        l.register("old", &[]);
+        supersede(&mut l, "n1", "old", &[]);
+        l.add("old", "phase_superseded", json!({"by": "n2"}));
+        assert!(
+            l.state("old", l.last())
+                .reasons
+                .iter()
+                .any(|r| r.contains("superseded by both"))
+        );
+        // Two phase_superseded records alone, naming different phases.
+        let mut l = Log::new();
+        l.register("old", &[]);
+        l.add("old", "phase_superseded", json!({"by": "n1"}));
+        l.add("old", "phase_superseded", json!({"by": "n2"}));
+        assert!(
+            l.state("old", l.last())
+                .reasons
+                .iter()
+                .any(|r| r.contains("superseded by both"))
+        );
     }
 }
