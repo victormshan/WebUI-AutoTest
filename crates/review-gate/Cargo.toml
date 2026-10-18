@@ -12,6 +12,7 @@ name = "review-gate"
 path = "src/main.rs"
 
 [dependencies]
+agent-bridge = { path = "../agent-bridge" }
 anyhow.workspace = true
 rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
 axum = "0.8.9"
@@ -26,6 +27,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.0"
+tempfile = "3"
 thiserror = "2"
 tokio.workspace = true
 

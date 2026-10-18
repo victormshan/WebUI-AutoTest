@@ -338,8 +338,30 @@ mod tests {
         assert!(err.contains("truncated"), "{err}");
     }
 
+    /// Counts this process's open descriptors, so it runs alone in a child process: tests in
+    /// other threads open and close descriptors all the time (git, pipes, temp files).
     #[test]
     fn passed_file_descriptors_are_closed_and_the_reply_refused() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "milestone::runner::tests::passed_file_descriptors_alone",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && text.contains("1 passed"),
+            "{text}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "run alone by passed_file_descriptors_are_closed_and_the_reply_refused"]
+    fn passed_file_descriptors_alone() {
         let d = tempfile::tempdir().unwrap();
         let sock = d.path().join("r.sock");
         let mut child = std::process::Command::new("python3")

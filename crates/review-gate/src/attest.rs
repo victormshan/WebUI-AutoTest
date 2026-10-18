@@ -224,9 +224,42 @@ pub fn verify_commit(repo: &Path, rev: &str, key: &VerifyingKey) -> Result<State
         &["notes", &format!("--ref={NOTES_REF}"), "show", &commit],
     )
     .map_err(|_| anyhow::anyhow!("{commit}: no review-gate attestation note"))?;
-    let st = verify(&note, key).with_context(|| format!("{commit}: invalid attestation"))?;
+    check_note(repo, &commit, &note, key)
+}
+
+/// As [`verify_commit`], but the note is read from the fixed notes commit `notes_commit`
+/// instead of the moving notes ref: one assembly reads one state of the notes.
+pub fn verify_commit_at(
+    repo: &Path,
+    commit: &str,
+    notes_commit: &str,
+    key: &VerifyingKey,
+) -> Result<Statement> {
+    let commit = git::rev_parse(repo, &format!("{commit}^{{commit}}"))?;
+    let notes = git::rev_parse(repo, &format!("{notes_commit}^{{commit}}"))?;
+    let note = note_at(repo, &notes, &commit)?
+        .ok_or_else(|| anyhow::anyhow!("{commit}: no review-gate attestation note"))?;
+    check_note(repo, &commit, &note, key)
+}
+
+/// The note text for `commit` in the notes commit `notes_commit` (any fan-out), if there is one.
+/// Read as `git notes show` gives it (trimmed).
+pub fn note_at(repo: &Path, notes_commit: &str, commit: &str) -> Result<Option<String>> {
+    let names = git::git(repo, &["ls-tree", "-r", "--name-only", notes_commit])?;
+    for n in names.lines() {
+        if n.replace('/', "") == commit {
+            let blob = git::git(repo, &["cat-file", "blob", &format!("{notes_commit}:{n}")])?;
+            return Ok(Some(blob));
+        }
+    }
+    Ok(None)
+}
+
+/// The check both entry points share: the signature, then commit/tree/parent against `commit`.
+fn check_note(repo: &Path, commit: &str, note: &str, key: &VerifyingKey) -> Result<Statement> {
+    let st = verify(note, key).with_context(|| format!("{commit}: invalid attestation"))?;
     let tree = git::rev_parse(repo, &format!("{commit}^{{tree}}"))?;
-    let parents = git::parents(repo, &commit)?;
+    let parents = git::parents(repo, commit)?;
     if st.commit != commit || st.tree != tree || parents.len() != 1 || st.parent != parents[0] {
         bail!(
             "{commit}: attestation is for commit {} / tree {} / parent {}, not this commit",
@@ -312,5 +345,145 @@ mod tests {
             "pinned key decides, not the key: line"
         );
         assert!(verify("hello", &key).is_err());
+    }
+
+    fn sh(dir: &Path, args: &[&str]) -> String {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8(o.stdout).unwrap().trim().to_string()
+    }
+
+    /// A repo with commit B on A, B attested with `kp` in refs/notes/review-gate.
+    fn attested_repo(kp: &Keypair) -> (tempfile::TempDir, String) {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        sh(r, &["init", "-q", "-b", "main"]);
+        sh(r, &["config", "user.name", "t"]);
+        sh(r, &["config", "user.email", "t@t"]);
+        std::fs::write(r.join("a"), "a").unwrap();
+        sh(r, &["add", "a"]);
+        sh(r, &["commit", "-qm", "a"]);
+        std::fs::write(r.join("b"), "b").unwrap();
+        sh(r, &["add", "b"]);
+        sh(r, &["commit", "-qm", "b"]);
+        let commit = sh(r, &["rev-parse", "HEAD"]);
+        let st = Statement {
+            task: "t".into(),
+            version: "1/1".into(),
+            commit: commit.clone(),
+            tree: sh(r, &["rev-parse", "HEAD^{tree}"]),
+            parent: sh(r, &["rev-parse", "HEAD^"]),
+            review: "v1-1".into(),
+            reviewer: "x".into(),
+            verdict: "approved".into(),
+            at: "now".into(),
+        };
+        sh(
+            r,
+            &[
+                "notes",
+                "--ref=review-gate",
+                "add",
+                "-m",
+                &sign(kp, &st),
+                &commit,
+            ],
+        );
+        (d, commit)
+    }
+
+    #[test]
+    fn verify_commit_at_reads_the_fixed_notes_commit() {
+        let kp = Keypair::from_seed([7; 32]);
+        let key = kp.verifying_key();
+        let (d, commit) = attested_repo(&kp);
+        let r = d.path();
+        let fixed = sh(r, &["rev-parse", NOTES_REF]);
+        let a = verify_commit_at(r, &commit, &fixed, &key).unwrap();
+        assert_eq!(
+            a,
+            verify_commit(r, &commit, &key).unwrap(),
+            "same check as verify_commit"
+        );
+        // The notes ref moves on (the note is removed): the fixed notes commit still verifies,
+        // the moving ref no longer does.
+        sh(r, &["notes", "--ref=review-gate", "remove", &commit]);
+        assert!(verify_commit(r, &commit, &key).is_err());
+        assert_eq!(verify_commit_at(r, &commit, &fixed, &key).unwrap(), a);
+        let now = sh(r, &["rev-parse", NOTES_REF]);
+        assert!(verify_commit_at(r, &commit, &now, &key).is_err());
+        // A note for another commit, a wrong key, a tampered note: refused as before.
+        let parent = sh(r, &["rev-parse", "HEAD^"]);
+        assert!(verify_commit_at(r, &parent, &fixed, &key).is_err());
+        let other = Keypair::from_seed([8; 32]).verifying_key();
+        assert!(verify_commit_at(r, &commit, &fixed, &other).is_err());
+    }
+
+    #[test]
+    fn note_at_finds_fanned_out_notes() {
+        let kp = Keypair::from_seed([7; 32]);
+        let (d, commit) = attested_repo(&kp);
+        let r = d.path();
+        let flat = sh(r, &["rev-parse", NOTES_REF]);
+        let want = note_at(r, &flat, &commit).unwrap().unwrap();
+        // Rebuild the notes tree with a two-character fan-out, as git does for many notes.
+        let blob = sh(r, &["rev-parse", &format!("{flat}:{commit}")]);
+        let sub = {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(r)
+                .args(["mktree"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            let mut o = o;
+            writeln!(
+                o.stdin.take().unwrap(),
+                "100644 blob {blob}\t{}",
+                &commit[2..]
+            )
+            .unwrap();
+            String::from_utf8(o.wait_with_output().unwrap().stdout)
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        let top = {
+            let mut o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(r)
+                .args(["mktree"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            writeln!(
+                o.stdin.take().unwrap(),
+                "040000 tree {sub}\t{}",
+                &commit[..2]
+            )
+            .unwrap();
+            String::from_utf8(o.wait_with_output().unwrap().stdout)
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        let fanned = sh(r, &["commit-tree", &top, "-m", "fan-out"]);
+        assert_eq!(note_at(r, &fanned, &commit).unwrap().unwrap(), want);
+        assert_eq!(note_at(r, &fanned, &"0".repeat(40)).unwrap(), None);
     }
 }

@@ -1,0 +1,63 @@
+M2 step 6a — mutation testing (each mutant applied alone, review-gate lib suite, source restored; all on the final version-2 tree)
+
+A1 second VERDICT allowed => CAUGHT milestone::answer::tests::verdict_rules
+A2 bad VERDICT value allowed => CAUGHT milestone::answer::tests::verdict_rules
+A3 quoted VERDICT ignored => CAUGHT milestone::answer::tests::verdict_rules
+A4 CONDITIONS order unchecked => CAUGHT milestone::answer::tests::section_rules
+A5 empty condition text allowed => CAUGHT milestone::answer::tests::section_rules
+A6 unknown resolved id allowed => CAUGHT milestone::answer::tests::invalid_carries_no_partial_result,milestone::answer::tests::section_rules
+A7 duplicate resolution allowed => CAUGHT milestone::answer::tests::section_rules
+A8 condition outside section allowed => CAUGHT milestone::answer::tests::conditions_outside_their_section_are_refused
+A9 APPROVE with blocking allowed => CAUGHT milestone::answer::tests::verdict_rules
+V1 malformed names mapped => CAUGHT milestone::sources::tests::first_table_maps_as_the_design_says
+V2 no case folding => CAUGHT milestone::sources::tests::a_clean_phase_is_known_and_independent,milestone::sources::tests::first_table_maps_as_the_design_says,milestone::sources::tests::independence_needs_attestations_and_mapped_participants,milestone::sources::tests::overlapping_rules_conflict_instead_of_first_match
+V3 prefix becomes exact => CAUGHT milestone::sources::tests::a_clean_phase_is_known_and_independent,milestone::sources::tests::first_table_maps_as_the_design_says,milestone::sources::tests::independence_needs_attestations_and_mapped_participants,milestone::sources::tests::overlapping_rules_conflict_instead_of_first_match
+V4 first match wins => CAUGHT milestone::sources::tests::independence_is_checked_on_every_participant_and_the_auditor,milestone::sources::tests::overlapping_rules_conflict_instead_of_first_match
+S1 link to missing task unreported => CAUGHT milestone::sources::tests::bad_links_and_ignores_are_unknown_sources
+S2 link ancestors dropped => CAUGHT milestone::sources::tests::a_link_brings_its_ancestors_and_descendants
+S3 descendants dropped => CAUGHT milestone::sources::tests::a_clean_phase_is_known_and_independent,milestone::sources::tests::a_link_brings_its_ancestors_and_descendants,milestone::sources::tests::a_link_to_another_phase_matches_without_joining_this_one,milestone::sources::tests::ignores_count_for_their_phase_and_its_successors_only
+S4 predecessors not inherited => CAUGHT milestone::sources::tests::a_clean_phase_is_known_and_independent
+S5 unmatched means not in this phase => CAUGHT milestone::sources::tests::a_clean_phase_is_known_and_independent,milestone::sources::tests::a_link_to_another_phase_matches_without_joining_this_one,milestone::sources::tests::ignores_count_for_their_phase_and_its_successors_only,milestone::sources::tests::tasks_of_no_phase_are_unmatched_tasks_of_another_phase_are_not
+S6 broken member chain unreported => CAUGHT milestone::sources::tests::broken_and_circular_chains_are_unknown_sources
+S7 inverted window allowed => CAUGHT milestone::sources::tests::the_window_is_closed_and_never_inverted
+S8 window open at the start => CAUGHT milestone::sources::tests::the_window_is_closed_and_never_inverted
+S9 window open at the end => CAUGHT milestone::sources::tests::the_window_is_closed_and_never_inverted
+S10 any phase's ignore counts => CAUGHT milestone::sources::tests::ignores_count_for_their_phase_and_its_successors_only
+S11 missing attestation ignored => CAUGHT milestone::sources::tests::independence_needs_attestations_and_mapped_participants
+S12 auditor mapping unchecked => CAUGHT milestone::sources::tests::independence_is_checked_on_every_participant_and_the_auditor
+S13 shared vendor allowed => CAUGHT milestone::sources::tests::independence_is_checked_on_every_participant_and_the_auditor
+I1 attributes not from head => CAUGHT milestone::input::tests::committed_attributes_of_head_do_count
+I2 core.attributesFile not overridden => SURVIVED
+I3 caller environment kept => SURVIVED
+I4 caller environment and home kept => SURVIVED
+I5 baseline hash unchecked => CAUGHT milestone::input::tests::task_book_rules
+I6 limit off by one => CAUGHT milestone::input::tests::the_limit_is_on_final_bytes
+I7 ids not type-checked => CAUGHT milestone::input::tests::objects_are_found_in_worktrees_and_bare_repos_and_ids_are_typed
+I8 symlinks read as files => CAUGHT milestone::input::tests::evidence_that_cannot_be_shown_is_listed_not_converted
+I9 binary diff not listed => CAUGHT milestone::input::tests::committed_attributes_of_head_do_count
+I10 control-char paths shown => CAUGHT milestone::input::tests::evidence_that_cannot_be_shown_is_listed_not_converted
+T1 notes from the moving ref => CAUGHT attest::tests::verify_commit_at_reads_the_fixed_notes_commit
+R1 passed fds kept open (child test) => CAUGHT milestone::runner::tests::passed_file_descriptors_are_closed_and_the_reply_refused,milestone::runner::tests::passed_file_descriptors_alone
+I11 no environment isolation at all => CAUGHT milestone::input::tests::no_local_or_user_configuration_changes_the_bytes
+S14 prefix seeds need an intact chain => CAUGHT milestone::sources::tests::broken_and_circular_chains_are_unknown_sources
+I12 evidence directory unchecked => CAUGHT milestone::input::tests::the_evidence_directory_must_be_a_plain_relative_path
+I13 dot components allowed => CAUGHT milestone::input::tests::the_evidence_directory_must_be_a_plain_relative_path
+I14 empty components allowed => CAUGHT milestone::input::tests::the_evidence_directory_must_be_a_plain_relative_path
+
+Survivors I2, I3 and I4 each remove one of the overlapping environment guards of clean_git:
+- I2: -c core.attributesFile=/dev/null;
+- I3: env_clear;
+- I4: env_clear together with HOME/XDG_CONFIG_HOME.
+The others still block every contamination the test plants, so each survivor is equivalent on
+its own. I11 removes them all together and is caught: the child-process test sees the caller's
+XDG attributes change the bytes.
+
+Found by mutation and fixed before this run: S6 first survived because a prefix-matched task
+with a broken parent chain was not counted as a member at all. It was still reported, as
+unmatched, so release was still withheld, but its participants were missing from the
+independence check. The task now stays a member (S14 guards that), and the chain is reported
+from the phase's own check.
+Version 2 adds I12, I13 and I14 for the evidence-directory check. A first form of that check had
+redundant conditions, which made a mutant of them equivalent; it was reduced to one per-component
+rule before this run.
+Caught: 40 of 43; the 3 survivors are equivalent (explained above).

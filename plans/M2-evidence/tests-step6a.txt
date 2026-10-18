@@ -1,0 +1,89 @@
+M2 step 6a — answer.rs, input.rs, sources.rs, attest::verify_commit_at: test runs (base 8208b7e, 2026-10-18, administrator uid 1000, git 2.53.0)
+
+run 1:
+test result: ok. 132 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 6.76s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test result: ok. 132 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 6.84s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test result: ok. 132 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 6.82s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 4:
+test result: ok. 132 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 6.84s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 5:
+test result: ok. 132 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 6.83s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+agent-bridge (unchanged; dependency check):
+test result: ok. 76 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.16s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+new and changed tests by name:
+test milestone::answer::tests::a_full_answer ... ok
+test milestone::answer::tests::conditions_outside_their_section_are_refused ... ok
+test attest::tests::key_is_created_once_with_private_permissions_and_reloaded ... ok
+test milestone::answer::tests::section_rules ... ok
+test milestone::answer::tests::the_format_shown_to_the_auditor_follows_this_grammar ... ok
+test milestone::answer::tests::sections_are_optional_and_may_be_empty ... ok
+test milestone::answer::tests::invalid_carries_no_partial_result ... ok
+test milestone::answer::tests::verdict_rules ... ok
+test milestone::input::tests::child_assembly ... ignored, run by assemble_in_child only
+test attest::tests::sign_verify_and_tamper_detection ... ok
+test attest::tests::note_at_finds_fanned_out_notes ... ok
+test milestone::input::tests::a_missing_baseline_task_book_is_refused ... ok
+test milestone::input::tests::sha256_repositories_work_and_formats_must_match ... ok
+test attest::tests::verify_commit_at_reads_the_fixed_notes_commit ... ok
+test milestone::input::tests::objects_are_found_in_worktrees_and_bare_repos_and_ids_are_typed ... ok
+test milestone::input::tests::merge_commits_and_notes_are_listed ... ok
+test milestone::input::tests::assembles_every_section_deterministically ... ok
+test milestone::runner::tests::passed_file_descriptors_alone ... ignored, run alone by passed_file_descriptors_are_closed_and_the_reply_refused
+test milestone::input::tests::evidence_that_cannot_be_shown_is_listed_not_converted ... ok
+test milestone::sources::tests::a_clean_phase_is_known_and_independent ... ok
+test milestone::sources::tests::a_link_brings_its_ancestors_and_descendants ... ok
+test milestone::sources::tests::a_link_to_another_phase_matches_without_joining_this_one ... ok
+test milestone::sources::tests::an_unreadable_bridge_is_unknown_sources ... ok
+test milestone::sources::tests::bad_links_and_ignores_are_unknown_sources ... ok
+test milestone::sources::tests::broken_and_circular_chains_are_unknown_sources ... ok
+test milestone::sources::tests::first_table_maps_as_the_design_says ... ok
+test milestone::sources::tests::ignores_count_for_their_phase_and_its_successors_only ... ok
+test milestone::input::tests::committed_attributes_of_head_do_count ... ok
+test milestone::sources::tests::independence_is_checked_on_every_participant_and_the_auditor ... ok
+test milestone::sources::tests::overlapping_rules_conflict_instead_of_first_match ... ok
+test milestone::sources::tests::independence_needs_attestations_and_mapped_participants ... ok
+test milestone::sources::tests::tasks_of_no_phase_are_unmatched_tasks_of_another_phase_are_not ... ok
+test milestone::sources::tests::the_window_is_closed_and_never_inverted ... ok
+test milestone::runner::tests::passed_file_descriptors_are_closed_and_the_reply_refused ... ok
+test milestone::sources::tests::trailer_names ... ok
+test milestone::sources::tests::reads_a_real_bridge_through_the_observer_routes ... ok
+test milestone::input::tests::the_work_tree_does_not_count ... ok
+test milestone::input::tests::task_book_rules ... ok
+test milestone::input::tests::the_evidence_directory_must_be_a_plain_relative_path ... ok
+test milestone::input::tests::no_local_or_user_configuration_changes_the_bytes ... ok
+test milestone::input::tests::the_limit_is_on_final_bytes ... ok
+test result: ok. 39 passed; 0 failed; 2 ignored; 0 measured; 93 filtered out; finished in 3.83s
+
+$ cargo clippy -p review-gate -p agent-bridge --all-targets: 0 warnings/errors
+$ cargo fmt -p review-gate -p agent-bridge --check: clean
+
+$ cargo tree -p review-gate -i agent-bridge --edges normal
+agent-bridge v0.1.0 (/home/administrator/projects/Chrome-MCP-m2/crates/agent-bridge)
+└── review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-m2/crates/review-gate)
+$ cargo tree -p agent-bridge -e normal | grep -c review-gate
+0
+
+Notes:
+- milestone::runner::tests::passed_file_descriptors_are_closed_and_the_reply_refused (step 4) counted
+  every open descriptor of the test process. With this step's tests (which spawn git in parallel) it
+  failed once in a full run. Its check now runs alone in a child process
+  (passed_file_descriptors_alone, run with --test-threads=1). Mutation R1 confirms that it still
+  catches a kept descriptor. This is the only change outside the three new modules and attest.rs.
+- Version 1 of this file showed "cargo fmt --check: DIRTY" and was submitted anyway (gate review
+  v1-1 found it). Version 2 is formatted; the check above is clean.

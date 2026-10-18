@@ -88,7 +88,7 @@ fn write_canonical(v: &Value, out: &mut String) -> Result<()> {
     Ok(())
 }
 
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     Sha256::digest(data)
         .iter()
         .map(|b| format!("{b:02x}"))
