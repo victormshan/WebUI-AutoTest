@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-n2-conditions
+version: 1/3
+commit: e0b2c02814368d4a64e8e63856bd12ccfa00be15
+tree: 4b6f12b777f0a04b15a7b5c58826c038e0d3ca70
+parent: 525cffbf202e134e579a45db6effd0a98091ba26
+review: v1-1
+reviewer: manual/manual
+verdict: approved
+at: 2026-10-18T00:57:05Z
+signature: gLyAbKz1O1OBxPi+eak1ir12clckpVxNZvhvHjphUmbwusDxYjqRv/tsid7uUBZUNWiL04bu6i2HUIGVgVdaCg==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
