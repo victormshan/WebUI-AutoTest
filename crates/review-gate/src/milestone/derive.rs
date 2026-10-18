@@ -240,7 +240,15 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
             }
             "request" => {
                 let id = s(b, "request_id").to_string();
-                requests.insert(id.clone(), r.seq);
+                // Audits and closures find their request by id alone, so a reused id would let a
+                // late result of the earlier request act on the new one (DSH review note N3).
+                if let Some(first) = requests.insert(id.clone(), r.seq) {
+                    bad.push(format!(
+                        "record {} (request) reuses request id {id} of record {first}",
+                        r.seq
+                    ));
+                    continue;
+                }
                 revoked_after_request = false;
                 let independent = b.pointer("/independence/ok") == Some(&Value::Bool(true));
                 st.current = Some(CurrentRequest {
@@ -276,6 +284,11 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
                     continue;
                 }
                 if b.get("valid") != Some(&Value::Bool(true)) {
+                    continue;
+                }
+                // One valid audit per request: a second one is kept in the log but has no effect
+                // (DSH review note N5).
+                if c.audit_seq.is_some() {
                     continue;
                 }
                 let verdict = s(b, "verdict").to_string();
@@ -1054,6 +1067,52 @@ mod tests {
                 .iter()
                 .any(|r| r.contains("open blocking conditions: a1"))
         );
+    }
+
+    #[test]
+    fn a_reused_request_id_is_malformed_and_cannot_pick_up_an_old_result() {
+        let mut l = Log::new();
+        let reg = l.register("p", &[]);
+        l.request("p", "r1", reg);
+        l.request("p", "r2", reg);
+        l.request("p", "r1", reg); // the id of the first request, again
+        l.audit("p", "r1", "APPROVE", &[]);
+        l.close("p", "r1", "completed");
+        let st = l.state("p", l.last());
+        assert!(!st.released);
+        assert!(
+            st.reasons
+                .iter()
+                .any(|r| r.contains("reuses request id r1")),
+            "{:?}",
+            st.reasons
+        );
+        assert_eq!(
+            st.current.unwrap().request_id,
+            "r2",
+            "the reused id never became current"
+        );
+    }
+
+    #[test]
+    fn only_the_first_valid_audit_of_a_request_counts() {
+        let mut l = Log::new();
+        let reg = l.register("p", &[]);
+        l.request("p", "r1", reg);
+        l.add("p", "job", json!({"request_id": "r1"}));
+        for v in ["REWORK", "APPROVE"] {
+            l.add(
+                "p",
+                "audit",
+                json!({"request_id": "r1", "verdict": v, "valid": true,
+                       "conditions": [{"id": format!("{v}-c"), "text": "x", "blocking": true}]}),
+            );
+        }
+        let st = l.state("p", l.last());
+        assert_eq!(st.count, 1, "the second audit adds nothing");
+        assert_eq!(st.current.unwrap().verdict.as_deref(), Some("REWORK"));
+        let ids: Vec<&str> = st.conditions.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["REWORK-c"]);
     }
 
     #[test]

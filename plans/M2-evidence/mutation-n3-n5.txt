@@ -1,0 +1,9 @@
+# M2 N3/N5 mutations, 2026-10-18T09:05:40+08:00
+Each applied alone, then reverted; cargo test -p review-gate --lib milestone.
+
+## N3a reused request id accepted
+test milestone::derive::tests::a_reused_request_id_is_malformed_and_cannot_pick_up_an_old_result ... FAILED
+test result: FAILED. 27 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.11s
+## N5a every valid audit takes effect
+test milestone::derive::tests::only_the_first_valid_audit_of_a_request_counts ... FAILED
+test result: FAILED. 27 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.12s
