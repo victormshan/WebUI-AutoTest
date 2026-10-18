@@ -46,6 +46,9 @@ pub struct CurrentRequest {
     /// The independence check recorded with the request (§3.8), and why it failed.
     pub independent: bool,
     pub independence_note: String,
+    /// Whether the request's implementation sources were all found (§3.8), and if not, why.
+    pub sources_known: bool,
+    pub sources_note: String,
     pub state: RequestState,
     pub verdict: Option<String>,
     pub audit_seq: Option<u64>,
@@ -145,6 +148,19 @@ fn malformed(r: &Record) -> Option<String> {
         }
         None
     };
+    // Every request says whether its implementation sources are complete (§3.8): a missing
+    // flag is never read as "known" (DSH review note N4).
+    if r.kind == "request"
+        && !r
+            .body
+            .pointer("/sources/known")
+            .is_some_and(Value::is_boolean)
+    {
+        return Some(format!(
+            "record {} (request) lacks a boolean sources.known",
+            r.seq
+        ));
+    }
     match r.kind.as_str() {
         "audit" if r.body.get("valid") == Some(&Value::Bool(true)) => conditions_of(true),
         "phase_registered" => conditions_of(false),
@@ -259,6 +275,12 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
                     independent,
                     independence_note: b
                         .pointer("/independence/why")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into(),
+                    sources_known: b.pointer("/sources/known") == Some(&Value::Bool(true)),
+                    sources_note: b
+                        .pointer("/sources/why")
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .into(),
@@ -405,6 +427,12 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
                     c.independence_note
                 ));
             }
+            if !c.sources_known {
+                why.push(format!(
+                    "implementation sources unknown: {}",
+                    c.sources_note
+                ));
+            }
             match c.verdict.as_deref() {
                 Some("APPROVE") | Some("APPROVE WITH CONDITIONS") => {}
                 Some(v) => why.push(format!("verdict {v}")),
@@ -477,6 +505,7 @@ fn eligible_apart_from_archival(st: &PhaseState, revoked: bool) -> bool {
         )
         && c.baseline_seq == st.baseline_seq
         && c.independent
+        && c.sources_known
         && !st
             .conditions
             .iter()
@@ -542,7 +571,7 @@ mod tests {
                 phase,
                 "request",
                 json!({"request_id": id, "head": "h", "baseline_seq": baseline,
-                       "independence": {"ok": true}}),
+                       "independence": {"ok": true}, "sources": {"known": true}}),
             )
         }
 
@@ -803,7 +832,8 @@ mod tests {
             "p",
             "request",
             json!({"request_id": "r1", "head": "h", "baseline_seq": reg,
-                   "independence": {"ok": false, "why": "auditor and implementer share a vendor"}}),
+                   "independence": {"ok": false, "why": "auditor and implementer share a vendor"},
+                   "sources": {"known": true}}),
         );
         l.audit("p", "r1", "APPROVE", &[]);
         l.close("p", "r1", "completed");
@@ -1113,6 +1143,47 @@ mod tests {
         assert_eq!(st.current.unwrap().verdict.as_deref(), Some("REWORK"));
         let ids: Vec<&str> = st.conditions.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec!["REWORK-c"]);
+    }
+
+    #[test]
+    fn unknown_implementation_sources_stop_release_and_a_missing_flag_is_malformed() {
+        let mut l = Log::new();
+        let reg = l.register("p", &[]);
+        l.add(
+            "p",
+            "request",
+            json!({"request_id": "r1", "head": "h", "baseline_seq": reg,
+                   "independence": {"ok": true},
+                   "sources": {"known": false, "why": "unmatched bridge task p-x"}}),
+        );
+        l.audit("p", "r1", "APPROVE", &[]);
+        l.close("p", "r1", "completed");
+        let st = l.state("p", l.last());
+        assert!(!st.released);
+        assert!(
+            st.reasons
+                .iter()
+                .any(|r| r.contains("sources unknown: unmatched bridge task p-x"))
+        );
+
+        let mut l = Log::new();
+        let reg = l.register("p", &[]);
+        l.add(
+            "p",
+            "request",
+            json!({"request_id": "r1", "head": "h", "baseline_seq": reg,
+                   "independence": {"ok": true}}),
+        );
+        let st = l.state("p", l.last());
+        assert!(
+            st.reasons
+                .iter()
+                .any(|r| r.contains("lacks a boolean sources.known"))
+        );
+        assert!(
+            st.current.is_none(),
+            "the malformed request never became current"
+        );
     }
 
     #[test]

@@ -1,0 +1,40 @@
+# M2 step 2 mutations (ledger + N4), 2026-10-18T12:29:47+08:00
+Each applied alone, then reverted; cargo test -p review-gate --lib milestone.
+
+## L1 a checkpoint ahead of the log is lowered silently
+test milestone::ledger::tests::a_checkpoint_hash_conflict_stops ... FAILED
+test milestone::ledger::tests::a_checkpoint_ahead_of_a_rolled_back_log_stops_and_is_never_lowered ... FAILED
+test result: FAILED. 36 passed; 2 failed; 0 ignored; 0 measured; 42 filtered out; finished in 3.27s
+## L2 appends allowed while stopped
+test milestone::ledger::tests::a_checkpoint_ahead_of_a_rolled_back_log_stops_and_is_never_lowered ... FAILED
+test result: FAILED. 37 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 3.29s
+## L3 an older checkpoint position is not checked against the log
+test milestone::ledger::tests::a_checkpoint_hash_conflict_stops ... FAILED
+test result: FAILED. 37 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 3.25s
+## L4 the leftover temporary checkpoint is kept
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 3.25s
+## L5 no lock
+test milestone::ledger::tests::concurrent_appenders_keep_one_chain ... FAILED
+test result: FAILED. 37 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.24s
+## L6 archive may lower the checkpoint
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 3.25s
+## L7 archived record not checked against the chain
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 3.23s
+## N4b unknown sources do not stop release
+test milestone::derive::tests::unknown_implementation_sources_stop_release_and_a_missing_flag_is_malformed ... FAILED
+test result: FAILED. 37 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 3.38s
+## L6 archive may lower the checkpoint (rerun)
+test milestone::ledger::tests::archiving_never_lowers_the_checkpoint ... FAILED
+test result: FAILED. 39 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 3.24s
+## L7 archived record not checked against the chain (rerun)
+test milestone::ledger::tests::an_archived_record_naming_a_position_off_the_chain_stops ... FAILED
+test result: FAILED. 39 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 3.31s
+## N4a sources flag not required (rerun with the formatted text)
+test milestone::derive::tests::unknown_implementation_sources_stop_release_and_a_missing_flag_is_malformed ... FAILED
+test result: FAILED. 39 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 3.22s
+
+Notes:
+- L6 and L7 first survived (no tests for lowering by archive, or for an archived record off the chain); tests archiving_never_lowers_the_checkpoint and an_archived_record_naming_a_position_off_the_chain_stops added, reruns above caught them.
+- L4 survives and is equivalent: checkpoint.json.tmp is never read as a checkpoint, and a rebuild overwrites and renames it anyway; removing a leftover is housekeeping, not behaviour.
+- N4a first failed to apply (rustfmt had reformatted the line); rerun with the formatted text is caught.
+- Not covered by unit tests: the fsync and the archived-before-checkpoint write order (crash timing); both are covered only by the crash-gap tests that simulate the resulting files.
