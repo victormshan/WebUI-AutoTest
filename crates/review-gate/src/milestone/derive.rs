@@ -315,15 +315,6 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
                     _ => RequestState::Failed,
                 };
                 c.closed_seq = Some(r.seq);
-                // An approved, completed request ends the run of rejections.
-                if c.state == RequestState::Completed
-                    && matches!(
-                        c.verdict.as_deref(),
-                        Some("APPROVE") | Some("APPROVE WITH CONDITIONS")
-                    )
-                {
-                    st.count = 0;
-                }
             }
             "condition_resolved" => {
                 // Only from the current request's valid audit, while that request is current.
@@ -356,6 +347,13 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
                 st.paused = false;
             }
             _ => {}
+        }
+        // The run of rejections ends with a release (§3.4 ④), not with an approval alone: an
+        // approval that still leaves a blocking condition open does not reset the count (DSH
+        // review note N1). Archival is left out here, so the count does not depend on how far
+        // the log has been published; it only decides whether the release is visible.
+        if eligible_apart_from_archival(&st, revoked_after_request) {
+            st.count = 0;
         }
         if st.count >= THRESHOLD {
             st.paused = true;
@@ -451,6 +449,25 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
     st.released = why.is_empty();
     st.reasons = why;
     st
+}
+
+/// Whether the current request would release the phase if every record were archived.
+fn eligible_apart_from_archival(st: &PhaseState, revoked: bool) -> bool {
+    let Some(c) = &st.current else { return false };
+    st.registered
+        && st.superseded_by.is_none()
+        && !revoked
+        && c.state == RequestState::Completed
+        && matches!(
+            c.verdict.as_deref(),
+            Some("APPROVE") | Some("APPROVE WITH CONDITIONS")
+        )
+        && c.baseline_seq == st.baseline_seq
+        && c.independent
+        && !st
+            .conditions
+            .iter()
+            .any(|x| x.blocking && x.closed.is_none())
 }
 
 fn close(conditions: &mut [Condition], id: &str, how: &str, seq: u64) {
@@ -899,6 +916,143 @@ mod tests {
                 .reasons
                 .iter()
                 .any(|r| r.contains("malformed"))
+        );
+    }
+
+    #[test]
+    fn the_count_resets_on_release_not_on_an_approval_that_leaves_a_blocking_condition_open() {
+        // REWORK, REWORK, APPROVE WITH CONDITIONS whose blocking condition stays open, REWORK:
+        // three counted rejections in a row, so the phase pauses (DSH review note N1).
+        let mut l = Log::new();
+        let reg = l.register("p", &[]);
+        for (i, v) in ["REWORK", "REWORK"].iter().enumerate() {
+            let id = format!("r{i}");
+            l.request("p", &id, reg);
+            l.audit("p", &id, v, &[]);
+            l.close("p", &id, "completed");
+        }
+        l.request("p", "r2", reg);
+        l.add("p", "job", json!({"request_id": "r2"}));
+        l.add(
+            "p",
+            "audit",
+            json!({"request_id": "r2", "verdict": "APPROVE WITH CONDITIONS", "valid": true,
+                   "conditions": [{"id": "a1", "text": "still open", "blocking": true}]}),
+        );
+        l.close("p", "r2", "completed");
+        assert_eq!(
+            l.state("p", l.last()).count,
+            2,
+            "no reset: a1 is still open"
+        );
+        l.request("p", "r3", reg);
+        l.audit("p", "r3", "REWORK", &[]);
+        l.close("p", "r3", "completed");
+        let st = l.state("p", l.last());
+        assert_eq!(st.count, 3);
+        assert!(st.paused);
+
+        // When the approval does release (nothing left open), the run ends there.
+        let mut l = Log::new();
+        let reg = l.register("p", &["c1"]);
+        for i in 0..2 {
+            let id = format!("r{i}");
+            l.request("p", &id, reg);
+            l.audit("p", &id, "REWORK", &[]);
+            l.close("p", &id, "completed");
+        }
+        l.request("p", "r2", reg);
+        l.audit("p", "r2", "APPROVE", &["c1"]);
+        l.close("p", "r2", "completed");
+        assert_eq!(
+            l.state("p", 0).count,
+            0,
+            "reset even before the log is archived"
+        );
+        l.request("p", "r3", reg);
+        l.audit("p", "r3", "REWORK", &[]);
+        assert_eq!(l.state("p", l.last()).count, 1);
+    }
+
+    #[test]
+    fn an_approval_of_a_revoked_request_does_not_end_the_run() {
+        let mut l = Log::new();
+        let reg = l.register("p", &[]);
+        for i in 0..2 {
+            let id = format!("r{i}");
+            l.request("p", &id, reg);
+            l.audit("p", &id, "REWORK", &[]);
+            l.close("p", &id, "completed");
+        }
+        l.request("p", "r2", reg);
+        l.add(
+            "p",
+            "revoke",
+            json!({"reason": "user revoked while r2 ran"}),
+        );
+        l.audit("p", "r2", "APPROVE", &[]);
+        l.close("p", "r2", "completed");
+        let st = l.state("p", l.last());
+        assert!(!st.released);
+        assert_eq!(
+            st.count, 2,
+            "a revoked request does not release, so the run goes on"
+        );
+    }
+
+    #[test]
+    fn a_waiver_that_completes_a_release_also_ends_the_run() {
+        let mut l = Log::new();
+        let reg = l.register("p", &["c1"]);
+        for i in 0..2 {
+            let id = format!("r{i}");
+            l.request("p", &id, reg);
+            l.audit("p", &id, "REWORK", &[]);
+            l.close("p", &id, "completed");
+        }
+        l.request("p", "r2", reg);
+        l.audit("p", "r2", "APPROVE", &[]);
+        l.close("p", "r2", "completed");
+        assert_eq!(l.state("p", l.last()).count, 2, "c1 still open");
+        l.add(
+            "p",
+            "condition_waived",
+            json!({"condition": "c1", "reason": "user"}),
+        );
+        assert_eq!(l.state("p", l.last()).count, 0);
+    }
+
+    #[test]
+    fn a_valid_audit_condition_with_a_boolean_blocking_flag_is_accepted() {
+        // Positive case for the N2 validation (DSH's suggestion): true and false both parse.
+        let mut l = Log::new();
+        let reg = l.register("p", &[]);
+        l.request("p", "r1", reg);
+        l.add("p", "job", json!({"request_id": "r1"}));
+        l.add(
+            "p",
+            "audit",
+            json!({"request_id": "r1", "verdict": "APPROVE WITH CONDITIONS", "valid": true,
+                   "conditions": [{"id": "a1", "text": "must fix", "blocking": true},
+                                  {"id": "a2", "text": "nice to have", "blocking": false}]}),
+        );
+        l.close("p", "r1", "completed");
+        let st = l.state("p", l.last());
+        assert!(
+            !st.reasons.iter().any(|r| r.contains("malformed")),
+            "{:?}",
+            st.reasons
+        );
+        let got: Vec<(&str, bool)> = st
+            .conditions
+            .iter()
+            .map(|c| (c.id.as_str(), c.blocking))
+            .collect();
+        assert_eq!(got, vec![("a1", true), ("a2", false)]);
+        assert!(
+            st.reasons
+                .iter()
+                .any(|r| r.contains("open blocking conditions: a1"))
         );
     }
 

@@ -1,0 +1,21 @@
+# M2 N1 mutations (count reset on release), 2026-10-18T09:00:09+08:00
+Each applied alone, then reverted; cargo test -p review-gate --lib milestone.
+
+## N1a reset on any approval (the old behaviour)
+test milestone::derive::tests::a_waiver_that_completes_a_release_also_ends_the_run ... FAILED
+test milestone::derive::tests::the_count_resets_on_release_not_on_an_approval_that_leaves_a_blocking_condition_open ... FAILED
+test result: FAILED. 23 passed; 2 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.11s
+## N1b never reset
+test milestone::derive::tests::a_waiver_that_completes_a_release_also_ends_the_run ... FAILED
+test milestone::derive::tests::the_count_resets_on_release_not_on_an_approval_that_leaves_a_blocking_condition_open ... FAILED
+test result: FAILED. 23 passed; 2 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.12s
+## N1c revocation ignored for the reset
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.11s
+## N1d baseline ignored for the reset
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.11s
+## N1c revocation ignored for the reset (rerun after adding an_approval_of_a_revoked_request_does_not_end_the_run)
+test milestone::derive::tests::an_approval_of_a_revoked_request_does_not_end_the_run ... FAILED
+test result: FAILED. 25 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.12s
+
+N1c first survived (no test where a request is revoked before its approval completes); test an_approval_of_a_revoked_request_does_not_end_the_run added, rerun above caught it.
+N1d survives and is equivalent: a request bound to an old baseline is already Failed when recorded (never Completed), and a later baseline_changed cannot undo a reset that already happened at completion; the baseline check is kept as a guard, not as observable behaviour.
