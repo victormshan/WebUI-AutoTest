@@ -1,0 +1,15 @@
+# M2 N2 mutations (derive.rs malformed conditions), 2026-10-18T08:31:39+08:00
+Each applied alone, then reverted; cargo test -p review-gate --lib milestone.
+
+## N2a condition shape not checked
+test milestone::derive::tests::a_condition_without_its_blocking_flag_is_malformed_not_non_blocking ... FAILED
+test result: FAILED. 21 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.11s
+## N2b blocking flag not required
+test milestone::derive::tests::a_condition_without_its_blocking_flag_is_malformed_not_non_blocking ... FAILED
+test result: FAILED. 21 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.11s
+## N2c registration conditions not checked
+test milestone::derive::tests::a_condition_without_its_blocking_flag_is_malformed_not_non_blocking ... FAILED
+test result: FAILED. 21 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.10s
+## N2d invalid audits checked too
+test milestone::derive::tests::a_condition_without_its_blocking_flag_is_malformed_not_non_blocking ... FAILED
+test result: FAILED. 21 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.11s

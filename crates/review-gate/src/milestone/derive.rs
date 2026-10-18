@@ -109,7 +109,47 @@ fn malformed(r: &Record) -> Option<String> {
             r.seq
         ));
     }
-    None
+    // Conditions are never read with defaults: a condition whose blocking flag is missing would
+    // otherwise silently count as non-blocking (DSH review note N2).
+    let conditions_of = |need_blocking: bool| -> Option<String> {
+        let list = match r.body.get("conditions") {
+            None => return None,
+            Some(Value::Array(a)) => a,
+            Some(_) => {
+                return Some(format!(
+                    "record {} ({}): conditions is not a list",
+                    r.seq, r.kind
+                ));
+            }
+        };
+        for (i, c) in list.iter().enumerate() {
+            let id_ok = c
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|v| !v.is_empty());
+            let text_ok = c.get("text").and_then(Value::as_str).is_some();
+            let blocking_ok = !need_blocking || c.get("blocking").is_some_and(Value::is_boolean);
+            if !(id_ok && text_ok && blocking_ok) {
+                return Some(format!(
+                    "record {} ({}): condition {} lacks id, text{}",
+                    r.seq,
+                    r.kind,
+                    i + 1,
+                    if need_blocking {
+                        " or a boolean blocking flag"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+        }
+        None
+    };
+    match r.kind.as_str() {
+        "audit" if r.body.get("valid") == Some(&Value::Bool(true)) => conditions_of(true),
+        "phase_registered" => conditions_of(false),
+        _ => None,
+    }
 }
 
 fn s<'a>(v: &'a Value, k: &str) -> &'a str {
@@ -788,6 +828,77 @@ mod tests {
         assert!(
             !l.state("p", l.last()).released,
             "audit_seq must be an integer"
+        );
+    }
+
+    #[test]
+    fn a_condition_without_its_blocking_flag_is_malformed_not_non_blocking() {
+        let mut l = Log::new();
+        let reg = l.register("p", &[]);
+        l.request("p", "r1", reg);
+        l.add("p", "job", json!({"request_id": "r1"}));
+        l.add(
+            "p",
+            "audit",
+            json!({"request_id": "r1", "verdict": "APPROVE WITH CONDITIONS", "valid": true,
+                   "conditions": [{"id": "a1", "text": "fix the parser"}]}),
+        );
+        l.close("p", "r1", "completed");
+        let st = l.state("p", l.last());
+        assert!(!st.released, "{:?}", st.reasons);
+        assert!(
+            st.reasons
+                .iter()
+                .any(|r| r.contains("boolean blocking flag")),
+            "{:?}",
+            st.reasons
+        );
+        assert!(
+            st.conditions.is_empty(),
+            "the condition is not taken as non-blocking either"
+        );
+
+        // A string "true" is not a boolean either.
+        let mut l = Log::new();
+        let reg = l.register("p", &[]);
+        l.request("p", "r1", reg);
+        l.add(
+            "p",
+            "audit",
+            json!({"request_id": "r1", "verdict": "APPROVE", "valid": true,
+                   "conditions": [{"id": "a1", "text": "x", "blocking": "true"}]}),
+        );
+        assert!(
+            l.state("p", l.last())
+                .reasons
+                .iter()
+                .any(|r| r.contains("malformed"))
+        );
+
+        // A registration condition needs an id.
+        let mut l = Log::new();
+        l.add(
+            "p",
+            "phase_registered",
+            json!({"conditions": [{"text": "no id"}]}),
+        );
+        let st = l.state("p", l.last());
+        assert!(!st.registered && st.reasons.iter().any(|r| r.contains("lacks id")));
+
+        // An invalid audit's conditions are not read at all, so they are not checked.
+        let mut l = Log::new();
+        let reg = l.register("p", &[]);
+        l.request("p", "r1", reg);
+        l.add(
+            "p",
+            "audit",
+            json!({"request_id": "r1", "verdict": "", "valid": false, "conditions": [{}]}),
+        );
+        assert!(
+            !l.state("p", l.last())
+                .reasons
+                .iter()
+                .any(|r| r.contains("malformed"))
         );
     }
 
