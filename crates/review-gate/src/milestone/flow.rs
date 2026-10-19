@@ -27,7 +27,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use agent_bridge::observe::Collected;
@@ -127,6 +127,30 @@ struct TestHooks {
     while_sending: Option<Arc<dyn Fn() + Send + std::marker::Sync>>,
     /// Request: holding the admission lock, after the final `halted` check, before the commit.
     before_commit: Option<Arc<dyn Fn() + Send + std::marker::Sync>>,
+    /// Status: the state is derived, the result not yet returned.
+    in_status: Option<Arc<dyn Fn() + Send + std::marker::Sync>>,
+    /// Any milestone HTTP route: the call has returned, the response is not yet built.
+    in_call: Option<Arc<dyn Fn() + Send + std::marker::Sync>>,
+    /// wait_halted: holding the latch's lock, about to wait on it.
+    waiting: Option<Arc<dyn Fn() + Send + std::marker::Sync>>,
+    /// This many next fetches of the remote fail.
+    failed_fetches: std::sync::atomic::AtomicUsize,
+}
+
+/// The result of `POST /milestones/published`: the `published` record is written; `archived`
+/// says whether the remote is proven to hold that position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishOutcome {
+    pub published: bool,
+    pub archived: bool,
+    /// The checkpoint after the attempt.
+    pub checkpoint: u64,
+    pub archive_error: Option<String>,
+}
+
+/// An error text for a client: one line, bounded.
+fn short(s: &str) -> String {
+    s.lines().next().unwrap_or("").chars().take(300).collect()
 }
 
 /// What became of sending one job (under the admission lock).
@@ -161,6 +185,8 @@ pub struct Flow {
     running: Mutex<BTreeSet<String>>,
     /// Set by a result that could not be written: no more dispatching or release.
     halted: Mutex<Option<String>>,
+    /// Notified (under `halted`) when the latch is set; see `wait_halted`.
+    halted_cv: Condvar,
     /// Admission of new jobs (Codex review of 83bb705): halting takes it, and a request's final
     /// commit and its dispatch happen under it, so no job is admitted once the service has
     /// halted, whatever was being prepared meanwhile. Held only for that short commit and the
@@ -599,6 +625,7 @@ impl Flow {
             phases: Mutex::new(BTreeMap::new()),
             running: Mutex::new(BTreeSet::new()),
             halted: Mutex::new(None),
+            halted_cv: Condvar::new(),
             admit: Mutex::new(()),
             #[cfg(test)]
             hooks: Mutex::new(TestHooks::default()),
@@ -661,6 +688,15 @@ impl Flow {
 
     /// One read of the remote into the private cache.
     fn fetch(&self) -> sync::Remote {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering::SeqCst;
+            let h = self.hooks.lock().unwrap_or_else(|p| p.into_inner());
+            if h.failed_fetches.load(SeqCst) > 0 {
+                h.failed_fetches.fetch_sub(1, SeqCst);
+                return sync::Remote::Unreachable("test: fetch failed".into());
+            }
+        }
         sync::fetch_remote(&self.cfg.dir.join("remote.git"), &self.cfg.remote_url)
     }
 
@@ -679,12 +715,26 @@ impl Flow {
             .clone()
     }
 
-    fn halt(&self, why: String) {
+    pub(crate) fn halt(&self, why: String) {
         let _admit = self.admit.lock().unwrap_or_else(|p| p.into_inner());
         let mut h = self.halted.lock().unwrap_or_else(|p| p.into_inner());
         if h.is_none() {
             *h = Some(why);
         }
+        self.halted_cv.notify_all();
+    }
+
+    /// Blocks until the service halts and returns why (the predicate is checked under the
+    /// latch's own lock, so a halt is never missed).
+    pub fn wait_halted(&self) -> String {
+        let h = self.halted.lock().unwrap_or_else(|p| p.into_inner());
+        #[cfg(test)]
+        self.hook(|t| t.waiting.clone());
+        let h = self
+            .halted_cv
+            .wait_while(h, |h| h.is_none())
+            .unwrap_or_else(|p| p.into_inner());
+        h.clone().unwrap_or_default()
     }
 
     /// Step 2: complete every group a crash cut short. A mismatch stops the log for the user.
@@ -1250,6 +1300,12 @@ impl Flow {
         Ok(())
     }
 
+    /// Runs the `in_call` test hook (service.rs `guarded`).
+    #[cfg(test)]
+    pub(crate) fn test_in_call(&self) {
+        self.hook(|h| h.in_call.clone());
+    }
+
     #[cfg(test)]
     fn hook(
         &self,
@@ -1358,6 +1414,8 @@ impl Flow {
             .records
             .last()
             .map_or((0, String::new()), |r| (r.seq, r.hash.clone()));
+        #[cfg(test)]
+        self.hook(|h| h.in_status.clone());
         Ok(Status {
             released: reasons.is_empty() && st.released,
             reasons,
@@ -1365,6 +1423,54 @@ impl Flow {
             seq,
             hash,
             state: st,
+        })
+    }
+
+    /// Status for the service (6c, Codex n6 Q1): first an attempt to archive what the remote
+    /// now holds (it may recover a fetch that failed before), then a fresh status snapshot. The
+    /// two are never mixed: the state comes only from the status snapshot. A failed archive is a
+    /// reason, and `released` is recomputed from the final reasons.
+    pub fn status_archived(&self, phase: &str) -> std::result::Result<Status, FlowError> {
+        let archived = self.archive();
+        let mut st = self.status(phase)?;
+        if let Err(e) = archived {
+            st.reasons
+                .push(format!("archive: {}", short(&e.to_string())));
+        }
+        st.released = st.reasons.is_empty() && st.state.released;
+        Ok(st)
+    }
+
+    /// `published`, then an attempt to archive. `archived` says whether the reported position
+    /// is proven archived (the checkpoint covers it), not whether this call wrote a record: an
+    /// already archived target, or one a concurrent publish archived, counts.
+    pub fn published_then_archive(
+        &self,
+        seq: u64,
+        hash: &str,
+    ) -> std::result::Result<PublishOutcome, FlowError> {
+        self.published(seq, hash)?;
+        let tried = self.archive();
+        let snap = self.ledger.load()?;
+        let archived = snap.stop.is_none()
+            && snap.checkpoint >= seq
+            && snap
+                .records
+                .get((seq as usize).wrapping_sub(1))
+                .is_some_and(|r| r.hash == hash);
+        let archive_error = match (&tried, archived) {
+            (_, true) => None,
+            (Err(e), false) => Some(short(&e.to_string())),
+            (Ok(_), false) => Some(match &snap.stop {
+                Some(why) => short(&format!("log stopped: {why}")),
+                None => "the remote does not hold this position yet".to_string(),
+            }),
+        };
+        Ok(PublishOutcome {
+            published: true,
+            archived,
+            checkpoint: snap.checkpoint,
+            archive_error,
         })
     }
 
@@ -2901,50 +3007,104 @@ mod tests {
 
     type Hook = Option<Arc<dyn Fn() + Send + std::marker::Sync>>;
 
-    /// A hook that halts `flow` from another thread and checks, for 300 ms, that the halt
-    /// is held back (`blocked`) or not; the halting thread is kept to be joined.
-    fn halting_hook(
-        flow: Arc<std::sync::OnceLock<std::sync::Weak<Flow>>>,
-        blocked: bool,
-        halter: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
-    ) -> Hook {
-        Some(Arc::new(move || {
-            let Some(f) = flow.get().and_then(std::sync::Weak::upgrade) else {
-                return;
-            };
-            if halter.lock().unwrap().is_some() {
-                return;
-            }
-            let t = std::thread::spawn(move || f.halt("test: halted".into()));
-            std::thread::sleep(Duration::from_millis(300));
-            assert_eq!(!t.is_finished(), blocked, "halt held back: {blocked}");
-            *halter.lock().unwrap() = Some(t);
-        }))
+    /// A one-way signal between test threads.
+    #[derive(Default)]
+    struct Flag(Mutex<bool>, std::sync::Condvar);
+
+    impl Flag {
+        fn set(&self) {
+            *self.0.lock().unwrap() = true;
+            self.1.notify_all();
+        }
+        /// Whether the flag was set within `t`.
+        fn wait(&self, t: Duration) -> bool {
+            let g = self.0.lock().unwrap();
+            *self.1.wait_timeout_while(g, t, |s| !*s).unwrap().0
+        }
     }
 
-    fn join_halter(halter: &Mutex<Option<std::thread::JoinHandle<()>>>) {
-        let t = halter.lock().unwrap().take().expect("the hook ran");
-        t.join().unwrap();
+    /// A thread that halts the flow, with signals for "about to call halt()" and "halt()
+    /// returned" (Codex n24: orderings are arranged by signals, not by sleeping).
+    #[derive(Default)]
+    struct Halter {
+        entered: Flag,
+        done: Flag,
+        thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    }
+
+    impl Halter {
+        /// The first call starts the halting thread and waits until it is about to halt. With
+        /// `blocked`, halt() must still not have returned 300 ms later (the caller holds the
+        /// admission lock, so it cannot); without, it must return.
+        fn hook(
+            me: Arc<Self>,
+            flow: Arc<std::sync::OnceLock<std::sync::Weak<Flow>>>,
+            blocked: bool,
+        ) -> Hook {
+            Some(Arc::new(move || {
+                let Some(f) = flow.get().and_then(std::sync::Weak::upgrade) else {
+                    return;
+                };
+                let mut t = me.thread.lock().unwrap();
+                if t.is_some() {
+                    return;
+                }
+                let h = me.clone();
+                *t = Some(std::thread::spawn(move || {
+                    h.entered.set();
+                    f.halt("test: halted".into());
+                    h.done.set();
+                }));
+                drop(t);
+                assert!(me.entered.wait(Duration::from_secs(10)), "halter started");
+                if blocked {
+                    assert!(
+                        !me.done.wait(Duration::from_millis(300)),
+                        "halt() must wait for the admission lock"
+                    );
+                } else {
+                    assert!(me.done.wait(Duration::from_secs(10)), "halt() returned");
+                }
+            }))
+        }
+
+        /// A hook that holds its thread until halt() has returned.
+        fn after_halt(me: Arc<Self>) -> Hook {
+            Some(Arc::new(move || {
+                assert!(me.done.wait(Duration::from_secs(10)), "halt() returned");
+            }))
+        }
+
+        fn join(&self) {
+            assert!(self.done.wait(Duration::from_secs(10)), "halt() returned");
+            let t = self.thread.lock().unwrap().take().expect("the hook ran");
+            t.join().unwrap();
+        }
+    }
+
+    /// Waits until no job thread of this flow is running (each removes its id on the way out).
+    fn jobs_finished(s: &Flow) {
+        for _ in 0..500 {
+            if s.running.lock().unwrap().is_empty() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("a job thread did not finish");
     }
 
     #[test]
     fn a_halt_just_before_the_send_keeps_the_job_from_going_out() {
         let fx = Fx::new();
         let me: Arc<std::sync::OnceLock<std::sync::Weak<Flow>>> = Arc::default();
-        let halter = Arc::new(Mutex::new(None));
+        let halter = Arc::new(Halter::default());
         let s = Flow::open_service(fx.cfg(), kp(), fx.reader()).unwrap();
         fx.register(&s);
         me.set(Arc::downgrade(&s)).unwrap();
-        s.hooks.lock().unwrap().before_send = halting_hook(me, false, halter.clone());
+        s.hooks.lock().unwrap().before_send = Halter::hook(halter.clone(), me, false);
         s.request("p", &fx.head).unwrap();
-        for _ in 0..200 {
-            if halter.lock().unwrap().is_some() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        join_halter(&halter);
-        std::thread::sleep(Duration::from_millis(300));
+        halter.join();
+        jobs_finished(&s);
         assert!(s.halted().is_some());
         assert_eq!(
             fx.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -2963,25 +3123,19 @@ mod tests {
     fn a_halt_while_the_line_is_written_waits_for_the_send() {
         let fx = Fx::new();
         let me: Arc<std::sync::OnceLock<std::sync::Weak<Flow>>> = Arc::default();
-        let halter = Arc::new(Mutex::new(None));
+        let halter = Arc::new(Halter::default());
         let s = Flow::open_service(fx.cfg(), kp(), fx.reader()).unwrap();
         fx.register(&s);
         me.set(Arc::downgrade(&s)).unwrap();
-        s.hooks.lock().unwrap().while_sending = halting_hook(me, true, halter.clone());
+        s.hooks.lock().unwrap().while_sending = Halter::hook(halter.clone(), me, true);
         s.request("p", &fx.head).unwrap();
-        for _ in 0..200 {
-            if halter.lock().unwrap().is_some() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        join_halter(&halter);
+        halter.join();
         assert!(s.halted().is_some());
-        for _ in 0..200 {
+        for _ in 0..500 {
             if fx.calls.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(
             fx.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -2994,24 +3148,619 @@ mod tests {
     fn a_halt_during_the_request_commit_waits_and_the_job_is_not_sent() {
         let fx = Fx::new();
         let me: Arc<std::sync::OnceLock<std::sync::Weak<Flow>>> = Arc::default();
-        let halter = Arc::new(Mutex::new(None));
+        let halter = Arc::new(Halter::default());
         let s = Flow::open_service(fx.cfg(), kp(), fx.reader()).unwrap();
         fx.register(&s);
         me.set(Arc::downgrade(&s)).unwrap();
-        s.hooks.lock().unwrap().before_commit = halting_hook(me, true, halter.clone());
+        {
+            let mut h = s.hooks.lock().unwrap();
+            h.before_commit = Halter::hook(halter.clone(), me, true);
+            // The job thread goes for the admission lock only once halt() has had it: the
+            // Mutex is not FIFO, so without this the job could win it first (Codex n24).
+            h.before_send = Halter::after_halt(halter.clone());
+        }
         s.request("p", &fx.head).unwrap();
-        join_halter(&halter);
+        halter.join();
+        jobs_finished(&s);
         assert!(s.halted().is_some());
         assert!(
             kinds(&s).contains(&"request".to_string()),
             "the request was committed"
         );
-        std::thread::sleep(Duration::from_millis(300));
         assert_eq!(
             fx.calls.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "not sent"
         );
         assert!(!kinds(&s).contains(&"job".to_string()));
+    }
+
+    #[test]
+    fn wait_halted_returns_once_halted_even_if_halted_before_waiting() {
+        let fx = Fx::new();
+        let s = Flow::open_service(fx.cfg(), kp(), fx.reader()).unwrap();
+        // The waiter signals while it still holds the latch's lock, so halt() (which needs that
+        // lock) can only set the latch once the waiter is inside the wait: only the
+        // notification can wake it.
+        let waiting = Arc::new(Flag::default());
+        let w2 = waiting.clone();
+        s.hooks.lock().unwrap().waiting = Some(Arc::new(move || w2.set()));
+        let s2 = s.clone();
+        let t = std::thread::spawn(move || s2.wait_halted());
+        assert!(
+            waiting.wait(Duration::from_secs(10)),
+            "the waiter is waiting"
+        );
+        s.hooks.lock().unwrap().waiting = None;
+        s.halt("first".into());
+        assert_eq!(t.join().unwrap(), "first");
+        s.halt("second".into());
+        assert_eq!(s.wait_halted(), "first", "the first reason is kept");
+    }
+
+    /// The HTTP routes over a real flow (6c).
+    mod routes {
+        use super::*;
+        use crate::gate::Gate;
+        use crate::service::{AppState, serve};
+        use crate::store::Store;
+
+        const TOKEN: &str = "test-token-0123456789abcdef0123456789";
+
+        async fn start(flow: Option<Arc<Flow>>, root: &Path) -> String {
+            let gate = Gate::new(Store::open(root.join("gate-state")).unwrap()).with_signer(kp());
+            let mut app = AppState::new(
+                gate,
+                crate::reviewer::tests::cfg("http://127.0.0.1:9"),
+                TOKEN.into(),
+            );
+            if let Some(f) = flow {
+                app = app.with_milestones(f);
+            }
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            tokio::spawn(serve(Arc::new(app), listener));
+            url
+        }
+
+        async fn call(url: &str, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
+            let http = reqwest::Client::new();
+            let mut r = http
+                .request(method.parse().unwrap(), format!("{url}{path}"))
+                .bearer_auth(TOKEN);
+            if let Some(b) = body {
+                r = r.json(&b);
+            }
+            let resp = r.send().await.unwrap();
+            let code = resp.status().as_u16();
+            let text = resp.text().await.unwrap();
+            (
+                code,
+                serde_json::from_str(&text).unwrap_or(Value::String(text)),
+            )
+        }
+
+        fn last(f: &Flow) -> (u64, String) {
+            let r = f.ledger().load().unwrap().records.last().cloned().unwrap();
+            (r.seq, r.hash)
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn each_route_answers_on_a_real_flow() {
+            let fx = Fx::new();
+            let f = fx.service();
+            let url = start(Some(f.clone()), &fx.root).await;
+            let (c, v) = call(
+                &url,
+                "POST",
+                "/milestones",
+                Some(json!({
+                "phase": "p", "base": fx.base, "task_book": "plans/book.md",
+                "evidence_dir": "ev", "conditions": ["accept"] })),
+            )
+            .await;
+            assert_eq!(c, 200, "{v}");
+            assert_eq!(v["task_book"], "plans/book.md");
+            let f2 = f.clone();
+            tokio::task::spawn_blocking(move || f2.confirm("p").unwrap())
+                .await
+                .unwrap();
+            // Refused: already registered.
+            let (c, v) = call(
+                &url,
+                "POST",
+                "/milestones",
+                Some(json!({
+                "phase": "p", "base": fx.base, "task_book": "plans/book.md",
+                "evidence_dir": "ev" })),
+            )
+            .await;
+            assert_eq!(c, 409, "{v}");
+            assert!(
+                v["refused"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("already registered"),
+                "{v}"
+            );
+            let (c, v) = call(
+                &url,
+                "POST",
+                "/milestones/p/requests",
+                Some(json!({ "head": fx.head })),
+            )
+            .await;
+            assert_eq!((c, v["request_id"].as_str()), (200, Some("p-q1")), "{v}");
+            let f2 = f.clone();
+            tokio::task::spawn_blocking(move || settled(&f2, "p"))
+                .await
+                .unwrap();
+            // Done, but not archived: 200 with released false (not a refusal).
+            let (c, v) = call(&url, "GET", "/milestones/p", None).await;
+            assert_eq!((c, v["released"].as_bool()), (200, Some(false)), "{v}");
+            assert!(!v["reasons"].as_array().unwrap().is_empty());
+            // The log is the signed text the flow renders.
+            let (c, log) = call(&url, "GET", "/milestones/log", None).await;
+            assert_eq!(c, 200);
+            assert_eq!(log, Value::String(f.log().unwrap()));
+            // Publish as the implementer, then report: archived.
+            fx.publish(&f);
+            let (seq, hash) = last(&f);
+            let (c, v) = call(
+                &url,
+                "POST",
+                "/milestones/published",
+                Some(json!({ "seq": seq, "hash": hash })),
+            )
+            .await;
+            assert_eq!(c, 200, "{v}");
+            assert_eq!(
+                (v["published"].as_bool(), v["archived"].as_bool()),
+                (Some(true), Some(true)),
+                "{v}"
+            );
+            // Reporting the same (already archived) position again is still archived.
+            let (c, v) = call(
+                &url,
+                "POST",
+                "/milestones/published",
+                Some(json!({ "seq": seq, "hash": hash })),
+            )
+            .await;
+            assert_eq!((c, v["archived"].as_bool()), (200, Some(true)), "{v}");
+            let (c, v) = call(&url, "GET", "/milestones/p", None).await;
+            assert_eq!((c, v["released"].as_bool()), (200, Some(true)), "{v}");
+            // A position not in the log: refused.
+            let (c, _) = call(
+                &url,
+                "POST",
+                "/milestones/published",
+                Some(json!({ "seq": 1, "hash": "00" })),
+            )
+            .await;
+            assert_eq!(c, 409);
+            // Cancel of a request that is not pending: refused; malformed ids: 400.
+            let (c, _) = call(&url, "POST", "/milestones/p/requests/p-q1/cancel", None).await;
+            assert_eq!(c, 409);
+            let (c, _) = call(&url, "POST", "/milestones/p/requests/a%20b/cancel", None).await;
+            assert_eq!(c, 400);
+            let (c, _) = call(&url, "GET", "/milestones/Bad%20Phase", None).await;
+            assert_eq!(c, 400);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn published_but_not_on_the_remote_is_a_partial_success() {
+            let fx = Fx::new();
+            let f = fx.service();
+            fx.register(&f);
+            let url = start(Some(f.clone()), &fx.root).await;
+            let (seq, hash) = last(&f);
+            // Reported without pushing: published is written, archived is false, with a reason.
+            let (c, v) = call(
+                &url,
+                "POST",
+                "/milestones/published",
+                Some(json!({ "seq": seq, "hash": hash })),
+            )
+            .await;
+            assert_eq!(c, 200, "{v}");
+            assert_eq!(
+                (v["published"].as_bool(), v["archived"].as_bool()),
+                (Some(true), Some(false)),
+                "{v}"
+            );
+            assert!(v["archive_error"].is_string(), "{v}");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn publish_checks_the_pinned_key_before_writing_anything() {
+            let fx = Fx::new();
+            let f = fx.service();
+            fx.register(&f);
+            let url = start(Some(f.clone()), &fx.root).await;
+            let c = crate::client::Client::new(&url, TOKEN);
+            let remote = fx.cfg().remote_url;
+            let notes = |dir: &Path| {
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args(["for-each-ref", "refs/notes/"])
+                    .output()
+                    .unwrap()
+                    .stdout
+            };
+            let (local0, remote0) = (notes(&fx.repo), notes(&fx.remote));
+            let wrong = Keypair::from_seed([0xA5; 32]).verifying_key();
+            let e = crate::milestone::cli::publish(&c, &fx.repo, &remote, &wrong, "repo")
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("not the pinned key"), "{e}");
+            assert_eq!(
+                (notes(&fx.repo), notes(&fx.remote)),
+                (local0, remote0),
+                "nothing written"
+            );
+            let o = crate::milestone::cli::publish(
+                &c,
+                &fx.repo,
+                &remote,
+                &kp().verifying_key(),
+                "repo",
+            )
+            .await
+            .unwrap();
+            assert!(o.published && o.archived, "{o:?}");
+            assert_ne!(notes(&fx.remote), Vec::<u8>::new(), "pushed");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn without_milestones_404_once_authenticated_and_401_before() {
+            let d = tempfile::tempdir().unwrap();
+            let url = start(None, d.path()).await;
+            let (c, _) = call(&url, "GET", "/milestones/p", None).await;
+            assert_eq!(c, 404, "authenticated, milestones off");
+            let r = reqwest::get(format!("{url}/milestones/p")).await.unwrap();
+            assert_eq!(r.status().as_u16(), 401, "no token: 401 first");
+            let fx = Fx::new();
+            let url = start(Some(fx.service()), &fx.root).await;
+            let r = reqwest::get(format!("{url}/milestones/log")).await.unwrap();
+            assert_eq!(r.status().as_u16(), 401, "no token, milestones on");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_halted_service_answers_503_on_every_route() {
+            let fx = Fx::new();
+            let f = fx.service();
+            let url = start(Some(f.clone()), &fx.root).await;
+            f.halt("test: halted".into());
+            for (m, p, b) in [
+                ("GET", "/milestones/p", None),
+                ("GET", "/milestones/log", None),
+                (
+                    "POST",
+                    "/milestones/published",
+                    Some(json!({ "seq": 1, "hash": "x" })),
+                ),
+                (
+                    "POST",
+                    "/milestones/p/requests",
+                    Some(json!({ "head": fx.head })),
+                ),
+                ("POST", "/milestones/p/requests/p-q1/cancel", None),
+                (
+                    "POST",
+                    "/milestones",
+                    Some(json!({ "phase": "p", "base": fx.base,
+                    "task_book": "plans/book.md", "evidence_dir": "ev" })),
+                ),
+            ] {
+                let (c, v) = call(&url, m, p, b).await;
+                assert_eq!(c, 503, "{m} {p}: {v}");
+                assert_eq!(v["halted"], "test: halted");
+            }
+            // Refused before the call: nothing was even attempted.
+            assert!(
+                !fx.root.join("state/pending/p.json").exists(),
+                "no application kept"
+            );
+            assert!(kinds(&f).is_empty(), "nothing written");
+        }
+
+        /// A halt that lands while a call runs wins over its result (Codex n4 §3).
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_halt_during_a_call_turns_its_answer_into_503() {
+            let fx = Fx::new();
+            let f = fx.service();
+            fx.register(&f);
+            fx.publish(&f);
+            f.archive().unwrap();
+            let url = start(Some(f.clone()), &fx.root).await;
+            // Status: derived, then halted before it returns.
+            let weak = Arc::downgrade(&f);
+            let halting: Arc<dyn Fn() + Send + std::marker::Sync> = Arc::new(move || {
+                if let Some(f) = weak.upgrade() {
+                    f.halt("halted during the call".into());
+                }
+            });
+            f.hooks.lock().unwrap().in_status = Some(halting.clone());
+            let (c, v) = call(&url, "GET", "/milestones/p", None).await;
+            assert_eq!(c, 503, "never 200 once halted: {v}");
+            // log and published, on a fresh flow each, through the generic hook.
+            for (m, p) in [
+                ("GET", "/milestones/log"),
+                ("POST", "/milestones/published"),
+            ] {
+                let fx = Fx::new();
+                let f = fx.service();
+                fx.register(&f);
+                let (seq, hash) = last(&f);
+                let weak = Arc::downgrade(&f);
+                f.hooks.lock().unwrap().in_call = Some(Arc::new(move || {
+                    if let Some(f) = weak.upgrade() {
+                        f.halt("halted during the call".into());
+                    }
+                }));
+                let url = start(Some(f.clone()), &fx.root).await;
+                let body = (m == "POST").then(|| json!({ "seq": seq, "hash": hash }));
+                let (c, v) = call(&url, m, p, body).await;
+                assert_eq!(c, 503, "{p}: {v}");
+            }
+        }
+    }
+
+    /// `admin milestone` (6c, Codex n4 §2 and n6 condition 3).
+    mod admin_cli {
+        use super::*;
+        use crate::milestone::cli::{AdminOp, execute, offline_status, preview};
+        use crate::milestone::serve::MilestoneConfig;
+
+        /// Every file under `dir` with its sha256 (the set and the contents).
+        fn digest(dir: &Path) -> BTreeMap<PathBuf, String> {
+            let mut out = BTreeMap::new();
+            if !dir.exists() {
+                return out;
+            }
+            let mut stack = vec![dir.to_path_buf()];
+            while let Some(d) = stack.pop() {
+                for e in fs::read_dir(&d).unwrap() {
+                    let p = e.unwrap().path();
+                    let m = fs::symlink_metadata(&p).unwrap();
+                    if m.is_dir() {
+                        out.insert(p.clone(), "dir".into());
+                        stack.push(p);
+                    } else if m.is_file() {
+                        out.insert(p.clone(), sha256_hex(&fs::read(&p).unwrap()));
+                    } else {
+                        out.insert(p.clone(), "special".into());
+                    }
+                }
+            }
+            out
+        }
+
+        fn config(fx: &Fx) -> MilestoneConfig {
+            MilestoneConfig {
+                repo_id: "repo".into(),
+                repo: fx.repo.clone(),
+                remote_url: fx.cfg().remote_url,
+                runner_socket: fx.socket(),
+                runner_uid: 0,
+                runner_cgroup: "/x".into(),
+                job_timeout_secs: 10,
+                auditor: "auditor".into(),
+                implementers: BTreeSet::from(["claude".to_string()]),
+                bridge_url: "http://127.0.0.1:9".into(),
+                bridge_token_file: fx.root.join("no-token"),
+            }
+        }
+
+        /// The flow's milestone dir, copied into `<new state>/milestones` as the CLI expects.
+        fn as_state(fx: &Fx, name: &str) -> PathBuf {
+            let state = fx.root.join(name);
+            fs::create_dir_all(&state).unwrap();
+            let out = std::process::Command::new("cp")
+                .arg("-a")
+                .arg(fx.root.join("state"))
+                .arg(state.join("milestones"))
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            state
+        }
+
+        fn ops(fx: &Fx) -> Vec<AdminOp> {
+            let vendors = fx.root.join("vendors.json");
+            let mut t = sources::Vendors::first();
+            t.version += 1;
+            fs::write(&vendors, serde_json::to_string(&t).unwrap()).unwrap();
+            let r = || "because".to_string();
+            vec![
+                AdminOp::Confirm { phase: "p2".into() },
+                AdminOp::Rebaseline {
+                    phase: "p".into(),
+                    base: fx.head.clone(),
+                    reason: r(),
+                },
+                AdminOp::Waive {
+                    phase: "p".into(),
+                    condition: "p/R1".into(),
+                    reason: r(),
+                },
+                AdminOp::DropSource {
+                    phase: "p".into(),
+                    source: "s".into(),
+                    reason: r(),
+                },
+                AdminOp::LinkTask {
+                    phase: "p".into(),
+                    task: "t".into(),
+                    reason: r(),
+                },
+                AdminOp::IgnoreTask {
+                    phase: "p".into(),
+                    task: "t".into(),
+                    reason: r(),
+                },
+                AdminOp::Revoke {
+                    phase: "p".into(),
+                    reason: r(),
+                },
+                AdminOp::Resume {
+                    phase: "p".into(),
+                    reason: r(),
+                },
+                AdminOp::VendorsSet {
+                    file: vendors,
+                    reason: r(),
+                },
+            ]
+        }
+
+        /// Dry runs and the offline status leave the state exactly as it was, in states where
+        /// opening the flow would write: none at all, an unfinished group, a remote ahead.
+        #[test]
+        fn dry_runs_and_the_offline_status_write_nothing() {
+            let fx = Fx::new();
+            let (f, _) = requested(&fx);
+            let behind = as_state(&fx, "behind"); // copied before the remote moves on
+            f.apply(
+                "p2",
+                &fx.base,
+                "plans/book.md",
+                "ev",
+                vec![],
+                Some("p".into()),
+            )
+            .unwrap();
+            f.ledger().crash_after(1);
+            assert!(f.confirm("p2").is_err());
+            f.ledger().crash_after(usize::MAX);
+            let crashed = as_state(&fx, "crashed");
+            // The remote holds the full log: the copy taken before is behind it.
+            fx.publish(&f);
+            let missing = fx.root.join("missing");
+            let cfg = config(&fx);
+            let key = kp().verifying_key();
+            let all = ops(&fx);
+            for state in [&missing, &crashed, &behind] {
+                let before = digest(&fx.root);
+                for op in &all {
+                    let v = preview(op, &cfg, state).unwrap();
+                    assert_eq!(v["dry_run"], true);
+                }
+                let st = offline_status(state, "repo", &key, "p");
+                if state == &missing {
+                    assert!(st.is_err());
+                } else {
+                    let st = st.unwrap();
+                    assert_eq!(
+                        (&st["offline"], &st["released"], &st["remote_checked"]),
+                        (&json!(true), &json!(false), &json!(false))
+                    );
+                }
+                let after = digest(&fx.root);
+                assert_eq!(before, after, "{}: nothing written", state.display());
+            }
+            assert!(!missing.exists());
+            // The two states are ones where the normal path would write: status on a copy of
+            // each (recovery, import) changes it.
+            for name in ["crashed", "behind"] {
+                let copy = fx.root.join(format!("{name}-copy"));
+                std::process::Command::new("cp")
+                    .arg("-a")
+                    .arg(fx.root.join(name).join("milestones"))
+                    .arg(&copy)
+                    .status()
+                    .unwrap();
+                let before = digest(&copy);
+                let mut c = fx.cfg();
+                c.dir = copy.clone();
+                Flow::open_admin(c, kp(), fx.reader())
+                    .unwrap()
+                    .status("p")
+                    .unwrap();
+                assert_ne!(before, digest(&copy), "{name}: the normal status writes");
+            }
+            // The preview shows what helps decide: the base resolved read-only, the application.
+            let v = preview(&all[1], &cfg, &crashed).unwrap();
+            assert_eq!(v["would"]["resolved"], fx.head.as_str());
+            let v = preview(&all[0], &cfg, &crashed).unwrap();
+            assert_eq!(v["would"]["application"]["supersedes"], "p");
+        }
+
+        #[test]
+        fn the_offline_status_never_releases_even_a_released_phase() {
+            let fx = Fx::new();
+            let f = fx.service();
+            fx.register(&f);
+            f.request("p", &fx.head).unwrap();
+            settled(&f, "p");
+            fx.publish(&f);
+            f.archive().unwrap();
+            assert!(f.status("p").unwrap().released);
+            let state = as_state(&fx, "s");
+            let v = offline_status(&state, "repo", &kp().verifying_key(), "p").unwrap();
+            assert_eq!(v["released"], false);
+            assert_eq!(
+                v["state"]["released"], true,
+                "the derived state is shown as is"
+            );
+            assert!(
+                offline_status(
+                    &state,
+                    "repo",
+                    &Keypair::from_seed([0xA5; 32]).verifying_key(),
+                    "p"
+                )
+                .is_err(),
+                "only the pinned key verifies"
+            );
+        }
+
+        #[test]
+        fn yes_writes_and_shows_the_real_record() {
+            let fx = Fx::new();
+            let f = fx.admin();
+            fx.register(&f);
+            let v = execute(
+                &f,
+                &AdminOp::Revoke {
+                    phase: "p".into(),
+                    reason: "user said".into(),
+                },
+            )
+            .unwrap();
+            let last = f.ledger().load().unwrap().records.last().cloned().unwrap();
+            assert_eq!(v["written"][0]["seq"], last.seq);
+            assert_eq!(v["written"][0]["hash"], last.hash.as_str());
+            assert_eq!(last.kind, "revoke");
+        }
+    }
+
+    #[test]
+    fn a_failed_archive_before_status_withholds_release() {
+        let fx = Fx::new();
+        let f = fx.service();
+        fx.register(&f);
+        f.request("p", &fx.head).unwrap();
+        settled(&f, "p");
+        fx.publish(&f);
+        f.archive().unwrap();
+        assert!(f.status_archived("p").unwrap().released);
+        // The archive's fetch fails, the status's own fetch succeeds: the archive's reason
+        // still withholds release (released follows the final reasons).
+        f.hooks
+            .lock()
+            .unwrap()
+            .failed_fetches
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let st = f.status_archived("p").unwrap();
+        assert!(
+            st.reasons.iter().any(|r| r.starts_with("archive:")),
+            "{:?}",
+            st.reasons
+        );
+        assert!(!st.released);
     }
 }

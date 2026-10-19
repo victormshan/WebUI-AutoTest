@@ -1,0 +1,35 @@
+M2 step 6c mutation testing (script: m2-tools/mut6c.py; each mutant applied alone, the source restored after).
+
+C1 watchdog never ends the process => KILLED ['test a_halt_with_a_stuck_call_a_silent_runner_and_a_blocked_stderr_exits_3_at_the_deadline ... FAILED']
+C3 main returns 0 after a halt => KILLED ['test a_halt_with_nothing_in_flight_exits_3_at_once ... FAILED']
+C4 no graceful-shutdown signal => KILLED ['test a_halt_with_nothing_in_flight_exits_3_at_once ... FAILED']
+C5 no halted check after the call => KILLED ['test milestone::flow::tests::routes::a_halt_during_a_call_turns_its_answer_into_503 ... FAILED']
+C6 no halted check before the call => KILLED ['test milestone::flow::tests::routes::a_halted_service_answers_503_on_every_route ... FAILED']
+C7 wait_halted waits once without the predicate => KILLED ['TIMEOUT (hang)']
+C9 released not recomputed after an archive failure => KILLED ['test milestone::flow::tests::a_failed_archive_before_status_withholds_release ... FAILED']
+C10 archived = this call wrote a record => KILLED ['test milestone::flow::tests::routes::each_route_answers_on_a_real_flow ... FAILED']
+C11 no --yes gate => KILLED ['test a_write_without_yes_changes_nothing_and_with_yes_writes ... FAILED']
+C12 no pinned-key check in publish => KILLED ['test milestone::flow::tests::routes::publish_checks_the_pinned_key_before_writing_anything ... FAILED']
+C13 offline status releases => KILLED ['test milestone::flow::tests::admin_cli::the_offline_status_never_releases_even_a_released_phase ... FAILED']
+C14 truncated tail not reported => KILLED ['test milestone::ledger::tests::the_offline_view_writes_nothing_and_reports_what_it_could_not_check ... FAILED']
+C15 offline view not verified => KILLED ['test milestone::ledger::tests::the_offline_view_writes_nothing_and_reports_what_it_could_not_check ... FAILED', 'test milestone::flow::tests::admin_cli::the_offline_status_never_releases_even_a_released_phase ... FAILED']
+C16 token mode not checked => KILLED ['test milestone::serve::tests::a_token_file_open_to_others_or_short_is_refused_without_showing_it ... FAILED']
+C17 dry-run preview opens the flow (status) first => KILLED ['test milestone::flow::tests::admin_cli::dry_runs_and_the_offline_status_write_nothing ... FAILED']
+C2 diagnostic written before the deadline => KILLED ['test a_halt_with_a_stuck_call_a_silent_runner_and_a_blocked_stderr_exits_3_at_the_deadline ... FAILED']
+C7 wait_halted waits once without the predicate => KILLED ['TIMEOUT (hang)']
+C8 halt does not notify => KILLED ['TIMEOUT (hang)']
+
+Totals: 17 of 17 killed.
+
+Rerun of C2 and C8 (first-run survivors) and C7:
+- C2 first survived because the mutant was wrong, not the test: replacing
+  `std::thread::spawn(move || { eprintln!(..) });` with `(move || { .. });` only builds a closure
+  and never runs it, so nothing was printed. A debug run showed exit 3 at 5.02 s, which confirms
+  that. Rewritten as an inline eprintln before the deadline sleep, it is killed: with stderr
+  held, the watchdog never reaches its deadline and the process does not exit.
+- C8 first survived because the test did not force "the waiter waits, then the halt". A cfg(test)
+  hook `waiting` now runs inside wait_halted while the latch's lock is still held. The test
+  waits for it, then halts. halt() needs that same lock, so it can only set the latch once the
+  waiter is inside the Condvar wait, and only the notification can wake the waiter. Without
+  notify_all the test hangs (killed by the 300 s timeout).
+- C7 (wait without the predicate) hangs, as before.

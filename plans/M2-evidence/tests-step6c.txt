@@ -1,0 +1,86 @@
+M2 step 6c evidence (base fae23b2). Commands run in /home/administrator/projects/Chrome-MCP-m2.
+
+$ cargo fmt -p review-gate --check
+clean
+$ cargo clippy -p review-gate --all-targets  -- -D warnings
+warnings+errors: 0
+$ cargo clippy -p review-gate --all-targets --features fault-injection -- -D warnings
+warnings+errors: 0
+
+$ cargo test -p review-gate (5 runs, default build)
+run 1:
+test result: ok. 199 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 17.96s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test result: ok. 199 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 17.81s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test result: ok. 199 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 18.49s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 4:
+test result: ok. 199 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 28.16s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 5:
+test result: ok. 199 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 29.89s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+$ cargo test -p review-gate --features fault-injection --test halt_exit -- --nocapture (3 runs)
+run 1:
+exit Some(3) after 10.116613ms from the halt trigger
+test a_halt_with_nothing_in_flight_exits_3_at_once ... ok
+exit Some(3) after 5.016960685s from the halt trigger
+test a_halt_with_a_stuck_call_a_silent_runner_and_a_blocked_stderr_exits_3_at_the_deadline ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.56s
+run 2:
+exit Some(3) after 10.101611ms from the halt trigger
+test a_halt_with_nothing_in_flight_exits_3_at_once ... ok
+exit Some(3) after 5.012885007s from the halt trigger
+test a_halt_with_a_stuck_call_a_silent_runner_and_a_blocked_stderr_exits_3_at_the_deadline ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.16s
+run 3:
+exit Some(3) after 10.109621ms from the halt trigger
+test a_halt_with_nothing_in_flight_exits_3_at_once ... ok
+exit Some(3) after 5.0188126s from the halt trigger
+test a_halt_with_a_stuck_call_a_silent_runner_and_a_blocked_stderr_exits_3_at_the_deadline ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.15s
+
+$ cargo test -p review-gate --test halt_exit --test admin_cli (default build: the negative case and the binary --yes gate)
+test a_write_without_yes_changes_nothing_and_with_yes_writes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.02s
+test without_the_feature_faults_are_ignored ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.32s
+
+$ release build: the fault switch is not in the binary
+    Finished `release` profile [optimized] target(s) in 2m 17s
+(The grep -c line printed nothing here; counted again with Python on the same binaries:)
+release/review-gate (default features): REVIEW_GATE_FAULT 0, "stall-status" 0
+debug/review-gate built with --features fault-injection: REVIEW_GATE_FAULT 1 (the check can see it)
+
+$ cargo test -p review-gate --lib milestone: 10 of 10 runs passed
+
+Notes:
+- Configuration is JSON (serve --milestones <file>), not TOML as plan n1 said: the crate has no TOML
+  dependency, and serde_json with deny_unknown_fields gives the same fail-closed checks.
+- An earlier round of these checks was invalid and is not counted. The 6c mutation script killed
+  only cargo on a hang timeout, and three hung test binaries (C7/C8 mutants) stayed alive. In that
+  round, three runner tests failed and one full run hung. The processes were killed, the script
+  now kills the whole process group on a timeout, and every result above comes from the rerun
+  afterwards.
+- The halt subprocess tests take their timings from the halt trigger; readiness (the runner has
+  read the whole line, the stalled status call has entered) is confirmed by signals before the
+  trigger.

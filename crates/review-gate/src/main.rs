@@ -15,6 +15,9 @@ use clap::{Parser, Subcommand};
 use review_gate::attest::{self, Keypair};
 use review_gate::client::Client;
 use review_gate::gate::Gate;
+use review_gate::milestone::cli as ms_cli;
+use review_gate::milestone::flow::Flow;
+use review_gate::milestone::serve::{self as ms_serve, MilestoneConfig};
 use review_gate::model::Channel;
 use review_gate::relay::RelayTrace;
 use review_gate::reviewer::{self, AskError, ReviewerConfig};
@@ -49,6 +52,14 @@ enum Cmd {
         /// claude-step-relay data dir: the gate writes `traces/<exprId>.gate.md` there
         #[arg(long)]
         relay_dir: Option<PathBuf>,
+        /// Milestone audits: JSON configuration (absent: milestone routes answer 404)
+        #[arg(long)]
+        milestones: Option<PathBuf>,
+    },
+    /// Milestone audits, as the implementer (talks to the service)
+    Milestone {
+        #[command(subcommand)]
+        cmd: MilestoneCmd,
     },
     /// Claude Code PreToolUse hook (Bash): blocks unreviewed `git commit` and unattested `git push`
     Hook,
@@ -180,7 +191,83 @@ enum ReviewCmd {
 }
 
 #[derive(Subcommand)]
+enum MilestoneCmd {
+    /// Apply to register a phase (the user confirms it with `admin milestone confirm`)
+    Register {
+        #[arg(long)]
+        phase: String,
+        #[arg(long)]
+        base: String,
+        #[arg(long)]
+        task_book: String,
+        #[arg(long)]
+        evidence_dir: String,
+        #[arg(long = "condition")]
+        conditions: Vec<String>,
+        #[arg(long)]
+        supersedes: Option<String>,
+    },
+    /// Request an audit of `base..head`
+    Request {
+        #[arg(long)]
+        phase: String,
+        #[arg(long)]
+        head: String,
+    },
+    /// The phase's state (exit 1 unless released)
+    Status {
+        #[arg(long)]
+        phase: String,
+    },
+    /// Cancel a pending request
+    Cancel {
+        #[arg(long)]
+        phase: String,
+        #[arg(long)]
+        id: String,
+    },
+    /// Publish the signed log to the remote's notes (no force) and report it (exit 1 unless archived)
+    Publish {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long)]
+        remote: String,
+        /// The gate's pinned public key (base64, or a file)
+        #[arg(long)]
+        pubkey: String,
+        #[arg(long)]
+        repo_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdminMilestoneCmd {
+    /// Offline diagnostic: reads the log without writing; never a basis for release
+    Status {
+        phase: String,
+        /// The gate's public key to verify the log with (base64, or a file)
+        #[arg(long)]
+        pubkey: String,
+    },
+    #[command(flatten)]
+    Op(review_gate::milestone::cli::AdminOp),
+}
+
+#[derive(Subcommand)]
 enum AdminCmd {
+    /// Milestone administration (the user). Writes are dry runs unless --yes is given.
+    Milestone {
+        #[arg(long, default_value = "/var/lib/reviewgate/state")]
+        state: PathBuf,
+        /// The same JSON configuration as `serve --milestones`
+        #[arg(long)]
+        config: PathBuf,
+        /// Execute the write (without it, only show what would be written)
+        #[arg(long)]
+        yes: bool,
+        #[command(subcommand)]
+        cmd: AdminMilestoneCmd,
+    },
     /// Record a human verdict (the only way to use the `manual` channel)
     Manual {
         #[arg(long, default_value = "/var/lib/reviewgate/state")]
@@ -223,6 +310,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             listen,
             token_file,
             relay_dir,
+            milestones,
         } => {
             let token = std::fs::read_to_string(&token_file)
                 .with_context(|| format!("reading token {}", token_file.display()))?
@@ -238,7 +326,28 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             if let Some(dir) = relay_dir {
                 gate = gate.with_relay(RelayTrace::new(dir));
             }
-            let app = Arc::new(AppState::new(gate, ReviewerConfig::from_env(), token));
+            let mut app = AppState::new(gate, ReviewerConfig::from_env(), token);
+            let mut watched = None;
+            if let Some(path) = milestones {
+                let mc = MilestoneConfig::load(&path)?;
+                let bridge_token = ms_serve::read_token(&mc.bridge_token_file)?;
+                let kp = Keypair::load_or_create(&state)?;
+                let cfg = mc.flow_config(&state, kp.verifying_key());
+                let bridge = ms_serve::bridge_reader(
+                    tokio::runtime::Handle::current(),
+                    mc.bridge_url.clone(),
+                    bridge_token,
+                );
+                let flow = tokio::task::spawn_blocking(move || Flow::open_service(cfg, kp, bridge))
+                    .await??;
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                ms_serve::watch_halt(flow.clone(), tx);
+                #[cfg(feature = "fault-injection")]
+                ms_serve::fault::start(&flow, &mc.runner_socket);
+                app = app.with_milestones(flow.clone());
+                watched = Some((flow, rx));
+            }
+            let app = Arc::new(app);
             let listener = tokio::net::TcpListener::bind(&listen)
                 .await
                 .with_context(|| format!("binding {listen}"))?;
@@ -246,7 +355,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 "review-gate listening on {listen}, state {}",
                 state.display()
             );
-            service::serve(app, listener).await?;
+            let Some((flow, rx)) = watched else {
+                service::serve(app, listener).await?;
+                return Ok(ExitCode::SUCCESS);
+            };
+            let served = service::serve_until(app, listener, rx).await;
+            // Once halted, the process never ends normally: exit 3 now (the watchdog does it
+            // at the deadline if this point is never reached).
+            if flow.halted().is_some() {
+                std::process::exit(ms_serve::HALT_EXIT);
+            }
+            served?;
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Task { cmd } => {
@@ -439,12 +558,130 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             )?);
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Admin {
+            cmd:
+                AdminCmd::Milestone {
+                    state,
+                    config,
+                    yes,
+                    cmd,
+                },
+        } => admin_milestone(state, config, yes, cmd).await,
+        Cmd::Milestone { cmd } => milestone(cmd).await,
         Cmd::Ask {
             provider,
             json,
             probe,
         } => Ok(ask(&provider, json, probe).await),
     }
+}
+
+async fn admin_milestone(
+    state: PathBuf,
+    config: PathBuf,
+    yes: bool,
+    cmd: AdminMilestoneCmd,
+) -> Result<ExitCode> {
+    let mc = MilestoneConfig::load(&config)?;
+    let op = match cmd {
+        AdminMilestoneCmd::Status { phase, pubkey } => {
+            let key = load_pubkey(&pubkey)?;
+            print(&ms_cli::offline_status(&state, &mc.repo_id, &key, &phase)?);
+            return Ok(ExitCode::SUCCESS);
+        }
+        AdminMilestoneCmd::Op(op) => op,
+    };
+    if !yes {
+        print(&ms_cli::preview(&op, &mc, &state)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    anyhow::ensure!(
+        state.join("keys").join("gate.ed25519").is_file(),
+        "{} holds no gate key: wrong --state?",
+        state.display()
+    );
+    let bridge_token = ms_serve::read_token(&mc.bridge_token_file)?;
+    let kp = Keypair::load_or_create(&state)?;
+    let cfg = mc.flow_config(&state, kp.verifying_key());
+    let bridge = ms_serve::bridge_reader(
+        tokio::runtime::Handle::current(),
+        mc.bridge_url.clone(),
+        bridge_token,
+    );
+    let out = tokio::task::spawn_blocking(move || {
+        let flow = Flow::open_admin(cfg, kp, bridge)?;
+        ms_cli::execute(&flow, &op).map_err(anyhow::Error::from)
+    })
+    .await??;
+    print(&out);
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn milestone(cmd: MilestoneCmd) -> Result<ExitCode> {
+    let c = Client::from_env()?;
+    match cmd {
+        MilestoneCmd::Register {
+            phase,
+            base,
+            task_book,
+            evidence_dir,
+            conditions,
+            supersedes,
+        } => {
+            let v: Value = c
+                .post(
+                    "/milestones",
+                    json!({ "phase": phase, "base": base, "task_book": task_book,
+                        "evidence_dir": evidence_dir, "conditions": conditions,
+                        "supersedes": supersedes }),
+                )
+                .await?;
+            print(&v);
+        }
+        MilestoneCmd::Request { phase, head } => {
+            let v: Value = c
+                .post(
+                    &format!("/milestones/{phase}/requests"),
+                    json!({ "head": head }),
+                )
+                .await?;
+            print(&v);
+        }
+        MilestoneCmd::Status { phase } => {
+            let v: Value = c.get(&format!("/milestones/{phase}")).await?;
+            print(&v);
+            if v["released"] != json!(true) {
+                return Ok(ExitCode::from(1));
+            }
+        }
+        MilestoneCmd::Cancel { phase, id } => {
+            let v: Value = c
+                .post(
+                    &format!("/milestones/{phase}/requests/{id}/cancel"),
+                    json!({}),
+                )
+                .await?;
+            print(&v);
+        }
+        MilestoneCmd::Publish {
+            repo,
+            remote,
+            pubkey,
+            repo_id,
+        } => {
+            let key = load_pubkey(&pubkey)?;
+            let o = ms_cli::publish(&c, &repo, &remote, &key, &repo_id).await?;
+            print(&o);
+            if !o.archived {
+                eprintln!(
+                    "published, but the gate has not confirmed the archive yet; do not push again: \
+                     the next status retries the archive"
+                );
+                return Ok(ExitCode::from(1));
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn load_pubkey(arg: &str) -> Result<ed25519_dalek::VerifyingKey> {

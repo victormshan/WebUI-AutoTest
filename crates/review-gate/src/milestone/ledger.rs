@@ -408,6 +408,71 @@ impl Ledger {
     }
 }
 
+/// An offline view of the log for the user (6c `admin milestone status`, Codex n6 §3): nothing
+/// is written, locked, created, recovered or fetched. Never a basis for release.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadOnly {
+    /// Every complete line, each verified with the fixed key (a bad one is an error).
+    pub records: Vec<Record>,
+    /// The file ends in a line without its newline (a write in progress or cut off): only the
+    /// verified prefix above is shown; the view is incomplete.
+    pub truncated_tail: bool,
+    /// The checkpoint the log itself proves (last `archived` record), when it agrees with the
+    /// checkpoint file; else 0.
+    pub checkpoint: u64,
+    /// Why the checkpoint file and the log do not agree (they are read at different moments
+    /// without the lock, so this may also be a concurrent write): nothing is repaired.
+    pub checkpoint_mismatch: Option<String>,
+}
+
+/// Reads `dir` without writing anything. `key` must be the fixed public key the user pins: it is
+/// never taken from the log or created.
+pub fn read_only(dir: &Path, repo: &str, key: &VerifyingKey) -> Result<ReadOnly> {
+    if !dir.is_dir() {
+        bail!("{} does not exist: no milestone state here", dir.display());
+    }
+    let text = match fs::read_to_string(dir.join("log.jsonl")) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).context("reading the milestone log"),
+    };
+    let (complete, truncated_tail) = match text.rfind('\n') {
+        _ if text.is_empty() => ("", false),
+        Some(i) => (&text[..=i], i + 1 < text.len()),
+        None => ("", true),
+    };
+    let records = parse_log(complete)?;
+    verify_chain(&records, key, repo)?;
+    let from_log = last_archived(&records);
+    let file: Option<std::result::Result<Checkpoint, String>> =
+        match fs::read(dir.join("checkpoint.json")) {
+            Ok(b) => Some(serde_json::from_slice(&b).map_err(|e| e.to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).context("reading the checkpoint"),
+        };
+    let (checkpoint, checkpoint_mismatch) = match (from_log, file) {
+        (Err(why), _) => (0, Some(why)),
+        (Ok(_), Some(Err(e))) => (0, Some(format!("checkpoint file unreadable: {e}"))),
+        (Ok(None), None) => (0, None),
+        (Ok(Some(l)), Some(Ok(f))) if l == f => (l.seq, None),
+        (Ok(l), f) => (
+            0,
+            Some(format!(
+                "the log's last archived position ({}) and the checkpoint file ({}) differ",
+                l.map_or("none".into(), |l| format!("{} {}", l.seq, l.hash)),
+                f.and_then(|f| f.ok())
+                    .map_or("missing".into(), |f| format!("{} {}", f.seq, f.hash)),
+            )),
+        ),
+    };
+    Ok(ReadOnly {
+        records,
+        truncated_tail,
+        checkpoint,
+        checkpoint_mismatch,
+    })
+}
+
 /// The position named by the last `archived` record, checked against the chain.
 fn last_archived(records: &[Record]) -> Result<Option<Checkpoint>, String> {
     let Some(a) = records.iter().rev().find(|r| r.kind == "archived") else {
@@ -858,5 +923,49 @@ mod tests {
             l2.import(&Remote::Unreachable("down".into())).unwrap(),
             Sync::Stop(_)
         ));
+    }
+
+    #[test]
+    fn the_offline_view_writes_nothing_and_reports_what_it_could_not_check() {
+        let d = tempfile::tempdir().unwrap();
+        let missing = d.path().join("none");
+        assert!(read_only(&missing, "repo", &kp().verifying_key()).is_err());
+        assert!(!missing.exists(), "nothing created");
+        let l = ledger(d.path());
+        let a = note(&l, 1);
+        note(&l, 2);
+        l.archive(&kp(), "t", 1, &a.hash).unwrap();
+        let ro = read_only(d.path(), "repo", &kp().verifying_key()).unwrap();
+        assert_eq!(
+            (ro.records.len(), ro.truncated_tail, ro.checkpoint),
+            (3, false, 1)
+        );
+        assert!(ro.checkpoint_mismatch.is_none());
+        // A half-written last line: the verified prefix, marked incomplete.
+        let log = d.path().join("log.jsonl");
+        let mut text = fs::read_to_string(&log).unwrap();
+        text.push_str("{\"seq\":4,");
+        fs::write(&log, &text).unwrap();
+        let ro = read_only(d.path(), "repo", &kp().verifying_key()).unwrap();
+        assert_eq!((ro.records.len(), ro.truncated_tail), (3, true));
+        // The checkpoint file missing (the crash gap): reported, not rebuilt.
+        fs::remove_file(d.path().join("checkpoint.json")).unwrap();
+        let ro = read_only(d.path(), "repo", &kp().verifying_key()).unwrap();
+        assert_eq!(ro.checkpoint, 0);
+        assert!(ro.checkpoint_mismatch.is_some());
+        assert!(!d.path().join("checkpoint.json").exists(), "not rebuilt");
+        // Another key, or a bad complete line, is an error, never skipped.
+        assert!(
+            read_only(
+                d.path(),
+                "repo",
+                &Keypair::from_seed([1; 32]).verifying_key()
+            )
+            .is_err()
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        let tampered = format!("{}\n{}\n", lines[0], lines[1].replace("\"i\":2", "\"i\":3"));
+        fs::write(&log, tampered).unwrap();
+        assert!(read_only(d.path(), "repo", &kp().verifying_key()).is_err());
     }
 }

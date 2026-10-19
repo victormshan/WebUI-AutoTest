@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "review-gate"
 path = "src/main.rs"
 
+[features]
+# Test-only faults for the subprocess halt tests (src/milestone/serve.rs `fault`); never deployed.
+fault-injection = []
+
 [dependencies]
 agent-bridge = { path = "../agent-bridge" }
 anyhow.workspace = true

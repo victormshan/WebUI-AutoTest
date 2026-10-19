@@ -70,16 +70,42 @@ impl Client {
             .await
             .context("invalid response from review-gate")?;
         if !status.is_success() {
-            bail!(
-                "review-gate {status}: {}",
-                v["error"].as_str().unwrap_or(&v.to_string())
-            );
+            let mut why = v["error"].as_str().unwrap_or(&v.to_string()).to_string();
+            for k in ["refused", "halted"] {
+                if !v[k].is_null() {
+                    why = format!("{why}: {}", v[k]);
+                }
+            }
+            bail!("review-gate {status}: {why}");
         }
         Ok(serde_json::from_value(v)?)
     }
 
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         self.call(reqwest::Method::GET, path, None).await
+    }
+
+    /// A plain-text GET (the milestone log).
+    pub async fn get_text(&self, path: &str) -> Result<String> {
+        let resp = self
+            .http
+            .get(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .with_context(|| format!("review-gate unreachable at {}", self.base))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .context("invalid response from review-gate")?;
+        if !status.is_success() {
+            bail!(
+                "review-gate {status}: {}",
+                text.chars().take(500).collect::<String>()
+            );
+        }
+        Ok(text)
     }
 
     pub async fn post<T: DeserializeOwned>(&self, path: &str, body: Value) -> Result<T> {

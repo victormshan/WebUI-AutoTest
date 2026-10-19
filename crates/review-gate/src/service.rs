@@ -20,6 +20,7 @@ use tokio::sync::Mutex;
 
 use crate::GateError;
 use crate::gate::{Gate, NewTask};
+use crate::milestone::flow::{Flow, FlowError, valid_job_id};
 use crate::model::{Channel, ReviewRecord};
 use crate::review::{self, ReviewError};
 use crate::reviewer::{AskError, ReviewerConfig};
@@ -32,6 +33,8 @@ pub struct AppState {
     next_job: AtomicU64,
     /// Serializes state mutations (task files are read-modify-write).
     write: Mutex<()>,
+    /// The milestone flow (6c), when `serve --milestones` is given.
+    milestones: Option<Arc<Flow>>,
 }
 
 impl AppState {
@@ -43,7 +46,13 @@ impl AppState {
             jobs: Mutex::new(HashMap::new()),
             next_job: AtomicU64::new(1),
             write: Mutex::new(()),
+            milestones: None,
         }
+    }
+
+    pub fn with_milestones(mut self, flow: Arc<Flow>) -> Self {
+        self.milestones = Some(flow);
+        self
     }
 }
 
@@ -97,6 +106,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/tasks/{id}/record", post(record))
         .route("/jobs/{job}", get(job_status))
         .route("/check", post(check_commit))
+        .route("/milestones", post(ms_apply))
+        .route("/milestones/log", get(ms_log))
+        .route("/milestones/published", post(ms_published))
+        .route("/milestones/{phase}", get(ms_status))
+        .route("/milestones/{phase}/requests", post(ms_request))
+        .route("/milestones/{phase}/requests/{id}/cancel", post(ms_cancel))
         .layer(middleware::from_fn_with_state(state.clone(), auth));
     Router::new()
         .route("/health", get(health))
@@ -350,6 +365,208 @@ async fn record(
 
 pub async fn serve(state: Arc<AppState>, listener: tokio::net::TcpListener) -> std::io::Result<()> {
     axum::serve(listener, router(state)).await
+}
+
+/// `serve`, ending gracefully once `shutdown` fires (the milestone halt watchdog).
+pub async fn serve_until(
+    state: Arc<AppState>,
+    listener: tokio::net::TcpListener,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> std::io::Result<()> {
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(async {
+            let _ = shutdown.await;
+        })
+        .await
+}
+
+// ---- milestones (M2 step 6c) ----
+
+fn halted_response(why: String) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "the milestone service has halted", "halted": why })),
+    )
+        .into_response()
+}
+
+fn check_phase(phase: &str) -> Result<(), Box<Response>> {
+    if agent_bridge::valid_id(phase) && phase.len() <= 56 {
+        Ok(())
+    } else {
+        Err(Box::new(
+            ApiError(StatusCode::BAD_REQUEST, format!("invalid phase {phase:?}")).into_response(),
+        ))
+    }
+}
+
+/// Every milestone route goes through here (Codex n4 §3, n6): 404 without milestones; 503 if
+/// the service has halted before the call or by the time it returns, whatever the call
+/// produced; the call itself on a blocking thread. The admission boundaries stay inside the
+/// flow (6b); nothing here holds them.
+async fn guarded<T: Send + 'static>(
+    s: &AppState,
+    f: impl FnOnce(&Arc<Flow>) -> Result<T, FlowError> + Send + 'static,
+) -> Result<T, Box<Response>> {
+    let Some(flow) = s.milestones.clone() else {
+        return Err(Box::new(
+            ApiError(StatusCode::NOT_FOUND, "milestones are not enabled".into()).into_response(),
+        ));
+    };
+    if let Some(why) = flow.halted() {
+        return Err(Box::new(halted_response(why)));
+    }
+    let f2 = flow.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        let r = f(&f2);
+        #[cfg(test)]
+        f2.test_in_call();
+        r
+    })
+    .await;
+    if let Some(why) = flow.halted() {
+        return Err(Box::new(halted_response(why)));
+    }
+    let err = match out {
+        Ok(Ok(v)) => return Ok(v),
+        Ok(Err(FlowError::Refused(reasons))) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "refused", "refused": reasons })),
+        )
+            .into_response(),
+        Ok(Err(FlowError::Other(e))) => ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{e}")
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(300)
+                .collect(),
+        )
+        .into_response(),
+        Err(_) => ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the milestone call failed".into(),
+        )
+        .into_response(),
+    };
+    Err(Box::new(err))
+}
+
+fn ok_json(v: impl Serialize) -> Response {
+    Json(json!(v)).into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyBody {
+    phase: String,
+    base: String,
+    task_book: String,
+    evidence_dir: String,
+    #[serde(default)]
+    conditions: Vec<String>,
+    #[serde(default)]
+    supersedes: Option<String>,
+}
+
+async fn ms_apply(State(s): State<Arc<AppState>>, Json(b): Json<ApplyBody>) -> Response {
+    if let Err(r) = check_phase(&b.phase) {
+        return *r;
+    }
+    match guarded(&s, move |f| {
+        f.apply(
+            &b.phase,
+            &b.base,
+            &b.task_book,
+            &b.evidence_dir,
+            b.conditions,
+            b.supersedes,
+        )
+    })
+    .await
+    {
+        Ok(a) => ok_json(a),
+        Err(r) => *r,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestBody {
+    head: String,
+}
+
+async fn ms_request(
+    State(s): State<Arc<AppState>>,
+    Path(phase): Path<String>,
+    Json(b): Json<RequestBody>,
+) -> Response {
+    if let Err(r) = check_phase(&phase) {
+        return *r;
+    }
+    match guarded(&s, move |f| f.request(&phase, &b.head)).await {
+        Ok(id) => ok_json(json!({ "request_id": id })),
+        Err(r) => *r,
+    }
+}
+
+async fn ms_status(State(s): State<Arc<AppState>>, Path(phase): Path<String>) -> Response {
+    if let Err(r) = check_phase(&phase) {
+        return *r;
+    }
+    match guarded(&s, move |f| {
+        #[cfg(feature = "fault-injection")]
+        crate::milestone::serve::fault::in_status();
+        f.status_archived(&phase)
+    })
+    .await
+    {
+        Ok(st) => ok_json(st),
+        Err(r) => *r,
+    }
+}
+
+async fn ms_cancel(
+    State(s): State<Arc<AppState>>,
+    Path((phase, id)): Path<(String, String)>,
+) -> Response {
+    if let Err(r) = check_phase(&phase) {
+        return *r;
+    }
+    if !valid_job_id(&id) {
+        return ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("invalid request id {id:?}"),
+        )
+        .into_response();
+    }
+    match guarded(&s, move |f| f.cancel(&phase, &id)).await {
+        Ok(()) => ok_json(json!({ "cancelled": true })),
+        Err(r) => *r,
+    }
+}
+
+async fn ms_log(State(s): State<Arc<AppState>>) -> Response {
+    match guarded(&s, |f| f.log().map_err(FlowError::Other)).await {
+        Ok(text) => ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response(),
+        Err(r) => *r,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishedBody {
+    seq: u64,
+    hash: String,
+}
+
+async fn ms_published(State(s): State<Arc<AppState>>, Json(b): Json<PublishedBody>) -> Response {
+    match guarded(&s, move |f| f.published_then_archive(b.seq, &b.hash)).await {
+        Ok(o) => ok_json(o),
+        Err(r) => *r,
+    }
 }
 
 #[cfg(test)]

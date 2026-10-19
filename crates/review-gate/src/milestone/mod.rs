@@ -2,11 +2,13 @@
 //! audit-runner, and a signed, append-only record chain from which release state is derived.
 
 pub mod answer;
+pub mod cli;
 pub mod derive;
 pub mod flow;
 pub mod input;
 pub mod ledger;
 pub mod record;
 pub mod runner;
+pub mod serve;
 pub mod sources;
 pub mod sync;
