@@ -139,6 +139,11 @@ pub struct Flow {
     running: Mutex<BTreeSet<String>>,
     /// Set by a result that could not be written: no more dispatching or release.
     halted: Mutex<Option<String>>,
+    /// Admission of new jobs (Codex review of 83bb705): halting takes it, and a request's final
+    /// commit and its dispatch happen under it, so no job is admitted once the service has
+    /// halted, whatever was being prepared meanwhile. Held only for that short commit and the
+    /// thread spawn, never across git, the bridge or the runner.
+    admit: Mutex<()>,
     service: bool,
     _owner: Option<File>,
 }
@@ -570,6 +575,7 @@ impl Flow {
             phases: Mutex::new(BTreeMap::new()),
             running: Mutex::new(BTreeSet::new()),
             halted: Mutex::new(None),
+            admit: Mutex::new(()),
             service,
             _owner: owner,
         })
@@ -648,6 +654,7 @@ impl Flow {
     }
 
     fn halt(&self, why: String) {
+        let _admit = self.admit.lock().unwrap_or_else(|p| p.into_inner());
         let mut h = self.halted.lock().unwrap_or_else(|p| p.into_inner());
         if h.is_none() {
             *h = Some(why);
@@ -849,7 +856,9 @@ impl Flow {
         let mut last = None;
         for _ in 0..ATTEMPTS {
             match self.try_request(phase, head)? {
-                Some((id, input)) => {
+                Some((id, input, _admitted)) => {
+                    // Still under the admission guard: a halt cannot fall between the commit
+                    // of the request and the start of its job.
                     if self.service {
                         self.dispatch(phase, &id, input);
                     }
@@ -869,7 +878,8 @@ impl Flow {
         &self,
         phase: &str,
         head: &str,
-    ) -> std::result::Result<Option<(String, String)>, FlowError> {
+    ) -> std::result::Result<Option<(String, String, std::sync::MutexGuard<'_, ()>)>, FlowError>
+    {
         if let Some(why) = self.halted() {
             return Err(refused(format!("service halted: {why}")));
         }
@@ -1055,6 +1065,11 @@ impl Flow {
         // Commit on the tail the request was prepared on.
         let job_timeout = self.cfg.job_timeout.as_secs();
         let expected = json!({ "uid": self.cfg.runner.uid, "cgroup": self.cfg.runner.cgroup });
+        // Admission: checked again, and held through the commit and the dispatch.
+        let admitted = self.admit.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(why) = self.halted() {
+            return Err(refused(format!("service halted: {why}")));
+        }
         let res = self.ledger.transact(&self.kp, &now(), |snap2| {
             if snap2.records.last().map(|r| r.hash.clone()) != tip {
                 return Err("stale".into());
@@ -1101,7 +1116,7 @@ impl Flow {
             })
         });
         match res {
-            Ok(((id, line), _)) => Ok(Some((id, line))),
+            Ok(((id, line), _)) => Ok(Some((id, line, admitted))),
             Err(TxError::Refused(w)) if w == "stale" => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -1116,6 +1131,21 @@ impl Flow {
         let me = self.clone();
         let (phase, id) = (phase.to_string(), id.to_string());
         std::thread::spawn(move || {
+            // A job not yet sent when the service halted is not sent at all, and nothing is
+            // recorded for it: it stays Pending, and the next start closes it as failed (it
+            // has no job). One already sent is not taken back.
+            let halted = {
+                let _admit = me.admit.lock().unwrap_or_else(|p| p.into_inner());
+                me.halted()
+            };
+            if let Some(why) = halted {
+                eprintln!("review-gate: {id} not sent: service halted: {why}");
+                me.running
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&id);
+                return;
+            }
             let reply = me.run_job(&phase, &id, &line);
             let job = job_body(&id, reply);
             match me.complete(&phase, &id, job) {
@@ -1577,6 +1607,8 @@ mod tests {
         base: String,
         head: String,
         mode: Arc<Mutex<Mode>>,
+        /// Requests the runner stand-in has received.
+        calls: Arc<std::sync::atomic::AtomicUsize>,
         bridge: Arc<Mutex<std::result::Result<Collected, String>>>,
     }
 
@@ -1644,6 +1676,7 @@ mod tests {
                 base,
                 head,
                 mode: Arc::new(Mutex::new(Mode::Answer(approve()))),
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 bridge: Arc::new(Mutex::new(Ok(Collected {
                     revision: "rev".into(),
                     tasks: vec![],
@@ -1661,9 +1694,11 @@ mod tests {
         fn serve_runner(&self) {
             let l = UnixListener::bind(self.socket()).unwrap();
             let mode = self.mode.clone();
+            let calls = self.calls.clone();
             std::thread::spawn(move || {
                 for c in l.incoming() {
                     let Ok(mut c) = c else { break };
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let mode = mode.lock().unwrap().clone();
                     std::thread::spawn(move || {
                         let mut line = String::new();
@@ -2517,6 +2552,7 @@ mod tests {
             base: fx.base.clone(),
             head: fx.head.clone(),
             mode: fx.mode.clone(),
+            calls: fx.calls.clone(),
             bridge: fx.bridge.clone(),
         }));
         let reader: BridgeRead = Arc::new(move || {
@@ -2676,5 +2712,126 @@ mod tests {
         .unwrap();
         let e = f.confirm(&format!("q{next}")).unwrap_err().to_string();
         assert!(e.contains("more than"), "{e}");
+    }
+
+    /// A second registered phase, for requests from two phases at once.
+    fn register_b(fx: &Fx, f: &Flow) {
+        f.apply("pb", &fx.base, "plans/book.md", "ev", vec![], None)
+            .unwrap();
+        f.confirm("pb").unwrap();
+    }
+
+    #[test]
+    fn a_halt_during_preparation_admits_no_new_job() {
+        // pb's request is being prepared (in its bridge read) when the service halts.
+        let fx = Fx::new();
+        let me: Arc<std::sync::OnceLock<std::sync::Weak<Flow>>> = Arc::default();
+        let (m2, b2) = (me.clone(), fx.bridge.clone());
+        let reader: BridgeRead = Arc::new(move || {
+            if let Some(f) = m2.get().and_then(std::sync::Weak::upgrade) {
+                f.halt("test: a result could not be written".into());
+            }
+            b2.lock().unwrap().clone()
+        });
+        let s = Flow::open_service(fx.cfg(), kp(), reader).unwrap();
+        register_b(&fx, &s);
+        me.set(Arc::downgrade(&s)).unwrap();
+        let e = s.request("pb", &fx.head).unwrap_err().to_string();
+        assert!(e.contains("service halted"), "{e}");
+        assert!(
+            !kinds(&s).contains(&"request".to_string()),
+            "no request after the halt"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            fx.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the runner was not called"
+        );
+        assert!(!s.status("pb").unwrap().released);
+    }
+
+    #[test]
+    fn a_real_write_failure_stops_a_request_prepared_meanwhile() {
+        // p's job is running; pb's request waits in its bridge read; p's result cannot be
+        // written (nothing of it lands), the service halts; then pb goes on, and is refused.
+        let fx = Fx::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        *fx.mode.lock().unwrap() = Mode::Hold(Arc::new(Mutex::new(Some(rx))), approve());
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (g2, a2, b2) = (gate.clone(), armed.clone(), fx.bridge.clone());
+        let reader: BridgeRead = Arc::new(move || {
+            if a2.load(std::sync::atomic::Ordering::SeqCst) {
+                let (m, c) = &*g2;
+                let mut open = m.lock().unwrap();
+                while !*open {
+                    open = c.wait(open).unwrap();
+                }
+            }
+            b2.lock().unwrap().clone()
+        });
+        let s = Flow::open_service(fx.cfg(), kp(), reader).unwrap();
+        fx.register(&s);
+        register_b(&fx, &s);
+        s.request("p", &fx.head).unwrap();
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let s2 = s.clone();
+        let head = fx.head.clone();
+        let pb = std::thread::spawn(move || s2.request("pb", &head));
+        // p's result fails to be written: the service halts.
+        std::thread::sleep(Duration::from_millis(200));
+        s.ledger().crash_after(0);
+        tx.send(()).unwrap();
+        for _ in 0..200 {
+            if s.halted().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(s.halted().is_some());
+        s.ledger().crash_after(usize::MAX);
+        // pb continues.
+        {
+            let (m, c) = &*gate;
+            *m.lock().unwrap() = true;
+            c.notify_all();
+        }
+        let e = pb.join().unwrap().unwrap_err().to_string();
+        assert!(e.contains("service halted"), "{e}");
+        let records = s.ledger().load().unwrap().records;
+        assert!(
+            !records
+                .iter()
+                .any(|r| r.phase == "pb" && r.kind == "request")
+        );
+        assert_eq!(
+            fx.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only p's job went out"
+        );
+    }
+
+    #[test]
+    fn a_committed_job_not_yet_sent_when_halted_is_not_sent() {
+        let fx = Fx::new();
+        let a = fx.admin();
+        fx.register(&a);
+        let id = a.request("p", &fx.head).unwrap(); // recorded, not dispatched
+        let s = Flow::open_admin(fx.cfg(), kp(), fx.reader()).unwrap();
+        s.halt("test".into());
+        s.dispatch("p", &id, "{}".into());
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(fx.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(
+            !kinds(&s).contains(&"job".to_string()),
+            "nothing recorded for it"
+        );
+        let st = derive(&s.ledger().load().unwrap().records, "p", 0);
+        assert_eq!(
+            st.current.unwrap().state,
+            RequestState::Pending,
+            "left for the next start"
+        );
     }
 }

@@ -107,3 +107,13 @@ D4 supersedes an unregistered phase => CAUGHT milestone::derive::tests::supersed
 Note: D4's anchor moved when the version-2 change split "!known || depth >= 16" into two checks.
 D4 was rewritten for the new code ("if !known") and is caught. F10 survives as the equivalent
 mutant explained above. Totals: V2a–V2i 9 of 9; earlier set 30 of 31 (F10 equivalent).
+
+
+=== Commit version 3 ===
+V3a admission not rechecked => CAUGHT milestone::flow::tests::a_halt_during_preparation_admits_no_new_job,milestone::flow::tests::a_real_write_failure_stops_a_request_prepared_meanwhile
+V3b halt without the admission lock => SURVIVED
+V3c sent although halted => CAUGHT milestone::flow::tests::a_committed_job_not_yet_sent_when_halted_is_not_sent
+V3b survives and cannot be tested deterministically. It removes the lock from halt(), but the
+job thread's own check before sending still stops any job from going out after a halt. What the
+lock adds is ordering: no request is committed once halt() has returned. Reaching the gap between
+the recheck and the commit would need a timing race, so the lock is kept as a guard.

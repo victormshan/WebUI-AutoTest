@@ -218,3 +218,41 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 $ cargo clippy -p review-gate --all-targets: 0 warnings/errors
 $ cargo fmt -p review-gate --check: clean
+
+
+=== Commit version 3 (Codex implementation review of 83bb705, n=17: REWORK, one point) ===
+Change: an admission lock. halt() takes it; a request's final check of `halted`, its commit and
+its dispatch happen under it; the job thread checks `halted` under it before sending. A job that
+was committed but not yet sent when the service halted is not sent and has nothing recorded; the
+next start closes it as failed. The lock is held only for the commit and the thread spawn.
+Tests:
+- a_halt_during_preparation_admits_no_new_job: the halt happens inside pb's bridge read.
+- a_real_write_failure_stops_a_request_prepared_meanwhile: p's result fails to be written while
+  pb waits in preparation.
+- a_committed_job_not_yet_sent_when_halted_is_not_sent.
+Design text: plans/M2-design.md §3.8 now gives the window as implemented, and notes that committer
+time can be set by the committer (a model-A limit).
+The milestone suite passed 8 of 8 runs.
+Five full runs on the version-3 tree:
+run 1:
+test result: ok. 182 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.07s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test result: ok. 182 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.13s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test result: ok. 182 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.15s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 4:
+test result: ok. 182 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.01s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 5:
+test result: ok. 182 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.40s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo clippy -p review-gate --all-targets: 0 warnings/errors
+$ cargo fmt -p review-gate --check: clean
