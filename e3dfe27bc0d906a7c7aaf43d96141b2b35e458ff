@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-step6c-service
+version: 1/3
+commit: e3dfe27bc0d906a7c7aaf43d96141b2b35e458ff
+tree: 28eefb1a85cb777d6baaa8184f5b5c1cde2d0c90
+parent: fae23b25a4940a7983f86bb6229ccaf880b8bded
+review: v1-1
+reviewer: manual/manual
+verdict: approved
+at: 2026-10-19T15:31:26Z
+signature: k9k3ldh5+pLwzVo+alFOwywA1O0ZRXAWcmTW+2zuynypdLM90ZlFy5vdwJsahjPY2uUvyJB4i/jA6hx3YTIyCg==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
