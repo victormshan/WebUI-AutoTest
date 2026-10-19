@@ -14,6 +14,10 @@ use super::record::Record;
 
 /// Pause threshold: valid REWORK/BLOCK verdicts in a row (user decision of 2026-10-14).
 pub const THRESHOLD: u32 = 3;
+/// Most supersession steps one phase may inherit through; a deeper chain is malformed.
+pub const MAX_SUPERSESSION: usize = 16;
+/// How a reason caused by a malformed record begins.
+pub const MALFORMED: &str = "malformed record";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -230,14 +234,28 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
                     let known = before
                         .iter()
                         .any(|x| x.kind == "phase_registered" && x.phase == old);
-                    if !known || depth >= 16 {
+                    if !known {
                         bad.push(format!(
                             "record {}: supersedes {old:?}, which was not registered before",
                             r.seq
                         ));
                         continue;
                     }
+                    if depth >= MAX_SUPERSESSION {
+                        bad.push(format!(
+                            "record {}: supersession chain deeper than {MAX_SUPERSESSION} phases",
+                            r.seq
+                        ));
+                        continue;
+                    }
                     let prev = derive_inner(before, old, checkpoint, depth + 1);
+                    // An ancestor that cannot be derived taints what is inherited from it (Codex
+                    // review of b5693bb, P2): its malformed records, a chain too deep among them,
+                    // stop this phase too, instead of silently inheriting nothing. Its other
+                    // reasons (not released, superseded) are its own and are not carried over.
+                    for why in prev.reasons.iter().filter(|w| w.starts_with(MALFORMED)) {
+                        bad.push(format!("ancestor {old}: {why}"));
+                    }
                     st.count = prev.count;
                     for mut c in prev.conditions.into_iter().filter(|c| c.closed.is_none()) {
                         // Keep the lineage: where the condition came from, through which phase.
@@ -440,7 +458,7 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
     // ---- release ----
     let mut why = Vec::new();
     for b in &bad {
-        why.push(format!("malformed record, phase stops releasing: {b}"));
+        why.push(format!("{MALFORMED}, phase stops releasing: {b}"));
     }
     if !st.registered {
         why.push("phase not registered (or not confirmed by the user)".to_string());
@@ -1401,6 +1419,60 @@ mod tests {
                 .reasons
                 .iter()
                 .any(|r| r.contains("superseded by both"))
+        );
+    }
+
+    /// p0 (open condition c0, one REWORK) ← p1 ← … ← p<n>: what the last phase inherits.
+    fn chain(n: usize) -> (Log, String) {
+        let mut l = Log::new();
+        let reg = l.register("p0", &["c0"]);
+        l.request("p0", "r0", reg);
+        l.audit("p0", "r0", "REWORK", &[]);
+        l.close("p0", "r0", "completed");
+        for k in 1..=n {
+            supersede(&mut l, &format!("p{k}"), &format!("p{}", k - 1), &[]);
+        }
+        (l, format!("p{n}"))
+    }
+
+    #[test]
+    fn a_chain_too_deep_stops_release_instead_of_dropping_conditions() {
+        // Up to MAX_SUPERSESSION steps: c0 and the count arrive at the end.
+        for n in [MAX_SUPERSESSION - 1, MAX_SUPERSESSION] {
+            let (l, last) = chain(n);
+            let st = l.state(&last, l.last());
+            assert_eq!(open_ids(&st), ["c0"], "n={n}");
+            assert_eq!(st.count, 1, "n={n}");
+            assert!(
+                st.reasons.iter().all(|r| !r.starts_with(MALFORMED)),
+                "n={n}: {:?}",
+                st.reasons
+            );
+        }
+        // One step more: the last phase is malformed (never released), not silently empty.
+        for n in [MAX_SUPERSESSION + 1, MAX_SUPERSESSION + 2] {
+            let (l, last) = chain(n);
+            let st = l.state(&last, l.last());
+            assert!(!st.released);
+            assert!(
+                st.reasons
+                    .iter()
+                    .any(|r| r.starts_with(MALFORMED) && r.contains("deeper than")),
+                "n={n}: {:?}",
+                st.reasons
+            );
+        }
+    }
+
+    #[test]
+    fn an_ancestor_s_own_reasons_are_not_carried_over() {
+        // The ancestor is not released and is superseded: those are its own reasons.
+        let (l, last) = chain(2);
+        let st = l.state(&last, l.last());
+        assert!(
+            st.reasons.iter().all(|r| !r.contains("ancestor")),
+            "{:?}",
+            st.reasons
         );
     }
 }

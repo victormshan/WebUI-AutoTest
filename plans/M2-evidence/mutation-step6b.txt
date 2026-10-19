@@ -58,3 +58,52 @@ Note: F23 first survived, because its test called confirm(), which runs recovery
 the recovery under test. The test was rewritten to leave both groups cut short with no operation
 in between. F24 hung the whole suite once, on that earlier test; with the rewritten test it is
 caught. Totals: 26 of 27 (version 1) plus F22 to F25, all caught; 1 equivalent survivor (F10).
+
+
+=== Commit version 2: mutants for the review points ===
+V2a archive past the remote => CAUGHT milestone::flow::tests::archive_never_goes_past_what_the_remote_holds
+V2b no second fetch before commit => CAUGHT milestone::flow::tests::a_remote_lost_while_preparing_refuses_the_request,milestone::flow::tests::a_supersession_published_while_preparing_is_seen_before_committing
+V2c write failure does not halt => CAUGHT milestone::flow::tests::a_result_that_cannot_be_written_halts_the_service
+V2d manifest not rechecked => CAUGHT milestone::flow::tests::a_changed_manifest_is_never_sent
+V2e second job accepted => CAUGHT milestone::flow::tests::a_second_result_for_the_same_job_is_refused
+V2f ancestor malformed not carried => CAUGHT milestone::derive::tests::a_chain_too_deep_stops_release_instead_of_dropping_conditions
+V2g confirm allows a deep chain => CAUGHT milestone::flow::tests::confirm_refuses_a_chain_too_deep
+V2h window end is the last commit only => CAUGHT milestone::sources::tests::the_window_spans_registration_and_every_commit
+V2i window starts at registration => CAUGHT milestone::sources::tests::the_window_spans_registration_and_every_commit
+
+=== Commit version 2: all earlier mutants re-run on this tree ===
+F1 independence/sources not refused => CAUGHT milestone::flow::tests::a_request_without_independence_or_sources_is_refused_and_writes_nothing,milestone::flow::tests::range_and_signature_rules_are_checked_before_anything_is_recorded
+F2 stale tail not detected => CAUGHT milestone::flow::tests::a_log_that_changed_while_preparing_is_prepared_again
+F3 empty range allowed => CAUGHT milestone::flow::tests::range_and_signature_rules_are_checked_before_anything_is_recorded
+F4 base ancestry unchecked => CAUGHT milestone::flow::tests::range_and_signature_rules_are_checked_before_anything_is_recorded
+F5 head may move back => CAUGHT milestone::flow::tests::head_only_moves_forward
+F6 runner line unchecked => CAUGHT milestone::flow::tests::the_request_line_must_fit_what_the_runner_reads
+F7 job_id binding unchecked => CAUGHT milestone::flow::tests::bad_results_are_recorded_as_failed_without_effect
+F8 input binding unchecked => CAUGHT milestone::flow::tests::bad_results_are_recorded_as_failed_without_effect
+F9 invalid answer accepted => CAUGHT milestone::flow::tests::bad_results_are_recorded_as_failed_without_effect
+F10 extra records not a mismatch => SURVIVED
+F11 differing records not a mismatch => CAUGHT milestone::flow::tests::a_resolution_without_its_audit_stops_recovery,milestone::flow::tests::records_that_are_not_what_the_job_calls_for_stop_recovery
+F12 confirm recovery skips phase_superseded => CAUGHT milestone::flow::tests::a_crash_inside_the_confirm_group_is_completed
+F13 confirm recovery skips the cancel => CAUGHT milestone::flow::tests::a_crash_inside_the_confirm_group_is_completed
+F14 restart leaves jobless pending open => CAUGHT milestone::flow::tests::a_result_that_cannot_be_written_halts_the_service,milestone::flow::tests::only_one_service_and_a_restart_closes_jobless_pending_requests
+F15 second service allowed => CAUGHT milestone::flow::tests::only_one_service_and_a_restart_closes_jobless_pending_requests
+F16 admin on superseded allowed => CAUGHT milestone::flow::tests::superseding_cancels_the_old_request_and_freezes_what_is_inherited
+F17 changed snapshot sent => CAUGHT milestone::flow::tests::a_changed_snapshot_is_never_sent
+F18 confirm leaves old pending open => CAUGHT milestone::flow::tests::a_crash_inside_the_confirm_group_is_completed,milestone::flow::tests::superseding_cancels_the_old_request_and_freezes_what_is_inherited
+F19 resume when not paused => CAUGHT milestone::flow::tests::admin_steps_check_their_preconditions
+F20 vendor version not checked => CAUGHT milestone::flow::tests::admin_steps_check_their_preconditions
+F21 late result applied => CAUGHT milestone::flow::tests::a_result_after_cancel_is_kept_as_late_without_effect,milestone::flow::tests::superseding_cancels_the_old_request_and_freezes_what_is_inherited
+D1 inherit from the whole chain => CAUGHT milestone::derive::tests::inheritance_cutoff_holds_for_the_first_record_and_several_levels,milestone::derive::tests::superseding_must_name_an_earlier_phase_once,milestone::derive::tests::inheritance_is_fixed_at_registration
+D2 prefix includes the registration => CAUGHT milestone::derive::tests::superseding_must_name_an_earlier_phase_once
+D3 double registration allowed => CAUGHT milestone::derive::tests::superseding_must_name_an_earlier_phase_once
+D4 supersedes an unregistered phase ANCHOR 0
+D5 two supersessions allowed => CAUGHT milestone::derive::tests::superseding_must_name_an_earlier_phase_once
+D6 registration does not supersede => CAUGHT milestone::derive::tests::superseding_must_name_an_earlier_phase_once
+F22 relative state directory allowed => CAUGHT milestone::flow::tests::the_state_directory_must_be_absolute
+F23 recovery runs one pass only => CAUGHT milestone::flow::tests::one_recovery_completes_a_confirm_group_and_a_job_group_together
+F24 resolutions without an audit ignored => CAUGHT milestone::flow::tests::a_resolution_without_its_audit_stops_recovery
+F25 confirm does not recheck the task book => CAUGHT milestone::flow::tests::confirm_checks_the_task_book_again
+D4 supersedes an unregistered phase => CAUGHT milestone::derive::tests::superseding_must_name_an_earlier_phase_once
+Note: D4's anchor moved when the version-2 change split "!known || depth >= 16" into two checks.
+D4 was rewritten for the new code ("if !known") and is caught. F10 survives as the equivalent
+mutant explained above. Totals: V2a–V2i 9 of 9; earlier set 30 of 31 (F10 equivalent).

@@ -163,3 +163,58 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 $ cargo clippy -p review-gate --all-targets: 0 warnings/errors
 $ cargo fmt -p review-gate --check: clean
+
+
+=== Commit version 2 (Codex implementation review of b5693bb, n=15: REWORK) ===
+Changes, one per review point:
+- P1 archive: Ledger::archive_remote classifies the fetched remote, imports and archives under one
+  lock, at exactly the remote's length on that classification. status derives from the snapshot
+  returned with its classification (Ledger::import_and_load).
+  Tests: archive_never_goes_past_what_the_remote_holds,
+  archive_imports_a_longer_remote_and_stops_at_its_length.
+- P2 depth: derive carries an ancestor's malformed reasons (including a chain deeper than
+  MAX_SUPERSESSION = 16 steps), and confirm refuses to build a deeper chain.
+  Tests: a_chain_too_deep_stops_release_instead_of_dropping_conditions (15, 16, 17 and 18 steps),
+  an_ancestor_s_own_reasons_are_not_carried_over, confirm_refuses_a_chain_too_deep.
+- P2 second sync: try_request fetches, imports and recovers again before its commit; a moved tail
+  prepares the request again, and a stopped remote refuses it.
+  Tests: a_supersession_published_while_preparing_is_seen_before_committing,
+  a_remote_lost_while_preparing_refuses_the_request.
+- P2 write failure: a result that cannot be written sets a halted latch; no dispatch and no
+  release after it; the next start recovers from what is on file.
+  Test: a_result_that_cannot_be_written_halts_the_service.
+- Plan deviation: run_job checks manifest_sha256 as well as input_sha256.
+  Test: a_changed_manifest_is_never_sent.
+- complete() refuses a job already on file, also when two arrive at once.
+  Test: a_second_result_for_the_same_job_is_refused.
+- Source window (Codex's technical recommendation (i), corrected): from the earliest to the
+  latest of the registration time and every commit time in base..head; no commit times means
+  sources unknown. Test: the_window_spans_registration_and_every_commit (commits before
+  registration, out-of-order times, empty).
+- The flow fixtures now commit before registering (dated 2026-01-01), the normal case.
+- Two races in the tests were found and fixed: the job thread still held the service when the next
+  one started, and a parallel fork briefly held the owner.lock descriptor. Before the fix the
+  milestone suite failed 2 of 6 and 2 of 8 runs; after it, 0 of 10.
+Five full runs on the version-2 tree:
+run 1:
+test result: ok. 179 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.19s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test result: ok. 179 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 15.84s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test result: ok. 179 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 15.67s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 4:
+test result: ok. 179 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 15.70s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 5:
+test result: ok. 179 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 15.66s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo clippy -p review-gate --all-targets: 0 warnings/errors
+$ cargo fmt -p review-gate --check: clean

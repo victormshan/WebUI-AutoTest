@@ -282,8 +282,19 @@ impl Ledger {
     /// (no new seal), each checked to read back with its own hash, and fsynced. Returns the
     /// classification it acted on.
     pub fn import(&self, remote: &Remote) -> Result<Sync> {
+        Ok(self.import_and_load(remote)?.0)
+    }
+
+    /// [`Ledger::import`], and the snapshot as it is after it, both under one lock: state
+    /// derived from this snapshot goes with exactly this classification.
+    pub fn import_and_load(&self, remote: &Remote) -> Result<(Sync, Snapshot)> {
         let _lock = self.lock()?;
-        let snap = self.load_locked()?;
+        let mut snap = self.load_locked()?;
+        let sync = self.import_locked(&mut snap, remote)?;
+        Ok((sync, snap))
+    }
+
+    fn import_locked(&self, snap: &mut Snapshot, remote: &Remote) -> Result<Sync> {
         if let Some(why) = &snap.stop {
             return Ok(Sync::Stop(format!("local log stopped: {why}")));
         }
@@ -313,8 +324,36 @@ impl Ledger {
             if new {
                 File::open(&self.dir)?.sync_all()?;
             }
+            snap.records = all;
         }
         Ok(sync)
+    }
+
+    /// Archives exactly as far as this remote read proves (Codex review of b5693bb, P1): under
+    /// one lock the remote is classified against the log as it is now (importing what it has
+    /// beyond it), and the position archived is the remote's own length on that classification,
+    /// never a length taken from the log after the lock was released. `None`: nothing new.
+    pub fn archive_remote(
+        &self,
+        kp: &Keypair,
+        at: &str,
+        remote: &Remote,
+    ) -> Result<(Sync, Option<Record>)> {
+        let _lock = self.lock()?;
+        let mut snap = self.load_locked()?;
+        let sync = self.import_locked(&mut snap, remote)?;
+        let held = match &sync {
+            // After an import the local log is exactly the remote's.
+            Sync::Equal | Sync::RemoteAhead { .. } => snap.records.len(),
+            Sync::RemoteBehind { unarchived } => snap.records.len() - unarchived,
+            Sync::Stop(_) => return Ok((sync, None)),
+        } as u64;
+        if held == 0 || held <= snap.checkpoint {
+            return Ok((sync, None));
+        }
+        let hash = snap.records[held as usize - 1].hash.clone();
+        let r = self.archive_locked(kp, at, &snap, held, &hash)?;
+        Ok((sync, Some(r)))
     }
 
     /// Records that the remote holds the chain up to `seq` (with `hash`): first the `archived`
@@ -322,6 +361,17 @@ impl Ledger {
     pub fn archive(&self, kp: &Keypair, at: &str, seq: u64, hash: &str) -> Result<Record> {
         let _lock = self.lock()?;
         let snap = self.load_locked()?;
+        self.archive_locked(kp, at, &snap, seq, hash)
+    }
+
+    fn archive_locked(
+        &self,
+        kp: &Keypair,
+        at: &str,
+        snap: &Snapshot,
+        seq: u64,
+        hash: &str,
+    ) -> Result<Record> {
         if let Some(why) = &snap.stop {
             bail!("the milestone log is stopped: {why}");
         }
@@ -339,7 +389,7 @@ impl Ledger {
         let r = self.append_locked(
             kp,
             at,
-            &snap,
+            snap,
             Draft {
                 kind: "archived".into(),
                 phase: String::new(),

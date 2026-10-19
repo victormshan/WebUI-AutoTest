@@ -181,8 +181,9 @@ pub struct Inputs<'a> {
     /// The verified chain (all records, every phase).
     pub records: &'a [Record],
     pub commits: &'a [CommitCheck],
-    /// Committer time of `head`: the end of the window.
-    pub head_time: DateTime<Utc>,
+    /// Committer times of every commit in base..head (merges included), in any order. With the
+    /// registration time they bound the window.
+    pub commit_times: &'a [DateTime<Utc>],
     /// One bridge read, or why it failed.
     pub bridge: std::result::Result<&'a Collected, String>,
     /// Bridge identities of the implementer (configuration, e.g. `["claude"]`).
@@ -441,19 +442,23 @@ pub fn judge(i: &Inputs) -> Outcome {
                     }
                 }
             }
-            // The window and the tasks in it that belong to no phase.
-            let start = ph.registered.get(i.phase).and_then(|a| parse_at(a));
-            match start {
-                None => sources_reasons.push(format!(
+            // The window (Codex review of b5693bb): from the earliest to the latest of the
+            // registration time and every commit time in the range. Work committed before the
+            // phase was registered is the normal case, and commit times need not follow the
+            // order of the commits, so neither end is taken from one commit alone.
+            let reg = ph.registered.get(i.phase).and_then(|a| parse_at(a));
+            let first = i.commit_times.iter().min();
+            let last = i.commit_times.iter().max();
+            match (reg, first, last) {
+                (None, _, _) => sources_reasons.push(format!(
                     "phase {} has no readable registration time",
                     i.phase
                 )),
-                Some(s) if s > i.head_time => sources_reasons.push(format!(
-                    "window inverted: head committed at {} before the phase was registered at {s}",
-                    i.head_time
-                )),
-                Some(s) => {
-                    let e = i.head_time;
+                (_, None, _) | (_, _, None) => sources_reasons
+                    .push("no commit times for the range: the window cannot be bounded".into()),
+                (Some(r), Some(first), Some(last)) => {
+                    let s = r.min(*first);
+                    let e = r.max(*last);
                     let inside = |t: DateTime<Utc>| s <= t && t <= e;
                     let ignored_here: BTreeSet<&String> = lineage
                         .iter()
@@ -693,7 +698,7 @@ mod tests {
         records: Vec<Record>,
         tasks: Vec<(ObservedTask, Vec<ObservedMessage>)>,
         commits: Vec<CommitCheck>,
-        head: DateTime<Utc>,
+        commit_times: Vec<DateTime<Utc>>,
         auditor: &'static str,
         bridge_err: Option<String>,
         vendors: Vendors,
@@ -708,7 +713,7 @@ mod tests {
                     "victormshan",
                     &["Claude Opus 5.5 <noreply@anthropic.com>"],
                 )],
-                head: at(10),
+                commit_times: vec![at(10)],
                 auditor: "auditor",
                 bridge_err: None,
                 vendors: Vendors::first(),
@@ -721,7 +726,7 @@ mod tests {
                 phase: "p",
                 records: &self.records,
                 commits: &self.commits,
-                head_time: self.head,
+                commit_times: &self.commit_times,
                 bridge: match &self.bridge_err {
                     Some(e) => Err(e.clone()),
                     None => Ok(&c),
@@ -954,7 +959,8 @@ mod tests {
     }
 
     #[test]
-    fn the_window_is_closed_and_never_inverted() {
+    fn the_window_spans_registration_and_every_commit() {
+        // Registered at hour 0, commits at 10: the window is [0, 10], ends included.
         let mut c = Case::new();
         c.tasks = vec![
             task("on-start", None, "claude", "dsh", 0, &[]),
@@ -967,14 +973,43 @@ mod tests {
             o.unmatched,
             vec!["msg-on-end".to_string(), "on-start".to_string()]
         );
+        // Work committed before the phase was registered (the normal case): the window starts
+        // at the first commit and ends at the registration.
         let mut c = Case::new();
-        c.head = at(-1);
+        c.commit_times = vec![at(-6), at(-4)];
+        c.tasks = vec![
+            task("during-work", None, "claude", "dsh", -5, &[]),
+            task("before-work", None, "claude", "dsh", -7, &[]),
+            task("after-reg", None, "claude", "dsh", 1, &[]),
+        ];
         let o = c.run();
-        assert!(
+        assert_eq!(
+            o.unmatched,
+            vec!["during-work".to_string()],
+            "{:?}",
             o.sources_reasons
-                .iter()
-                .any(|r| r.contains("window inverted"))
         );
+        // Commit times out of order (a later commit with an earlier time, a merge): the bounds
+        // are the minimum and the maximum, not the head's time.
+        let mut c = Case::new();
+        // The latest time is not the last commit's: [9, 15, 2].
+        c.commit_times = vec![at(9), at(15), at(2)];
+        c.tasks = vec![task("late", None, "claude", "dsh", 14, &[])];
+        assert_eq!(
+            c.run().unmatched,
+            vec!["late".to_string()],
+            "the latest commit, not head, bounds it"
+        );
+        // No commit times: the window cannot be bounded, sources unknown.
+        let mut c = Case::new();
+        c.commit_times = vec![];
+        assert!(
+            c.run()
+                .sources_reasons
+                .iter()
+                .any(|r| r.contains("no commit times"))
+        );
+        // An unreadable registration time.
         let mut c = Case::new();
         c.records[2].at = "yesterday".into();
         assert!(

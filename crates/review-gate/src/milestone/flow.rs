@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::answer::{self, Parsed};
-use super::derive::{PhaseState, RequestState, THRESHOLD, derive};
+use super::derive::{MALFORMED, MAX_SUPERSESSION, PhaseState, RequestState, THRESHOLD, derive};
 use super::input::{self, Isolated, Material, Trusted};
 use super::ledger::{Ledger, Snapshot, Tx, TxError};
 use super::record::{Draft, Record, render_log, sha256_hex};
@@ -137,6 +137,8 @@ pub struct Flow {
     phases: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     /// Request ids whose job is running in this process (service only).
     running: Mutex<BTreeSet<String>>,
+    /// Set by a result that could not be written: no more dispatching or release.
+    halted: Mutex<Option<String>>,
     service: bool,
     _owner: Option<File>,
 }
@@ -461,11 +463,11 @@ fn ready(records: &[Record], phase: &str) -> std::result::Result<Ready, Vec<Stri
     {
         why.push("a request of this phase is still pending".into());
     }
-    if st.reasons.iter().any(|r| r.starts_with("malformed record")) {
+    if st.reasons.iter().any(|r| r.starts_with(MALFORMED)) {
         why.extend(
             st.reasons
                 .iter()
-                .filter(|r| r.starts_with("malformed"))
+                .filter(|r| r.starts_with(MALFORMED))
                 .cloned(),
         );
     }
@@ -567,6 +569,7 @@ impl Flow {
             bridge,
             phases: Mutex::new(BTreeMap::new()),
             running: Mutex::new(BTreeSet::new()),
+            halted: Mutex::new(None),
             service,
             _owner: owner,
         })
@@ -624,10 +627,31 @@ impl Flow {
             .clone()
     }
 
+    /// One read of the remote into the private cache.
+    fn fetch(&self) -> sync::Remote {
+        sync::fetch_remote(&self.cfg.dir.join("remote.git"), &self.cfg.remote_url)
+    }
+
     /// Step 1: fetch the remote and import what it has beyond the local log.
     pub fn sync(&self) -> Result<Sync> {
-        let remote = sync::fetch_remote(&self.cfg.dir.join("remote.git"), &self.cfg.remote_url);
-        self.ledger.import(&remote)
+        self.ledger.import(&self.fetch())
+    }
+
+    /// Why this service stopped dispatching, if it did: a result that could not be written is
+    /// fatal (6b plan n6 §3). Nothing is dispatched or released from then on; the service (6c)
+    /// exits, and the next start recovers from what is on file.
+    pub fn halted(&self) -> Option<String> {
+        self.halted
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    fn halt(&self, why: String) {
+        let mut h = self.halted.lock().unwrap_or_else(|p| p.into_inner());
+        if h.is_none() {
+            *h = Some(why);
+        }
     }
 
     /// Step 2: complete every group a crash cut short. A mismatch stops the log for the user.
@@ -774,6 +798,25 @@ impl Flow {
                 if let Some(by) = st.superseded_by {
                     return Err(format!("phase {old} is already superseded by {by}"));
                 }
+                // How many supersession steps the new phase would inherit through.
+                let mut steps = 1;
+                let mut cur = old.clone();
+                while let Some(prev) = r
+                    .iter()
+                    .find(|x| x.phase == cur && x.kind == "phase_registered")
+                    .and_then(|x| x.body.get("supersedes").and_then(Value::as_str))
+                {
+                    steps += 1;
+                    cur = prev.to_string();
+                    if steps > MAX_SUPERSESSION {
+                        break;
+                    }
+                }
+                if steps > MAX_SUPERSESSION {
+                    return Err(format!(
+                        "superseding {old} would make a chain of more than {MAX_SUPERSESSION} steps"
+                    ));
+                }
                 body["supersedes"] = json!(old);
                 drafts.push(draft("phase_registered", phase, body));
                 drafts.push(draft("phase_superseded", old, json!({ "by": phase })));
@@ -827,6 +870,9 @@ impl Flow {
         phase: &str,
         head: &str,
     ) -> std::result::Result<Option<(String, String)>, FlowError> {
+        if let Some(why) = self.halted() {
+            return Err(refused(format!("service halted: {why}")));
+        }
         let sync = self.sync()?;
         if let Sync::Stop(why) = &sync {
             return Err(refused(format!("release stopped: {why}")));
@@ -917,11 +963,17 @@ impl Flow {
                 attestation,
             });
         }
-        let head_time: i64 = text(&["log", "-1", "--format=%ct", &head_id])?
-            .trim()
-            .parse()
-            .context("head commit time")?;
-        let head_time = chrono::DateTime::from_timestamp(head_time, 0).context("head time")?;
+        // Committer times of every commit in the range (merges included): they bound the
+        // source window together with the registration time (sources.rs).
+        let mut commit_times = Vec::new();
+        for c in &commits {
+            let t: i64 = text(&["log", "-1", "--format=%ct", &c.id])?
+                .trim()
+                .parse()
+                .with_context(|| format!("commit time of {}", c.id))?;
+            commit_times
+                .push(chrono::DateTime::from_timestamp(t, 0).context("commit time out of range")?);
+        }
         let tree = text(&["rev-parse", &format!("{head_id}^{{tree}}")])?
             .trim()
             .to_string();
@@ -933,7 +985,7 @@ impl Flow {
             phase,
             records: &snap.records,
             commits: &commits,
-            head_time,
+            commit_times: &commit_times,
             bridge: bridge.as_ref().map_err(String::clone),
             implementers: &self.cfg.implementers,
             auditor: &self.cfg.auditor,
@@ -955,7 +1007,7 @@ impl Flow {
                 .filter(|c| c.closed.is_none())
                 .map(|c| (c.id.clone(), c.blocking, c.text.clone()))
                 .collect();
-        let request_hint = format!("{phase}-q*");
+        let request_hint = "(the final id is in the signed request record)".to_string();
         let assembled = input::assemble(
             &mut g,
             &Material {
@@ -991,6 +1043,14 @@ impl Flow {
             "input_sha256": assembled.manifest.sha256,
             "size": assembled.manifest.size,
         });
+
+        // Read the remote again before committing (6b plan n6 §4, step 4): a revocation or a
+        // supersession published while preparing is imported (the tail then moves, and the
+        // request is prepared again), and a remote that stopped answering refuses the request.
+        if let Sync::Stop(why) = self.ledger.import(&self.fetch())? {
+            return Err(refused(format!("release stopped: {why}")));
+        }
+        self.recover()?;
 
         // Commit on the tail the request was prepared on.
         let job_timeout = self.cfg.job_timeout.as_secs();
@@ -1058,8 +1118,20 @@ impl Flow {
         std::thread::spawn(move || {
             let reply = me.run_job(&phase, &id, &line);
             let job = job_body(&id, reply);
-            if let Err(e) = me.complete(&phase, &id, job) {
-                eprintln!("review-gate: recording the result of {id} failed: {e}");
+            match me.complete(&phase, &id, job) {
+                Ok(()) => {}
+                // A refusal is a decision on the state (for instance a job already on file),
+                // not a failure to write.
+                Err(FlowError::Refused(why)) => {
+                    eprintln!(
+                        "review-gate: result of {id} not recorded: {}",
+                        why.join("; ")
+                    )
+                }
+                Err(FlowError::Other(e)) => {
+                    eprintln!("review-gate: recording the result of {id} failed: {e:#}");
+                    me.halt(format!("recording the result of {id} failed: {e:#}"));
+                }
             }
             me.running
                 .lock()
@@ -1082,8 +1154,19 @@ impl Flow {
             .pointer("/snapshot/dir")
             .and_then(Value::as_str)
             .ok_or("request names no snapshot")?;
-        let bytes = fs::read(self.cfg.dir.join("inputs").join(dir).join("input.txt"))
+        let sealed = self.cfg.dir.join("inputs").join(dir);
+        let bytes =
+            fs::read(sealed.join("input.txt")).map_err(|e| format!("snapshot unreadable: {e}"))?;
+        let manifest = fs::read(sealed.join("manifest.json"))
             .map_err(|e| format!("snapshot unreadable: {e}"))?;
+        let want_manifest = req
+            .body
+            .pointer("/snapshot/manifest_sha256")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if sha256_hex(&manifest) != want_manifest {
+            return Err("snapshot changed".into());
+        }
         let want = req
             .body
             .pointer("/snapshot/input_sha256")
@@ -1112,13 +1195,15 @@ impl Flow {
         self.ledger.transact(&self.kp, &now(), |snap| {
             let r = &snap.records;
             let request = find(r, phase, "request", id).ok_or("request not on file")?;
+            if find(r, phase, "job", id).is_some() {
+                return Err(format!("a job is already recorded for {id}"));
+            }
             let st = derive(r, phase, 0);
             let live = st.superseded_by.is_none()
                 && st
                     .current
                     .as_ref()
-                    .is_some_and(|c| c.request_id == id && c.state == RequestState::Pending)
-                && find(r, phase, "job", id).is_none();
+                    .is_some_and(|c| c.request_id == id && c.state == RequestState::Pending);
             let before = &r[..(request.seq - 1) as usize];
             let audit_seq = r.len() as u64 + 2;
             let mut drafts = vec![draft("job", phase, job.clone())];
@@ -1158,9 +1243,9 @@ impl Flow {
 
     /// The state of a phase on one synced, recovered snapshot (§6 status).
     pub fn status(&self, phase: &str) -> std::result::Result<Status, FlowError> {
-        let sync = self.sync()?;
         let recovered = self.recover();
-        let snap: Snapshot = self.ledger.load()?;
+        // The classification and the snapshot the state is derived from come from one lock.
+        let (sync, snap): (Sync, Snapshot) = self.ledger.import_and_load(&self.fetch())?;
         let st = derive(&snap.records, phase, snap.checkpoint);
         let mut reasons = st.reasons.clone();
         if let Sync::Stop(why) = &sync {
@@ -1171,6 +1256,9 @@ impl Flow {
         }
         if let Err(e) = recovered {
             reasons.push(format!("recovery: {e}"));
+        }
+        if let Some(why) = self.halted() {
+            reasons.push(format!("service halted: {why}"));
         }
         let (seq, hash) = snap
             .records
@@ -1207,19 +1295,13 @@ impl Flow {
 
     /// Archives as far as the remote is proven to hold the local log (§3.5).
     pub fn archive(&self) -> std::result::Result<Option<u64>, FlowError> {
-        let sync = self.sync()?;
-        let snap = self.ledger.load()?;
-        let n = match &sync {
-            Sync::Equal | Sync::RemoteAhead { .. } => snap.records.len(),
-            Sync::RemoteBehind { unarchived } => snap.records.len() - unarchived,
-            Sync::Stop(why) => return Err(refused(format!("release stopped: {why}"))),
-        } as u64;
-        if n == 0 || n <= snap.checkpoint {
-            return Ok(None);
+        let (sync, archived) = self
+            .ledger
+            .archive_remote(&self.kp, &now(), &self.fetch())?;
+        if let Sync::Stop(why) = &sync {
+            return Err(refused(format!("release stopped: {why}")));
         }
-        let hash = snap.records[n as usize - 1].hash.clone();
-        self.ledger.archive(&self.kp, &now(), n, &hash)?;
-        Ok(Some(n))
+        Ok(archived.and_then(|r| r.body.get("seq").and_then(Value::as_u64)))
     }
 
     /// A user record on a phase that is not superseded, after a check on the current state.
@@ -1417,12 +1499,10 @@ mod tests {
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            // After any registration time the tests make: the agreed window runs from the
-            // phase's registration to head's commit time (sources.rs), so work committed before
-            // registering reads as an inverted window. That rule is raised with Codex; the tests
-            // keep to it as agreed.
-            .env("GIT_AUTHOR_DATE", "2030-01-01T00:00:00Z")
-            .env("GIT_COMMITTER_DATE", "2030-01-01T00:00:00Z")
+            // A fixed time, so two fixtures built apart have the same commit ids; and in the
+            // past, so the work is committed before the phase is registered (the normal case).
+            .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
             .output()
             .unwrap();
         assert!(
@@ -2343,5 +2423,258 @@ mod tests {
         let e = f.confirm("p").unwrap_err().to_string();
         assert!(e.contains("not what the application recorded"), "{e}");
         assert!(kinds(&f).is_empty());
+    }
+
+    #[test]
+    fn archive_never_goes_past_what_the_remote_holds() {
+        // Remote and local equal at N: archived N.
+        let fx = Fx::new();
+        let f = fx.admin();
+        fx.register(&f);
+        fx.publish(&f);
+        let n = f.ledger().load().unwrap().records.len() as u64;
+        assert_eq!(f.archive().unwrap(), Some(n));
+        // The local log grows (a result, not published): the remote is behind, and archiving
+        // stays at what the remote holds.
+        let id = f.request("p", &fx.head).unwrap();
+        f.complete("p", &id, completed_job(&f, &id, &approve()))
+            .unwrap();
+        let m = f.ledger().load().unwrap().records.len() as u64;
+        assert!(m > n + 1);
+        assert_eq!(f.archive().unwrap(), None, "nothing new on the remote");
+        assert_eq!(f.ledger().load().unwrap().checkpoint, n);
+        // Not released while the result is unarchived.
+        assert!(!f.status("p").unwrap().released);
+        // Published, then archived to the remote's length exactly.
+        fx.publish(&f);
+        let published = f.ledger().load().unwrap().records.len() as u64;
+        assert_eq!(f.archive().unwrap(), Some(published));
+        assert!(f.status("p").unwrap().released);
+    }
+
+    #[test]
+    fn archive_imports_a_longer_remote_and_stops_at_its_length() {
+        let fx = Fx::new();
+        let f = fx.admin();
+        fx.register(&f);
+        f.drop_source("p", "x", "a second record").unwrap();
+        fx.publish(&f);
+        let full = fs::read_to_string(fx.root.join("state/log.jsonl")).unwrap();
+        // The local log is set back to its first record (as if restored from an old copy).
+        let first = full.lines().next().unwrap().to_string() + "\n";
+        fs::write(fx.root.join("state/log.jsonl"), first).unwrap();
+        let g = fx.admin();
+        assert_eq!(
+            g.archive().unwrap(),
+            Some(2),
+            "imported, then archived to the remote's 2"
+        );
+        assert_eq!(
+            fs::read_to_string(fx.root.join("state/log.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            3
+        );
+    }
+
+    /// A copy of the local log with one more signed record, published to the remote, so the
+    /// remote is ahead of the local log without the local log changing.
+    fn publish_remote_only(fx: &Fx, f: &Flow, kind: &str, phase: &str, body: Value) {
+        let other = tempfile::tempdir().unwrap();
+        fs::copy(
+            fx.root.join("state/log.jsonl"),
+            other.path().join("log.jsonl"),
+        )
+        .unwrap();
+        let l = Ledger::new(other.path(), "repo", kp().verifying_key()).unwrap();
+        l.append(&kp(), "t", draft(kind, phase, body)).unwrap();
+        let log = fs::read_to_string(other.path().join("log.jsonl")).unwrap();
+        let _ = f;
+        sync::publish(
+            &fx.repo,
+            &fx.cfg().remote_url,
+            &log,
+            &kp().verifying_key(),
+            "repo",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_supersession_published_while_preparing_is_seen_before_committing() {
+        let fx = Fx::new();
+        let f = fx.admin();
+        fx.register(&f);
+        fx.publish(&f);
+        let once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (o2, b2) = (once.clone(), fx.bridge.clone());
+        let fxr: &'static Fx = Box::leak(Box::new(Fx {
+            _dir: tempfile::tempdir().unwrap(),
+            root: fx.root.clone(),
+            repo: fx.repo.clone(),
+            remote: fx.remote.clone(),
+            base: fx.base.clone(),
+            head: fx.head.clone(),
+            mode: fx.mode.clone(),
+            bridge: fx.bridge.clone(),
+        }));
+        let reader: BridgeRead = Arc::new(move || {
+            if !o2.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                // During preparation: p is superseded on the remote only.
+                let probe =
+                    Flow::open_admin(fxr.cfg(), kp(), Arc::new(|| Err("unused".into()))).unwrap();
+                publish_remote_only(
+                    fxr,
+                    &probe,
+                    "phase_registered",
+                    "p2",
+                    json!({"supersedes": "p", "conditions": [], "base": fxr.base, "task_book": "plans/book.md", "task_book_sha256": "x", "evidence_dir": "ev"}),
+                );
+            }
+            b2.lock().unwrap().clone()
+        });
+        let g = Flow::open_admin(fx.cfg(), kp(), reader).unwrap();
+        let e = g.request("p", &fx.head).unwrap_err().to_string();
+        assert!(e.contains("superseded by p2"), "{e}");
+        assert!(
+            !kinds(&g).contains(&"request".to_string()),
+            "nothing recorded"
+        );
+    }
+
+    #[test]
+    fn a_remote_lost_while_preparing_refuses_the_request() {
+        let fx = Fx::new();
+        let f = fx.admin();
+        fx.register(&f);
+        fx.publish(&f);
+        let (remote, b2) = (fx.remote.clone(), fx.bridge.clone());
+        let reader: BridgeRead = Arc::new(move || {
+            let _ = fs::rename(&remote, remote.with_extension("gone"));
+            b2.lock().unwrap().clone()
+        });
+        let g = Flow::open_admin(fx.cfg(), kp(), reader).unwrap();
+        let e = g.request("p", &fx.head).unwrap_err().to_string();
+        assert!(e.contains("release stopped"), "{e}");
+        assert!(!kinds(&g).contains(&"request".to_string()));
+    }
+
+    #[test]
+    fn a_result_that_cannot_be_written_halts_the_service() {
+        let fx = Fx::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        *fx.mode.lock().unwrap() = Mode::Hold(Arc::new(Mutex::new(Some(rx))), approve());
+        let s = fx.service();
+        fx.register(&s);
+        s.request("p", &fx.head).unwrap();
+        // The request is recorded; writing its result is what fails.
+        s.ledger().crash_after(0);
+        tx.send(()).unwrap();
+        for _ in 0..200 {
+            if s.halted().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        s.ledger().crash_after(usize::MAX);
+        assert!(s.halted().unwrap().contains("injected crash"));
+        let e = s.request("p", &fx.head).unwrap_err().to_string();
+        assert!(e.contains("service halted"), "{e}");
+        let st = s.status("p").unwrap();
+        assert!(!st.released && st.reasons.iter().any(|r| r.contains("service halted")));
+        // The next service recovers from what is on file: nothing of the result was written,
+        // so the request is closed as failed.
+        // The job thread holds the service until it ends; the owner lock goes with the last one.
+        for _ in 0..200 {
+            if Arc::strong_count(&s) == 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(Arc::strong_count(&s), 1, "the job thread ended");
+        drop(s);
+        // flock follows the open file: a process forked at this moment by a parallel test
+        // (git) briefly holds a copy of the descriptor until it execs, so the lock can take a
+        // moment to be free here. In production the old service has exited first.
+        let mut t = None;
+        for _ in 0..50 {
+            match Flow::open_service(fx.cfg(), kp(), fx.reader()) {
+                Ok(f) => {
+                    t = Some(f);
+                    break;
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        let t = t.expect("the next service starts once the old one is gone");
+        let st = derive(&t.ledger().load().unwrap().records, "p", 0);
+        assert_eq!(st.current.unwrap().state, RequestState::Failed);
+        assert!(t.halted().is_none());
+    }
+
+    #[test]
+    fn a_changed_manifest_is_never_sent() {
+        let fx = Fx::new();
+        let (f, id) = requested(&fx);
+        let snap = f.ledger().load().unwrap();
+        let req = find(&snap.records, "p", "request", &id).unwrap();
+        let dir = req.body.pointer("/snapshot/dir").unwrap().as_str().unwrap();
+        let path = fx.root.join("state/inputs").join(dir).join("manifest.json");
+        let mut b = fs::read(&path).unwrap();
+        b.push(b' ');
+        fs::write(&path, b).unwrap();
+        assert_eq!(f.run_job("p", &id, "{}").unwrap_err(), "snapshot changed");
+    }
+
+    #[test]
+    fn a_second_result_for_the_same_job_is_refused() {
+        let fx = Fx::new();
+        let (f, id) = requested(&fx);
+        let job = completed_job(&f, &id, &approve());
+        // Twice at once from two threads: one is recorded, the other refused.
+        let (a, b) = (f.clone(), f.clone());
+        let (ja, jb) = (job.clone(), job.clone());
+        let (ia, ib) = (id.clone(), id.clone());
+        let t1 = std::thread::spawn(move || a.complete("p", &ia, ja).is_ok());
+        let t2 = std::thread::spawn(move || b.complete("p", &ib, jb).is_ok());
+        let oks = [t1.join().unwrap(), t2.join().unwrap()];
+        assert_eq!(oks.iter().filter(|x| **x).count(), 1, "{oks:?}");
+        assert_eq!(kinds(&f).iter().filter(|k| *k == "job").count(), 1);
+        let e = f.complete("p", &id, job).unwrap_err().to_string();
+        assert!(e.contains("already recorded"), "{e}");
+    }
+
+    #[test]
+    fn confirm_refuses_a_chain_too_deep() {
+        let fx = Fx::new();
+        let f = fx.admin();
+        f.apply("q0", &fx.base, "plans/book.md", "ev", vec![], None)
+            .unwrap();
+        f.confirm("q0").unwrap();
+        for k in 1..=MAX_SUPERSESSION {
+            f.apply(
+                &format!("q{k}"),
+                &fx.base,
+                "plans/book.md",
+                "ev",
+                vec![],
+                Some(format!("q{}", k - 1)),
+            )
+            .unwrap();
+            f.confirm(&format!("q{k}")).unwrap();
+        }
+        let next = MAX_SUPERSESSION + 1;
+        f.apply(
+            &format!("q{next}"),
+            &fx.base,
+            "plans/book.md",
+            "ev",
+            vec![],
+            Some(format!("q{}", next - 1)),
+        )
+        .unwrap();
+        let e = f.confirm(&format!("q{next}")).unwrap_err().to_string();
+        assert!(e.contains("more than"), "{e}");
     }
 }
