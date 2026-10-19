@@ -117,3 +117,11 @@ V3b survives and cannot be tested deterministically. It removes the lock from ha
 job thread's own check before sending still stops any job from going out after a halt. What the
 lock adds is ordering: no request is committed once halt() has returned. Reaching the gap between
 the recheck and the commit would need a timing race, so the lock is kept as a guard.
+
+
+=== Commit version 4 ===
+V3b admission released between the halt check and the commit => KILLED ['test milestone::flow::tests::a_halt_during_the_request_commit_waits_and_the_job_is_not_sent ... FAILED']
+V4 job line sent outside the admission lock => KILLED ['test milestone::flow::tests::a_halt_while_the_line_is_written_waits_for_the_send ... FAILED']
+V5 no halt check before the send => KILLED ['test milestone::flow::tests::a_committed_job_not_yet_sent_when_halted_is_not_sent ... FAILED', 'test milestone::flow::tests::a_halt_just_before_the_send_keeps_the_job_from_going_out ... FAILED', 'test milestone::flow::tests::a_halt_during_the_request_commit_waits_and_the_job_is_not_sent ... FAILED']
+V3b (the version-3 survivor) is now caught by a deterministic test, as Codex said it could be.
+V4 is the n=19 point itself (send outside the lock); V5 drops the job thread's halt check.

@@ -37,6 +37,14 @@ const MAX_REPLY: usize = 8 * 1024 * 1024;
 
 /// Sends one request line and reads one authenticated reply line.
 pub fn call(socket: &Path, request: &str, expect: &Expected, timeout: Duration) -> Result<Reply> {
+    let s = send(socket, request, timeout)?;
+    receive(&s, expect)
+}
+
+/// The sending half of [`call`]: connects, asks for the sender's credentials on everything it
+/// will receive, and writes the request line. Once this returns, the job has been sent; read the
+/// reply with [`receive`].
+pub fn send(socket: &Path, request: &str, timeout: Duration) -> Result<UnixStream> {
     let mut s = UnixStream::connect(socket)
         .with_context(|| format!("connecting to {}", socket.display()))?;
     passcred(&s)?;
@@ -44,7 +52,7 @@ pub fn call(socket: &Path, request: &str, expect: &Expected, timeout: Duration) 
     s.set_write_timeout(Some(timeout))?;
     s.write_all(request.as_bytes())?;
     s.write_all(b"\n")?;
-    receive(&s, expect)
+    Ok(s)
 }
 
 fn passcred(s: &UnixStream) -> Result<()> {

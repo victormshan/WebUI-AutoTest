@@ -116,6 +116,28 @@ fn refused(why: impl Into<String>) -> FlowError {
     FlowError::Refused(vec![why.into()])
 }
 
+/// Coordination points for tests: called at fixed places so a test can make a halt happen at
+/// exactly that moment.
+#[cfg(test)]
+#[derive(Default)]
+struct TestHooks {
+    /// Job thread: after the snapshot checks, before taking the admission lock to send.
+    before_send: Option<Arc<dyn Fn() + Send + std::marker::Sync>>,
+    /// Job thread: holding the admission lock, just before writing the request line.
+    while_sending: Option<Arc<dyn Fn() + Send + std::marker::Sync>>,
+    /// Request: holding the admission lock, after the final `halted` check, before the commit.
+    before_commit: Option<Arc<dyn Fn() + Send + std::marker::Sync>>,
+}
+
+/// What became of sending one job (under the admission lock).
+enum Sending {
+    /// The service had halted: not sent, nothing recorded.
+    Halted(String),
+    /// Not sent, for a reason to record as the job's error.
+    Failed(String),
+    Sent(std::os::unix::net::UnixStream),
+}
+
 /// Status of a phase: the derived state on one synced, recovered snapshot.
 #[derive(Debug, Clone, Serialize)]
 pub struct Status {
@@ -144,6 +166,8 @@ pub struct Flow {
     /// halted, whatever was being prepared meanwhile. Held only for that short commit and the
     /// thread spawn, never across git, the bridge or the runner.
     admit: Mutex<()>,
+    #[cfg(test)]
+    hooks: Mutex<TestHooks>,
     service: bool,
     _owner: Option<File>,
 }
@@ -576,6 +600,8 @@ impl Flow {
             running: Mutex::new(BTreeSet::new()),
             halted: Mutex::new(None),
             admit: Mutex::new(()),
+            #[cfg(test)]
+            hooks: Mutex::new(TestHooks::default()),
             service,
             _owner: owner,
         })
@@ -1070,6 +1096,8 @@ impl Flow {
         if let Some(why) = self.halted() {
             return Err(refused(format!("service halted: {why}")));
         }
+        #[cfg(test)]
+        self.hook(|h| h.before_commit.clone());
         let res = self.ledger.transact(&self.kp, &now(), |snap2| {
             if snap2.records.last().map(|r| r.hash.clone()) != tip {
                 return Err("stale".into());
@@ -1131,22 +1159,46 @@ impl Flow {
         let me = self.clone();
         let (phase, id) = (phase.to_string(), id.to_string());
         std::thread::spawn(move || {
-            // A job not yet sent when the service halted is not sent at all, and nothing is
-            // recorded for it: it stays Pending, and the next start closes it as failed (it
-            // has no job). One already sent is not taken back.
-            let halted = {
+            // When is a job sent (Codex review of e93dd92)? When its request line has been
+            // written to the runner, and that write happens under the admission lock, after a
+            // last look at `halted`. So halt() waits for a send in progress, and once it has
+            // returned no request line is written. A job not sent by then is not sent at all,
+            // and nothing is recorded for it: it stays Pending, and the next start closes it as
+            // failed (it has no job). One already sent is not taken back; its reply is read
+            // outside the lock.
+            let checked = me.check_snapshot(&phase, &id);
+            #[cfg(test)]
+            me.hook(|h| h.before_send.clone());
+            let sent = {
                 let _admit = me.admit.lock().unwrap_or_else(|p| p.into_inner());
-                me.halted()
+                if let Some(why) = me.halted() {
+                    Sending::Halted(why)
+                } else if let Err(e) = checked {
+                    Sending::Failed(e)
+                } else {
+                    #[cfg(test)]
+                    me.hook(|h| h.while_sending.clone());
+                    let timeout = me.cfg.job_timeout + Duration::from_secs(60);
+                    match runner::send(&me.cfg.runner_socket, &line, timeout) {
+                        Ok(stream) => Sending::Sent(stream),
+                        Err(e) => Sending::Failed(format!("{e:#}")),
+                    }
+                }
             };
-            if let Some(why) = halted {
-                eprintln!("review-gate: {id} not sent: service halted: {why}");
-                me.running
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&id);
-                return;
-            }
-            let reply = me.run_job(&phase, &id, &line);
+            let reply = match sent {
+                Sending::Halted(why) => {
+                    eprintln!("review-gate: {id} not sent: service halted: {why}");
+                    me.running
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(&id);
+                    return;
+                }
+                Sending::Failed(e) => Err(e),
+                Sending::Sent(stream) => {
+                    runner::receive(&stream, &me.cfg.runner).map_err(|e| format!("{e:#}"))
+                }
+            };
             let job = job_body(&id, reply);
             match me.complete(&phase, &id, job) {
                 Ok(()) => {}
@@ -1170,13 +1222,8 @@ impl Flow {
         });
     }
 
-    fn run_job(
-        &self,
-        phase: &str,
-        id: &str,
-        line: &str,
-    ) -> std::result::Result<runner::Reply, String> {
-        // The sealed input is what goes out: check it is still what the request recorded.
+    /// The sealed input is what goes out: both files are still what the request recorded.
+    fn check_snapshot(&self, phase: &str, id: &str) -> std::result::Result<(), String> {
         let snap = self.ledger.load().map_err(|e| e.to_string())?;
         let req = find(&snap.records, phase, "request", id).ok_or("request not on file")?;
         let dir = req
@@ -1185,27 +1232,44 @@ impl Flow {
             .and_then(Value::as_str)
             .ok_or("request names no snapshot")?;
         let sealed = self.cfg.dir.join("inputs").join(dir);
-        let bytes =
-            fs::read(sealed.join("input.txt")).map_err(|e| format!("snapshot unreadable: {e}"))?;
-        let manifest = fs::read(sealed.join("manifest.json"))
-            .map_err(|e| format!("snapshot unreadable: {e}"))?;
-        let want_manifest = req
-            .body
-            .pointer("/snapshot/manifest_sha256")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if sha256_hex(&manifest) != want_manifest {
-            return Err("snapshot changed".into());
+        for (file, key) in [
+            ("input.txt", "input_sha256"),
+            ("manifest.json", "manifest_sha256"),
+        ] {
+            let bytes =
+                fs::read(sealed.join(file)).map_err(|e| format!("snapshot unreadable: {e}"))?;
+            let want = req
+                .body
+                .pointer(&format!("/snapshot/{key}"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if want.is_empty() || sha256_hex(&bytes) != want {
+                return Err("snapshot changed".into());
+            }
         }
-        let want = req
-            .body
-            .pointer("/snapshot/input_sha256")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if sha256_hex(&bytes) != want {
-            return Err("snapshot changed".into());
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn hook(
+        &self,
+        pick: impl FnOnce(&TestHooks) -> Option<Arc<dyn Fn() + Send + std::marker::Sync>>,
+    ) {
+        let h = pick(&self.hooks.lock().unwrap_or_else(|p| p.into_inner()));
+        if let Some(h) = h {
+            h();
         }
-        // The job's own deadline plus a margin for the reply.
+    }
+
+    /// The snapshot check and the runner call in one, without the admission lock (tests).
+    #[cfg(test)]
+    fn run_job(
+        &self,
+        phase: &str,
+        id: &str,
+        line: &str,
+    ) -> std::result::Result<runner::Reply, String> {
+        self.check_snapshot(phase, id)?;
         let timeout = self.cfg.job_timeout + Duration::from_secs(60);
         runner::call(&self.cfg.runner_socket, line, &self.cfg.runner, timeout)
             .map_err(|e| format!("{e:#}"))
@@ -2833,5 +2897,121 @@ mod tests {
             RequestState::Pending,
             "left for the next start"
         );
+    }
+
+    type Hook = Option<Arc<dyn Fn() + Send + std::marker::Sync>>;
+
+    /// A hook that halts `flow` from another thread and checks, for 300 ms, that the halt
+    /// is held back (`blocked`) or not; the halting thread is kept to be joined.
+    fn halting_hook(
+        flow: Arc<std::sync::OnceLock<std::sync::Weak<Flow>>>,
+        blocked: bool,
+        halter: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    ) -> Hook {
+        Some(Arc::new(move || {
+            let Some(f) = flow.get().and_then(std::sync::Weak::upgrade) else {
+                return;
+            };
+            if halter.lock().unwrap().is_some() {
+                return;
+            }
+            let t = std::thread::spawn(move || f.halt("test: halted".into()));
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(!t.is_finished(), blocked, "halt held back: {blocked}");
+            *halter.lock().unwrap() = Some(t);
+        }))
+    }
+
+    fn join_halter(halter: &Mutex<Option<std::thread::JoinHandle<()>>>) {
+        let t = halter.lock().unwrap().take().expect("the hook ran");
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn a_halt_just_before_the_send_keeps_the_job_from_going_out() {
+        let fx = Fx::new();
+        let me: Arc<std::sync::OnceLock<std::sync::Weak<Flow>>> = Arc::default();
+        let halter = Arc::new(Mutex::new(None));
+        let s = Flow::open_service(fx.cfg(), kp(), fx.reader()).unwrap();
+        fx.register(&s);
+        me.set(Arc::downgrade(&s)).unwrap();
+        s.hooks.lock().unwrap().before_send = halting_hook(me, false, halter.clone());
+        s.request("p", &fx.head).unwrap();
+        for _ in 0..200 {
+            if halter.lock().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        join_halter(&halter);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(s.halted().is_some());
+        assert_eq!(
+            fx.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "not sent"
+        );
+        assert!(
+            !kinds(&s).contains(&"job".to_string()),
+            "nothing recorded for it"
+        );
+        let st = derive(&s.ledger().load().unwrap().records, "p", 0);
+        assert_eq!(st.current.unwrap().state, RequestState::Pending);
+    }
+
+    #[test]
+    fn a_halt_while_the_line_is_written_waits_for_the_send() {
+        let fx = Fx::new();
+        let me: Arc<std::sync::OnceLock<std::sync::Weak<Flow>>> = Arc::default();
+        let halter = Arc::new(Mutex::new(None));
+        let s = Flow::open_service(fx.cfg(), kp(), fx.reader()).unwrap();
+        fx.register(&s);
+        me.set(Arc::downgrade(&s)).unwrap();
+        s.hooks.lock().unwrap().while_sending = halting_hook(me, true, halter.clone());
+        s.request("p", &fx.head).unwrap();
+        for _ in 0..200 {
+            if halter.lock().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        join_halter(&halter);
+        assert!(s.halted().is_some());
+        for _ in 0..200 {
+            if fx.calls.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            fx.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the line was written before the halt took effect"
+        );
+    }
+
+    #[test]
+    fn a_halt_during_the_request_commit_waits_and_the_job_is_not_sent() {
+        let fx = Fx::new();
+        let me: Arc<std::sync::OnceLock<std::sync::Weak<Flow>>> = Arc::default();
+        let halter = Arc::new(Mutex::new(None));
+        let s = Flow::open_service(fx.cfg(), kp(), fx.reader()).unwrap();
+        fx.register(&s);
+        me.set(Arc::downgrade(&s)).unwrap();
+        s.hooks.lock().unwrap().before_commit = halting_hook(me, true, halter.clone());
+        s.request("p", &fx.head).unwrap();
+        join_halter(&halter);
+        assert!(s.halted().is_some());
+        assert!(
+            kinds(&s).contains(&"request".to_string()),
+            "the request was committed"
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            fx.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "not sent"
+        );
+        assert!(!kinds(&s).contains(&"job".to_string()));
     }
 }

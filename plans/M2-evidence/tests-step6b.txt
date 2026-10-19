@@ -256,3 +256,44 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 $ cargo clippy -p review-gate --all-targets: 0 warnings/errors
 $ cargo fmt -p review-gate --check: clean
+
+
+=== Commit version 4 (gate task m2-step6b-send-boundary, base e93dd92) ===
+Answers Codex n=19 on e93dd92: the job thread's halt check and the actual start of the runner
+call shared no synchronization boundary. Now runner::call is split into send (connect, write the
+request line) and receive (read the reply). The job thread checks the snapshot outside the lock,
+then under the admission lock rechecks `halted` and writes the line; it waits for the reply
+outside the lock. A job counts as sent only once its line is written under the admission lock.
+halt() takes the same lock, so either the line was fully written before halt() returns, or it is
+never written.
+Test-only hooks (cfg(test)) force each ordering deterministically:
+- a_halt_just_before_the_send_keeps_the_job_from_going_out (before_send): no runner call, no job,
+  request stays Pending.
+- a_halt_while_the_line_is_written_waits_for_the_send (while_sending): halt() is still blocked
+  after 300 ms and returns only after the line is written; the runner got exactly one call.
+- a_halt_during_the_request_commit_waits_and_the_job_is_not_sent (before_commit): halt() is
+  blocked after 300 ms; the request is committed; its job is not sent.
+$ cargo test -p review-gate (5 runs):
+run 1:
+test result: ok. 185 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.53s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test result: ok. 185 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.28s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test result: ok. 185 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.47s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 4:
+test result: ok. 185 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.41s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 5:
+test result: ok. 185 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 16.53s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo test -p review-gate --lib milestone: 10 of 10 runs passed
+$ cargo clippy -p review-gate --all-targets -- -D warnings: clean
+$ cargo fmt -p review-gate --check: clean
