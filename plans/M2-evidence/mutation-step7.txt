@@ -13,3 +13,14 @@ Notes:
   kills instead of sending them, and the success test kills and reaps only its own child before
   the member list stops naming it. The unreadable case uses a nonexistent path, not chmod.
 - The call-site test ran for real under `systemd-run --user` (not skipped).
+
+
+=== Part 2: F1-F6 mutants (script m2-tools/mut7b.py; only the faults tests are run, so each is killed by its own F test) ===
+G1 (F1) an unparsable answer is read as APPROVE => KILLED ['f1_an_unparsable_answer_is_a_failed_job_without_effect_and_release_comes_back']
+G2 (F2) a late result takes effect => KILLED ['f2_a_result_after_cancel_is_late_and_without_effect', 'f2_a_result_after_rebaseline_is_late_and_without_effect', 'f2_a_result_after_supersession_is_late_and_without_effect']
+G3 (F3) the reply is not bound to the request id => KILLED ['f3_a_replayed_earlier_reply_is_refused_and_does_not_restore_the_release']
+G3b (F3) neither the id nor the sealed input is checked => KILLED ['f3_a_replayed_earlier_reply_is_refused_and_does_not_restore_the_release']
+G4 (F4) open blocking conditions do not hold release => KILLED ['f4_an_approval_that_leaves_a_blocking_condition_unresolved_does_not_release']
+G5 (F5) release does not wait for the archive => KILLED ['f5_a_result_not_yet_archived_releases_only_once_published_and_archived']
+G6 (F6) a longer remote is classified but not imported => KILLED ['f6_a_stale_backup_does_not_release_once_the_remote_has_a_revoke', 'f6_a_stale_backup_does_not_release_once_the_remote_has_a_newer_request']
+G3 removes only the job id check; the replay is still refused by the input check, and the test kills it through its reason assertion ("is not the request"). G3b removes both checks; the replay then restores the release and the test kills it through its released assertion.

@@ -78,3 +78,62 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 $ systemd user units left by the tests:
 0
+
+
+=== Part 2: F1-F6 (Flow service-level fault tests), version 2, base b44eb65 ===
+Tests in crates/review-gate/src/milestone/flow/tests/faults.rs (a child of flow.rs's test module,
+sharing its fixture). The stand-in runner gained a handshake (request lines read in full), a record
+of the replies it sent, and a Replay mode that sends an earlier reply verbatim.
+- F1 an unparsable answer: a failed job, invalid audit, no count, R1 open; release comes back after
+  a valid audit, published and archived.
+- F2 late results, three ways (cancel, supersession, rebaseline). A first REWORK makes the count 1;
+  the held job is overtaken only after the runner has read its whole line; the late answer
+  resolves R1. After it lands: R1 still open, no condition_resolved, the count still 1, the
+  request's closing records unchanged (one for cancel and supersession, none for a rebaseline,
+  which ends a request by derivation), not released. Supersession: p2 inherits R1 open and count 1.
+- F3 the runner replays the first job's APPROVE reply byte for byte for a new request: refused
+  ("is not the request"), the earlier approval stays ended; a fresh valid reply releases again.
+- F4 two blocking conditions, an APPROVE resolving only R1: R2 open, not released; R2 resolved
+  later: released.
+- F5 the unarchived tail: not released ("not archived yet") until published and archived; the
+  bookkeeping records (published, archived) do not hold release back themselves.
+- F6 a stale backup (copied while the flow was dropped and no job thread ran) holding an approval;
+  the live gate then revokes (case 1) or starts a request kept pending (case 2) and publishes.
+  Opening the backup as a service writes nothing; on its own it still derives the old approval;
+  its status imports the remote's revoke or request and does not release; in case 2 the newer
+  request is current and Pending.
+A test mistake on the way: an assertion counted condition_resolved records by request_id, which
+they do not carry, so it was trivially true; fixed to count by condition id. One run printed
+"recording the result of p-q2 failed: No such file or directory": that was a failing test dropping
+its temporary directory while a held job still ran (it does not occur in passing runs), not a
+product fault.
+$ cargo fmt -p review-gate --check
+clean
+$ cargo clippy -p review-gate --all-targets  -- -D warnings
+warnings+errors: 0
+$ cargo clippy -p review-gate --all-targets --features fault-injection -- -D warnings
+warnings+errors: 0
+$ cargo test -p review-gate --lib milestone::flow::tests::faults (3 runs)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 16.79s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 14.54s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 19.81s
+$ cargo test -p review-gate (3 runs)
+run 1:
+test result: ok. 210 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 30.46s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.91s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test result: ok. 210 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 26.44s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test result: ok. 210 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 25.24s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo test -p review-gate --lib milestone: 10 of 10 runs passed

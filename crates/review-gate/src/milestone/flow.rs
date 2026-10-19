@@ -1773,6 +1773,8 @@ mod tests {
         WrongJob,
         /// Wait for a signal before answering (late results).
         Hold(Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>, String),
+        /// Send this reply line verbatim (an earlier job's reply, replayed).
+        Replay(String),
     }
 
     struct Fx {
@@ -1785,6 +1787,10 @@ mod tests {
         mode: Arc<Mutex<Mode>>,
         /// Requests the runner stand-in has received.
         calls: Arc<std::sync::atomic::AtomicUsize>,
+        /// Request lines the runner stand-in has read in full (a handshake for held jobs).
+        lines: Arc<(Mutex<usize>, Condvar)>,
+        /// Every reply line the runner stand-in sent, in order.
+        sent: Arc<Mutex<Vec<String>>>,
         bridge: Arc<Mutex<std::result::Result<Collected, String>>>,
     }
 
@@ -1853,6 +1859,8 @@ mod tests {
                 head,
                 mode: Arc::new(Mutex::new(Mode::Answer(approve()))),
                 calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                lines: Arc::default(),
+                sent: Arc::default(),
                 bridge: Arc::new(Mutex::new(Ok(Collected {
                     revision: "rev".into(),
                     tasks: vec![],
@@ -1871,16 +1879,28 @@ mod tests {
             let l = UnixListener::bind(self.socket()).unwrap();
             let mode = self.mode.clone();
             let calls = self.calls.clone();
+            let (lines, sent) = (self.lines.clone(), self.sent.clone());
             std::thread::spawn(move || {
                 for c in l.incoming() {
                     let Ok(mut c) = c else { break };
                     calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let mode = mode.lock().unwrap().clone();
+                    let (lines, sent) = (lines.clone(), sent.clone());
                     std::thread::spawn(move || {
                         let mut line = String::new();
                         BufReader::new(c.try_clone().unwrap())
                             .read_line(&mut line)
                             .unwrap();
+                        {
+                            let (n, cv) = &*lines;
+                            *n.lock().unwrap() += 1;
+                            cv.notify_all();
+                        }
+                        if let Mode::Replay(old) = &mode {
+                            c.write_all(format!("{old}\n").as_bytes()).unwrap();
+                            sent.lock().unwrap().push(old.clone());
+                            return;
+                        }
                         let req: Value = serde_json::from_str(&line).unwrap();
                         let input = req["input"].as_str().unwrap();
                         let mut sha = sha256_hex(input.as_bytes());
@@ -1897,6 +1917,7 @@ mod tests {
                                 let _ = rx.recv();
                                 ("completed", a)
                             }
+                            Mode::Replay(_) => unreachable!("answered above"),
                         };
                         let (job_id, status) = if status == "completed-wrong-job" {
                             (json!("someone-else"), "completed")
@@ -1911,6 +1932,7 @@ mod tests {
                             "finished_at": "2026-10-18T00:00:01Z",
                         });
                         c.write_all(format!("{resp}\n").as_bytes()).unwrap();
+                        sent.lock().unwrap().push(resp.to_string());
                     });
                 }
             });
@@ -2729,6 +2751,8 @@ mod tests {
             head: fx.head.clone(),
             mode: fx.mode.clone(),
             calls: fx.calls.clone(),
+            lines: fx.lines.clone(),
+            sent: fx.sent.clone(),
             bridge: fx.bridge.clone(),
         }));
         let reader: BridgeRead = Arc::new(move || {
@@ -3841,4 +3865,7 @@ mod tests {
             "the send in progress completed"
         );
     }
+
+    /// Flow service-level fault tests F1–F6 (M2 step 7; F7–F11 are in `faults_remote`).
+    mod faults;
 }
