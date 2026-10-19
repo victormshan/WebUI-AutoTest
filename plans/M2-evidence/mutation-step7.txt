@@ -24,3 +24,14 @@ G4 (F4) open blocking conditions do not hold release => KILLED ['f4_an_approval_
 G5 (F5) release does not wait for the archive => KILLED ['f5_a_result_not_yet_archived_releases_only_once_published_and_archived']
 G6 (F6) a longer remote is classified but not imported => KILLED ['f6_a_stale_backup_does_not_release_once_the_remote_has_a_revoke', 'f6_a_stale_backup_does_not_release_once_the_remote_has_a_newer_request']
 G3 removes only the job id check; the replay is still refused by the input check, and the test kills it through its reason assertion ("is not the request"). G3b removes both checks; the replay then restores the release and the test kills it through its released assertion.
+
+
+=== Part 3: F7-F11 mutants, rerun by Claude as reviewer (script m2-tools/mut7c.py; only faults_remote runs) ===
+H1 (opencode M1) classify skips every stop: always Equal => KILLED ['f10_an_unreachable_remote_stops_release', 'f7_a_truncated_remote_stops_release_and_a_restored_one_releases', 'f9_a_forked_remote_record_stops_release', 'f11_a_tampered_signature_in_the_imported_tail_is_never_imported', 'f8_a_legitimately_longer_remote_is_imported_without_stop']
+H2 (opencode M2) the remote is never verified (classify and import) => KILLED ['f11_a_tampered_signature_in_the_imported_tail_is_never_imported']
+H3 (opencode M3) a longer remote is a stop (false reject) => KILLED ['f8_a_legitimately_longer_remote_is_imported_without_stop', 'f11_a_tampered_signature_in_the_imported_tail_is_never_imported']
+H4 (opencode M4) an unreachable remote is read as empty => KILLED ['f10_an_unreachable_remote_stops_release']
+H6 (F9 alone) the divergence check is skipped => KILLED ['f9_a_forked_remote_record_stops_release']
+H5 (F7 alone) the truncation check is skipped (the arm does nothing) => KILLED ['f7_a_truncated_remote_stops_release_and_a_restored_one_releases']
+(A first H5, `None if false =>`, left None unmatched and did not compile; not counted.)
+opencode reported its own run of H1-H4 (as M1-M4), all killed; the rerun above confirms them and adds H5 and H6, which remove only the truncation or only the divergence check.

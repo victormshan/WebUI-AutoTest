@@ -3868,4 +3868,6 @@ mod tests {
 
     /// Flow service-level fault tests F1–F6 (M2 step 7; F7–F11 are in `faults_remote`).
     mod faults;
+    /// F7–F11: remote faults (written by opencode, reviewed by Claude).
+    mod faults_remote;
 }

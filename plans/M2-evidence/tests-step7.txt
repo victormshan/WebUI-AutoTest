@@ -137,3 +137,66 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 $ cargo test -p review-gate --lib milestone: 10 of 10 runs passed
+
+
+=== Part 3: F7-F11 (remote faults), version 3, base aaebe76 ===
+Written by opencode (DeepSeek V4.1 Flash) in its own worktree, commit 1d7fd40 on branch
+m2-step7-remote-faults (based on b44eb65), bridge task m2-step7-remote-faults-oc-20261020;
+reviewed by Claude as stage reviewer and brought in here (cherry-pick, not yet committed).
+File crates/review-gate/src/milestone/flow/tests/faults_remote.rs, plus `mod faults_remote;`.
+- Common start: register, a completed request, publish, published_then_archive (archived),
+  status released; the remote text and the local log.jsonl/checkpoint.json bytes are kept.
+- F7 the remote rewritten to its first 2 records (fewer than the checkpoint); F9 the remote
+  continuing with other validly signed records where the local log has its own (a fork); F11 a
+  legitimately longer remote whose first record in the import range has a changed signature.
+  Each: status not released with "release stopped" and the specific reason, a request refused,
+  log.jsonl and checkpoint.json byte for byte unchanged (no metadata record written while
+  stopped); F11 also: the tampered record is not in the local log. Restored remote: release
+  comes back through publish and archive (F11: through archive only, since the remote is ahead).
+- F8 a legitimately longer remote (2 more records signed by the same key, from another copy of
+  the log): imported byte for byte, no stop, derived from the imported log, checkpoint = local + 2.
+- F10 every fetch of the flow fails (failed_fetches hook): stopped with "unreachable", request
+  refused, no local write; reachable again, release comes back through archive.
+Review findings: the tests are sound; one change on intake: F11 took the tampered record's index
+as a fixed 8 ("seq 9"), which holds only while the fixture's local log has 8 records; it now uses
+the local log's length (the first record a sync would import). opencode had changed one
+expectation, count 1 → 0 in F8; that is correct (derive resets the count when the request is
+eligible apart from archival, and the start releases), not a test bent to the code.
+opencode's first turn hit the worker's 30-minute per-turn limit; the user re-ran it with a
+2-hour limit, in which it committed and ran its mutants.
+$ cargo fmt -p review-gate --check
+clean
+$ cargo clippy -p review-gate --all-targets  -- -D warnings
+warnings+errors: 0
+$ cargo clippy -p review-gate --all-targets --features fault-injection -- -D warnings
+warnings+errors: 0
+$ cargo test -p review-gate --lib milestone::flow::tests::faults (F1-F11, 3 runs)
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 16.36s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 14.20s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 13.86s
+$ cargo test -p review-gate (3 runs)
+run 1:
+test result: ok. 215 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 31.60s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test result: ok. 215 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 27.55s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test result: ok. 215 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 28.77s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo test -p review-gate --lib milestone: 10 of 10 runs passed
+$ cargo test -p audit-runner (part 1 still green)
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.27s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
