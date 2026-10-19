@@ -1,0 +1,15 @@
+M2 step 7 mutation testing. Part 1: A25 (script m2-tools/mut7a.py; process-group kill on timeout; each mutant alone, the source restored after).
+
+A25 sweep result ignored => KILLED ['test under_systemd_a_sweep_that_cannot_read_its_cgroup_stops_the_runner ... FAILED']
+S1 an unreadable member list is taken as empty => KILLED ['test tests::sweep::a_member_list_that_cannot_be_read_is_not_confirmed ... FAILED', 'test under_systemd_a_sweep_that_cannot_read_its_cgroup_stops_the_runner ... FAILED']
+S2 the limit is never applied => KILLED ['TIMEOUT (hang)']
+S3 the sweeper kills itself too => KILLED ['test tests::sweep::a_member_that_is_killed_and_reaped_is_gone ... FAILED', 'test tests::sweep::members_that_outlive_the_limit_are_not_confirmed_in_bounded_time ... FAILED']
+
+Notes:
+- A25 (ignoring the sweep's result), which survived M1, is now killed by the systemd call-site
+  test. The fault there is an input fault: the sweep reads a nonexistent member list through its
+  real logic. The old `cleanup-unconfirmed` fault overrode the output and so bypassed the sweep.
+- No test signals a process it does not own (Codex n3 condition 1): the deadline test records
+  kills instead of sending them, and the success test kills and reaps only its own child before
+  the member list stops naming it. The unreadable case uses a nonexistent path, not chmod.
+- The call-site test ran for real under `systemd-run --user` (not skipped).

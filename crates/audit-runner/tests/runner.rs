@@ -549,6 +549,13 @@ printf 'VERDICT: APPROVE\nleft-pid=%s\n' "$left" > "$out"
 /// still running once the reply came (checked before the unit is stopped: stopping it makes
 /// systemd end the whole cgroup).
 async fn run_as_service(own_cgroup: bool) -> (Response, bool) {
+    let (resp, alive, _) = run_as_service_with(own_cgroup, None).await;
+    (resp, alive)
+}
+
+/// `run_as_service` with an optional `AUDIT_RUNNER_FAULT` for the service; also returns whether
+/// the runner was still running 5 s after the reply (an unconfirmed cleanup must stop it).
+async fn run_as_service_with(own_cgroup: bool, fault: Option<&str>) -> (Response, bool, bool) {
     let dir = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
     let codex = dir.path().join("codex");
     std::fs::write(&codex, ESCAPING_CODEX).unwrap();
@@ -556,10 +563,18 @@ async fn run_as_service(own_cgroup: bool) -> (Response, bool) {
     std::fs::create_dir_all(dir.path().join(".codex")).unwrap();
     std::fs::write(dir.path().join(".codex/auth.json"), "{}").unwrap();
     let socket = dir.path().join("s.sock");
-    let unit = format!("audit-runner-test-{}-{}", std::process::id(), own_cgroup);
+    let unit = format!(
+        "audit-runner-test-{}-{}-{}",
+        std::process::id(),
+        own_cgroup,
+        fault.is_some()
+    );
     let mut run = std::process::Command::new("systemd-run");
-    run.args(["--user", "--collect", "--quiet", &format!("--unit={unit}")])
-        .arg(env!("CARGO_BIN_EXE_audit-runner"))
+    run.args(["--user", "--collect", "--quiet", &format!("--unit={unit}")]);
+    if let Some(f) = fault {
+        run.arg(format!("--setenv=AUDIT_RUNNER_FAULT={f}"));
+    }
+    run.arg(env!("CARGO_BIN_EXE_audit-runner"))
         .arg("--socket")
         .arg(&socket)
         .args(["--allow-uid", &my_uid().to_string(), "--codex"])
@@ -591,10 +606,58 @@ async fn run_as_service(own_cgroup: bool) -> (Response, bool) {
         .unwrap_or_else(|| panic!("no left-pid: {resp:?}"));
     let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
     let alive = String::from_utf8_lossy(&cmd).contains("4791");
+    let active = || {
+        std::process::Command::new("systemctl")
+            .args(["--user", "is-active", &unit])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
+            .unwrap_or(false)
+    };
+    let end = std::time::Instant::now() + Duration::from_secs(5);
+    while active() && std::time::Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let serving = active();
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "stop", &unit])
         .status();
-    (resp, alive)
+    (resp, alive, serving)
+}
+
+/// A25 at the call site: the sweep cannot read the member list (an input fault; the sweep's
+/// logic runs unchanged). The job's cleanup is not confirmed and the runner stops.
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn under_systemd_a_sweep_that_cannot_read_its_cgroup_stops_the_runner() {
+    let (resp, _, serving) = run_as_service_with(
+        true,
+        Some("sweep-procs=/nonexistent/audit-runner-test/cgroup.procs"),
+    )
+    .await;
+    assert!(
+        resp.cleanup.starts_with("not confirmed")
+            && resp.cleanup.contains("reading the cgroup members"),
+        "{resp:?}"
+    );
+    assert!(
+        !serving,
+        "the runner kept serving after an unconfirmed sweep"
+    );
+}
+
+/// Without the feature the variable does nothing: the real sweep runs (the escaped process is
+/// ended), the cleanup is confirmed and the runner keeps serving.
+#[cfg(not(feature = "fault-injection"))]
+#[tokio::test]
+async fn under_systemd_the_sweep_fault_has_no_effect_in_a_default_build() {
+    let (resp, alive, serving) = run_as_service_with(
+        true,
+        Some("sweep-procs=/nonexistent/audit-runner-test/cgroup.procs"),
+    )
+    .await;
+    assert_eq!(resp.cleanup, "gone", "{resp:?}");
+    assert!(!alive, "the real sweep ran and ended the escaped process");
+    assert!(serving, "the runner keeps serving");
 }
 
 #[tokio::test]

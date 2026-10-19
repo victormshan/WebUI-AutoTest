@@ -1,0 +1,80 @@
+M2 step 7 evidence. Part 1: A25 (the audit-runner cgroup sweep failure path). Base 1b63a5b.
+Plan: bridge task m2-step7-plan-20261020 (n1), approved with conditions by Codex (n3).
+
+$ cargo fmt -p audit-runner --check
+clean
+$ cargo clippy -p audit-runner --all-targets  -- -D warnings
+warnings+errors: 0
+$ cargo clippy -p audit-runner --all-targets --features fault-injection -- -D warnings
+warnings+errors: 0
+$ cargo test -p audit-runner  (3 runs)
+run 1:
+test tests::sweep::a_member_list_that_cannot_be_read_is_not_confirmed ... ok
+test tests::sweep::a_member_that_is_killed_and_reaped_is_gone ... ok
+test tests::sweep::members_that_outlive_the_limit_are_not_confirmed_in_bounded_time ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test under_systemd_a_process_that_left_the_group_is_ended_too ... ok
+test under_systemd_the_sweep_fault_has_no_effect_in_a_default_build ... ok
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.26s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test tests::sweep::a_member_list_that_cannot_be_read_is_not_confirmed ... ok
+test tests::sweep::a_member_that_is_killed_and_reaped_is_gone ... ok
+test tests::sweep::members_that_outlive_the_limit_are_not_confirmed_in_bounded_time ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test under_systemd_a_process_that_left_the_group_is_ended_too ... ok
+test under_systemd_the_sweep_fault_has_no_effect_in_a_default_build ... ok
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.23s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test tests::sweep::a_member_list_that_cannot_be_read_is_not_confirmed ... ok
+test tests::sweep::a_member_that_is_killed_and_reaped_is_gone ... ok
+test tests::sweep::members_that_outlive_the_limit_are_not_confirmed_in_bounded_time ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test under_systemd_a_process_that_left_the_group_is_ended_too ... ok
+test under_systemd_the_sweep_fault_has_no_effect_in_a_default_build ... ok
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.21s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo test -p audit-runner --features fault-injection (3 runs)
+run 1:
+test tests::sweep::a_member_list_that_cannot_be_read_is_not_confirmed ... ok
+test tests::sweep::a_member_that_is_killed_and_reaped_is_gone ... ok
+test tests::sweep::members_that_outlive_the_limit_are_not_confirmed_in_bounded_time ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test under_systemd_a_sweep_that_cannot_read_its_cgroup_stops_the_runner ... ok
+test under_systemd_a_process_that_left_the_group_is_ended_too ... ok
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.19s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test tests::sweep::a_member_list_that_cannot_be_read_is_not_confirmed ... ok
+test tests::sweep::a_member_that_is_killed_and_reaped_is_gone ... ok
+test tests::sweep::members_that_outlive_the_limit_are_not_confirmed_in_bounded_time ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test under_systemd_a_sweep_that_cannot_read_its_cgroup_stops_the_runner ... ok
+test under_systemd_a_process_that_left_the_group_is_ended_too ... ok
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.19s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test tests::sweep::a_member_list_that_cannot_be_read_is_not_confirmed ... ok
+test tests::sweep::a_member_that_is_killed_and_reaped_is_gone ... ok
+test tests::sweep::members_that_outlive_the_limit_are_not_confirmed_in_bounded_time ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test under_systemd_a_sweep_that_cannot_read_its_cgroup_stops_the_runner ... ok
+test under_systemd_a_process_that_left_the_group_is_ended_too ... ok
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.26s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+$ systemd user units left by the tests:
+0

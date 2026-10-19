@@ -598,23 +598,40 @@ pub fn own_cgroup_procs() -> std::io::Result<PathBuf> {
         .join("cgroup.procs"))
 }
 
-/// Kills every process in this process's cgroup except itself, until it is the only one left
-/// or `limit` is spent.
-pub async fn sweep_own_cgroup(limit: Duration) -> Cleanup {
-    let me = std::process::id();
-    let procs = match own_cgroup_procs() {
-        Ok(p) => p,
-        Err(e) => return Cleanup::NotConfirmed(format!("own cgroup: {e}")),
-    };
+/// What the cgroup sweep needs from the system: reading the member list and killing a member.
+/// Tests supply their own, so no test signals a process it does not own (Codex, step 7 plan n3).
+pub trait CgroupOps {
+    fn members(&self) -> std::io::Result<String>;
+    fn kill(&self, pid: u32);
+}
+
+/// The real cgroup: its `cgroup.procs` file and kill(2).
+pub struct CgroupFile(pub PathBuf);
+
+impl CgroupOps for CgroupFile {
+    fn members(&self) -> std::io::Result<String> {
+        std::fs::read_to_string(&self.0)
+    }
+    fn kill(&self, pid: u32) {
+        // SAFETY: plain kill(2) on a process of our own cgroup (and uid).
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+}
+
+/// Kills every member of the cgroup except `me`, until `me` is the only one left or `limit`
+/// is spent. A member list that cannot be read is never taken as empty.
+pub async fn sweep_cgroup(ops: &impl CgroupOps, me: u32, limit: Duration) -> Cleanup {
     let end = tokio::time::Instant::now() + limit;
     loop {
-        let others: Vec<u32> = match std::fs::read_to_string(&procs) {
+        let others: Vec<u32> = match ops.members() {
             Ok(t) => t
                 .lines()
                 .filter_map(|l| l.trim().parse().ok())
                 .filter(|p| *p != me)
                 .collect(),
-            Err(e) => return Cleanup::NotConfirmed(format!("reading {}: {e}", procs.display())),
+            Err(e) => return Cleanup::NotConfirmed(format!("reading the cgroup members: {e}")),
         };
         if others.is_empty() {
             return Cleanup::Gone;
@@ -626,13 +643,30 @@ pub async fn sweep_own_cgroup(limit: Duration) -> Cleanup {
             ));
         }
         for p in others {
-            // SAFETY: plain kill(2) on a process of our own cgroup (and uid).
-            unsafe {
-                libc::kill(p as i32, libc::SIGKILL);
-            }
+            ops.kill(p);
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// Kills every process in this process's cgroup except itself, until it is the only one left
+/// or `limit` is spent.
+pub async fn sweep_own_cgroup(limit: Duration) -> Cleanup {
+    let procs = match own_cgroup_procs() {
+        Ok(p) => p,
+        Err(e) => return Cleanup::NotConfirmed(format!("own cgroup: {e}")),
+    };
+    // Test builds only: an input fault for the sweep's failure path (A25). The sweep reads this
+    // path instead of the real member list; its logic runs unchanged.
+    #[cfg(feature = "fault-injection")]
+    let procs = match std::env::var("AUDIT_RUNNER_FAULT") {
+        Ok(v) => match v.strip_prefix("sweep-procs=") {
+            Some(p) => PathBuf::from(p),
+            None => procs,
+        },
+        Err(_) => procs,
+    };
+    sweep_cgroup(&CgroupFile(procs), std::process::id(), limit).await
 }
 
 /// Kills Codex's process group, reaps Codex (the leader) and confirms the group is gone, all
@@ -914,5 +948,108 @@ not json"#;
         );
         let open = "{\"type\":\"thread.started\"}\n{\"type\":\"item.started\",\"item\":{\"id\":\"a\"}}\n{\"type\":\"turn.completed\"}";
         assert!(check_events(open).unwrap_err().contains("not completed"));
+    }
+
+    /// The sweep's failure paths (A25) and its success path, without signalling any process the
+    /// test does not own.
+    mod sweep {
+        use super::*;
+        use std::sync::Mutex;
+
+        /// A member list that never changes; kills are recorded, never sent.
+        struct Stuck {
+            list: String,
+            killed: Mutex<Vec<u32>>,
+        }
+
+        impl CgroupOps for Stuck {
+            fn members(&self) -> std::io::Result<String> {
+                Ok(self.list.clone())
+            }
+            fn kill(&self, pid: u32) {
+                self.killed.lock().unwrap().push(pid);
+            }
+        }
+
+        /// The test's own child: killed and reaped (so its exit is confirmed) before the member
+        /// list stops naming it.
+        struct OwnChild {
+            me: u32,
+            child: Mutex<Option<std::process::Child>>,
+        }
+
+        impl CgroupOps for OwnChild {
+            fn members(&self) -> std::io::Result<String> {
+                Ok(match &*self.child.lock().unwrap() {
+                    Some(c) => format!("{}\n{}\n", self.me, c.id()),
+                    None => format!("{}\n", self.me),
+                })
+            }
+            fn kill(&self, pid: u32) {
+                let mut g = self.child.lock().unwrap();
+                let c = g.as_mut().expect("killed only while listed");
+                assert_eq!(pid, c.id(), "only the test's own child is killed");
+                c.kill().unwrap();
+                c.wait().unwrap();
+                *g = None;
+            }
+        }
+
+        #[tokio::test]
+        async fn a_member_list_that_cannot_be_read_is_not_confirmed() {
+            let d = tempfile::tempdir().unwrap();
+            let ops = CgroupFile(d.path().join("no-such-dir/cgroup.procs"));
+            match sweep_cgroup(&ops, 1, Duration::from_secs(1)).await {
+                Cleanup::NotConfirmed(why) => {
+                    assert!(why.contains("reading the cgroup members"), "{why}")
+                }
+                Cleanup::Gone => panic!("an unreadable list was taken as empty"),
+            }
+        }
+
+        #[tokio::test]
+        async fn members_that_outlive_the_limit_are_not_confirmed_in_bounded_time() {
+            let me = 7;
+            let ops = Stuck {
+                list: format!("{me}\n424242\n"),
+                killed: Mutex::new(vec![]),
+            };
+            let started = std::time::Instant::now();
+            let out = sweep_cgroup(&ops, me, Duration::from_millis(200)).await;
+            let took = started.elapsed();
+            match out {
+                Cleanup::NotConfirmed(why) => assert!(why.contains("still in"), "{why}"),
+                Cleanup::Gone => panic!("a member that never left was confirmed gone"),
+            }
+            assert!(
+                took >= Duration::from_millis(200) && took < Duration::from_secs(2),
+                "{took:?}"
+            );
+            let killed = ops.killed.lock().unwrap();
+            assert!(
+                !killed.is_empty() && killed.iter().all(|p| *p == 424242),
+                "{killed:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_member_that_is_killed_and_reaped_is_gone() {
+            let child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            let ops = OwnChild {
+                me: 7,
+                child: Mutex::new(Some(child)),
+            };
+            assert!(matches!(
+                sweep_cgroup(&ops, 7, Duration::from_secs(5)).await,
+                Cleanup::Gone
+            ));
+            assert!(ops.child.lock().unwrap().is_none(), "reaped");
+            let alive = std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| !c.is_empty());
+            assert!(!alive, "the child is gone");
+        }
     }
 }
