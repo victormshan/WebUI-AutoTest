@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-step7-faults
+version: 4/5
+commit: 6cd85de4fdf0e19e7e3aac408f82dc79194b95ce
+tree: 5b9d9077a49808e58ab12988b60641599584a02f
+parent: 9f11fb18e741df47ad1621992c15944d18f16390
+review: v4-1
+reviewer: external-api/gemini-api
+verdict: approved
+at: 2026-10-19T21:55:44Z
+signature: 3CODOxRK76n/gbAHLcTW08tpgcNZR8DdMfKpCwZTKYTVrpja8AseyigBPwETMtQisuir1c4dGssRoaQE+px9CQ==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
