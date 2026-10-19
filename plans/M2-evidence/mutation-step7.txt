@@ -56,3 +56,48 @@ H4 an unreachable remote is read as empty => KILLED | F711: KILLED exit=101 39.2
 H5 the truncation check is skipped => KILLED | F711: KILLED exit=101 64.0s ['f7_a_truncated_remote_stops_release_and_a_restored_one_releases']
 H6 the divergence check is skipped => KILLED | F711: KILLED exit=101 9.5s ['f9_a_forked_remote_record_stops_release']
 S2 is now killed by its in-test bound (an assertion), not a timeout. Raw files: reviews/m2s7/mutation-raw (SHA256SUMS sha256 d4ab31ca...).
+
+
+=== Version 5 (base 6cd85de): answers Codex 7 review n7 ===
+Correction. The version-4 text above (and my bridge answer n6) said that G3b "restores the
+release and is killed by the released assertion". That was wrong, and was written without
+reading G3b's raw output. Its output shows F3 failing at the reason assertion: the replayed
+answer said "RESOLVED p/R1", R1 was already closed, so the answer parser refused it on its own
+and the replay never reached the binding checks. F3 is now built so that only those checks can
+stop it: a phase with no conditions, plain "VERDICT: APPROVE" replies (no RESOLVED), and the
+semantic assertions (state Failed, audit valid:false, not released) before the reason assertion.
+New finding from it: G3 alone (only the job id check removed) now also lets the replay through.
+The two requests cover the same head and inputs, so the sealed input digest is the same and the
+input check cannot tell a replay from a fresh reply; the job id check is what binds a reply to its
+request.
+
+All 18 mutants rerun on the final tree (m2-tools/mut7-raw.py). Run baseline: HEAD 6cd85de plus the
+uncommitted F3 change; `git diff HEAD | sha256sum` = d40ccd375a753617f81ccabd583f7bb6e01e3143fe4897e84ff4c90ad504aaa6
+before and after the run. Actual failure point of each, read from its raw stdout:
+A25: runner.rs:637 "Response { job_id: "s1", input_sha256: "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881", sta"
+S1: runner.rs:637 "Response { job_id: "s1", input_sha256: "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881", sta"; lib.rs:1006:1006 "an unreadable list was taken as empty"
+S2: lib.rs:1025 "the sweep ends at its limit: Elapsed(())"
+S3: lib.rs:990 "assertion `left == right` failed: only the test's own child is killed"; lib.rs:1035:1035 "[7, 424242, 7, 424242, 7, 424242, 7, 424242, 7, 424242, 7, 424242, 7, 424242, 7, 424242, 7, 424242, 7, 424242]"
+G1: faults.rs:93 "assertion `left == right` failed"
+G2: faults.rs:182 "assertion `left == right` failed: Cancel: nothing resolved"; faults.rs:182:182 "assertion `left == right` failed: Rebaseline: nothing resolved"; faults.rs:182:182 "assertion `left == right` failed: Supersede: nothing resolved"
+G3: faults.rs:256 "assertion `left == right` failed: the replay is not accepted as this request's result"
+G3b: faults.rs:256 "assertion `left == right` failed: the replay is not accepted as this request's result"
+G4: faults.rs:315 "R2 is still open: []"
+G5: faults.rs:335 "assertion failed: !s.released"
+G6: faults.rs:433 "the remote's request is imported: ["phase_registered", "request", "job", "audit", "condition_resolved", "reque"; faults.rs:433:433 "the remote's revoke is imported: ["phase_registered", "request", "job", "audit", "condition_resolved", "reques"
+H1: faults_remote.rs:68 "assertion `left == right` failed: log.jsonl was written while stopped"; faults_remote.rs:252:252 "assertion `left == right` failed: local + 2 imported + 1 archived"
+H2: faults_remote.rs:68 "assertion `left == right` failed: log.jsonl was written while stopped"
+H3: faults_remote.rs:232 "a legitimate extension stopped: ["release stopped: longer", "archive: refused: release stopped: longer"]"; faults_remote.rs:341:341 "restored remote still stopped: ["release stopped: longer", "archive: refused: release stopped: longer"]"
+H4: faults_remote.rs:77 "no "unreachable" reason: ["release stopped: remote has 0 records, fewer than the checkpoint 6: it was truncate"
+H5: faults_remote.rs:71 "released: []"
+H6: faults_remote.rs:70 "status failed while stopped: Other(record 9: does not link to the record before it)"
+How each is killed, as the output shows:
+- semantic assertions: S1, S2 (the in-test time limit), S3, G1 (Completed instead of Failed), G2
+  (a resolution was written), G3 and G3b (Completed instead of Failed), G4, G5 (released), G6 (the
+  remote record not imported), H1, H2 (local log written while stopped), H3 (a legitimate extension
+  stopped), H5 (released), H6 (status fails while it should report a stop);
+- A25 and S1 at the call site: the job's cleanup is "gone" where "not confirmed" is required;
+- H4 by the reason assertion only: with an unreachable remote read as empty, release still stops,
+  because the empty remote then fails the checkpoint check ("truncated"); the safety outcome holds
+  under this mutant, only the reported reason is wrong.
+Raw files: E:\rust-agent-browser\reviews\m2s7\mutation-raw-v5\ (the v4 set stays in mutation-raw\).

@@ -263,3 +263,52 @@ Version 4 stability (after the checks above showed one failure):
   "panicked" line, and was not saved, so which test failed is unknown); then 15 full runs and 30 full
   runs, each keeping the whole output of any run not cleanly ok: 45 of 45 clean.
 - So: 56 of 57 full lib runs clean since the retry; one failure remains unexplained.
+
+
+=== Version 5 (base 6cd85de): F3 rebuilt (Codex 7 review n7) ===
+F3 now uses a phase with no conditions and plain APPROVE replies, so a replayed reply parses and only the binding checks can refuse it; semantic assertions come first. Every run below keeps its whole output when not cleanly ok (m2-tools/flake7c).
+$ cargo fmt --check (review-gate, audit-runner)
+clean
+$ cargo clippy -p review-gate --all-targets  -- -D warnings
+warnings+errors: 0
+$ cargo clippy -p review-gate --all-targets --features fault-injection -- -D warnings
+warnings+errors: 0
+$ cargo clippy -p audit-runner --all-targets  -- -D warnings
+warnings+errors: 0
+$ cargo clippy -p audit-runner --all-targets --features fault-injection -- -D warnings
+warnings+errors: 0
+$ cargo test -p review-gate --lib milestone::flow::tests::faults (3 runs)
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 12.28s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 11.90s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 11.96s
+$ cargo test -p review-gate (10 runs, whole output kept for any run not cleanly ok)
+run 6: exit 101, kept
+clean: 9 of 10
+$ cargo test -p audit-runner 
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.27s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo test -p audit-runner --features fault-injection
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.21s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo test -p review-gate --lib milestone: 10 of 10 runs passed
+The run kept above (run 6, exit 101) names the failing test: it is not F6 but
+milestone::runner::tests::a_sender_that_is_gone_when_the_reply_is_in_is_not_authenticated,
+`called Result::unwrap() on an Err value: ... ConnectionRefused` at runner.rs:283 (the connect).
+Root cause, now found: four runner tests start a python stand-in server and wait for its socket
+file before connecting; the file appears at bind(), one statement before listen(), and a connect
+in between is refused. Fix: the stand-in prints "ready" after listen() and the test reads that
+line (`listening`), in all four tests. This is very likely also the earlier unexplained failure
+and the runner-test failures seen during the leftover-process episode, but those outputs were not
+kept, so that is not proven.
+After the fix: 20 full `cargo test -p review-gate` runs, each keeping the whole output if not
+cleanly ok: 20 of 20 clean.
+$ fmt/clippy after the runner.rs fix
+clean
+review-gate clippy  warnings+errors: 0
+review-gate clippy --features fault-injection warnings+errors: 0

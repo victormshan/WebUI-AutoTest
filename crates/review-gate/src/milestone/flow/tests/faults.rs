@@ -223,27 +223,50 @@ fn f2_a_result_after_rebaseline_is_late_and_without_effect() {
     late(Late::Rebaseline);
 }
 
-/// F3: the runner returns an earlier job's reply, byte for byte. The binding check (job id and
-/// sealed input) refuses it; the earlier approval stays ended by the new request.
+/// F3: the runner returns an earlier job's reply, byte for byte. The phase has no conditions and
+/// the first reply is a plain APPROVE, so the replayed answer parses on its own: only the binding
+/// checks (job id and sealed input) can stop it (Codex 7 review n7). They refuse it; the earlier
+/// approval stays ended by the new request.
 #[test]
 fn f3_a_replayed_earlier_reply_is_refused_and_does_not_restore_the_release() {
     let fx = Fx::new();
     let f = fx.service();
-    fx.register(&f);
+    f.apply("p", &fx.base, "plans/book.md", "ev", vec![], None)
+        .unwrap();
+    f.confirm("p").unwrap();
+    *fx.mode.lock().unwrap() = Mode::Answer("VERDICT: APPROVE\n".into());
     let first = f.request("p", &fx.head).unwrap();
-    settled(&f, "p");
+    assert_eq!(
+        settled(&f, "p").current.unwrap().state,
+        RequestState::Completed
+    );
     assert!(publish(&fx, &f).archived);
     assert!(f.status_archived("p").unwrap().released);
     let old = fx.sent.lock().unwrap().last().cloned().unwrap();
     assert!(old.contains(&first), "the reply to the first job");
+    assert!(
+        !old.contains("RESOLVED"),
+        "a reply valid for any request of p"
+    );
     // A new request ends the approval; its runner replays the old APPROVE reply.
     *fx.mode.lock().unwrap() = Mode::Replay(old);
     let id = f.request("p", &fx.head).unwrap();
     let st = settled_after(&f, "p", &first);
     assert_eq!(st.current.as_ref().unwrap().request_id, id);
-    assert_eq!(st.current.as_ref().unwrap().state, RequestState::Failed);
+    assert_eq!(
+        st.current.as_ref().unwrap().state,
+        RequestState::Failed,
+        "the replay is not accepted as this request's result"
+    );
     let audit = &of(&f, "audit", &id)[0];
-    assert_eq!(audit.body["valid"], false);
+    assert_eq!(audit.body["valid"], false, "{}", audit.body);
+    publish(&fx, &f);
+    let s = f.status_archived("p").unwrap();
+    assert!(
+        !s.released,
+        "a replay never restores a release: {:?}",
+        s.reasons
+    );
     assert!(
         audit.body["reason"]
             .as_str()
@@ -252,15 +275,7 @@ fn f3_a_replayed_earlier_reply_is_refused_and_does_not_restore_the_release() {
         "{}",
         audit.body
     );
-    publish(&fx, &f);
-    let s = f.status_archived("p").unwrap();
-    assert!(
-        !s.released,
-        "a replay never restores a release: {:?}",
-        s.reasons
-    );
-    // The fault gone: a fresh, valid reply releases again (R1 was resolved by the first audit,
-    // so this approval resolves nothing).
+    // The fault gone: a fresh, valid reply releases again.
     *fx.mode.lock().unwrap() = Mode::Answer("VERDICT: APPROVE\n".into());
     f.request("p", &fx.head).unwrap();
     settled_after(&f, "p", &id);

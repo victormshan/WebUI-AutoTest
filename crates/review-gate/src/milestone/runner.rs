@@ -261,6 +261,19 @@ mod tests {
         assert!(err.contains("cgroup"), "{err}");
     }
 
+    /// Waits until the python stand-in is listening: it prints "ready" after listen(). The socket
+    /// file appears at bind(), before listen(), so waiting for the file alone races (a connect in
+    /// between is refused).
+    fn listening(child: &mut std::process::Child) {
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().expect("piped stdout")),
+            &mut line,
+        )
+        .unwrap();
+        assert_eq!(line.trim(), "ready", "the stand-in did not start listening");
+    }
+
     #[test]
     fn a_sender_that_is_gone_when_the_reply_is_in_is_not_authenticated() {
         // The reply comes from a separate process that exits right after sending.
@@ -270,16 +283,14 @@ mod tests {
             .arg("-c")
             .arg(
                 "import socket,sys\n\
-                 s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.listen(1)\n\
+                 s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.listen(1);print('ready',flush=True)\n\
                  c,_=s.accept();c.recv(100);c.sendall(b'ok\\n')\n",
             )
             .arg(&sock)
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let end = std::time::Instant::now() + Duration::from_secs(5);
-        while !sock.exists() && std::time::Instant::now() < end {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        listening(&mut child);
         let mut s = UnixStream::connect(&sock).unwrap();
         passcred(&s).unwrap();
         s.write_all(b"{}\n").unwrap();
@@ -297,19 +308,17 @@ mod tests {
             .arg("-c")
             .arg(
                 "import socket,sys,os,time\n\
-                 s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.listen(1)\n\
+                 s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.listen(1);print('ready',flush=True)\n\
                  c,_=s.accept();c.recv(100);c.sendall(b'{\"a\":');time.sleep(0.2)\n\
                  pid=os.fork()\n\
                  if pid==0:\n c.sendall(b'1}\\n');time.sleep(1);os._exit(0)\n\
                  time.sleep(1.5)\n",
             )
             .arg(&sock)
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let end = std::time::Instant::now() + Duration::from_secs(5);
-        while !sock.exists() && std::time::Instant::now() < end {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        listening(&mut child);
         let err = call(&sock, "{}", &me(), Duration::from_secs(5))
             .unwrap_err()
             .to_string();
@@ -326,19 +335,17 @@ mod tests {
             .arg("-c")
             .arg(
                 "import socket,sys,array,os\n\
-                 s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.listen(1)\n\
+                 s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.listen(1);print('ready',flush=True)\n\
                  c,_=s.accept();c.recv(100)\n\
                  fds=array.array('i',[os.open('/dev/null',os.O_RDONLY) for _ in range(12)])\n\
                  c.sendmsg([b'ok\\n'],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,fds)])\n\
                  c.recv(1)\n",
             )
             .arg(&sock)
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let end = std::time::Instant::now() + Duration::from_secs(5);
-        while !sock.exists() && std::time::Instant::now() < end {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        listening(&mut child);
         let res = call(&sock, "{}", &me(), Duration::from_secs(5));
         let _ = child.kill();
         child.wait().unwrap();
@@ -376,19 +383,17 @@ mod tests {
             .arg("-c")
             .arg(
                 "import socket,sys,array,os\n\
-                 s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.listen(1)\n\
+                 s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.listen(1);print('ready',flush=True)\n\
                  c,_=s.accept();c.recv(100)\n\
                  fds=array.array('i',[os.open('/dev/null',os.O_RDONLY)])\n\
                  c.sendmsg([b'ok\\n'],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,fds)])\n\
                  c.recv(1)\n",
             )
             .arg(&sock)
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let end = std::time::Instant::now() + Duration::from_secs(5);
-        while !sock.exists() && std::time::Instant::now() < end {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        listening(&mut child);
         let open = || std::fs::read_dir("/proc/self/fd").unwrap().count();
         let before = open();
         let res = call(&sock, "{}", &me(), Duration::from_secs(5));
