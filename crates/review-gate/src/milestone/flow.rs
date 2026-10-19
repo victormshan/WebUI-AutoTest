@@ -3652,7 +3652,7 @@ mod tests {
             for state in [&missing, &crashed, &behind] {
                 let before = digest(&fx.root);
                 for op in &all {
-                    let v = preview(op, &cfg, state).unwrap();
+                    let v = preview(op, &cfg, state, Some(&key)).unwrap();
                     assert_eq!(v["dry_run"], true);
                 }
                 let st = offline_status(state, "repo", &key, "p");
@@ -3689,10 +3689,47 @@ mod tests {
                 assert_ne!(before, digest(&copy), "{name}: the normal status writes");
             }
             // The preview shows what helps decide: the base resolved read-only, the application.
-            let v = preview(&all[1], &cfg, &crashed).unwrap();
+            let v = preview(&all[1], &cfg, &crashed, Some(&key)).unwrap();
             assert_eq!(v["would"]["resolved"], fx.head.as_str());
-            let v = preview(&all[0], &cfg, &crashed).unwrap();
+            let v = preview(&all[0], &cfg, &crashed, Some(&key)).unwrap();
             assert_eq!(v["would"]["application"]["supersedes"], "p");
+        }
+
+        /// The rebaseline dry run shows the registered task book at the target commit (Codex
+        /// 6c impl review n5 #2), and still writes nothing.
+        #[test]
+        fn a_rebaseline_preview_shows_the_task_book_at_the_target_commit() {
+            let fx = Fx::new();
+            let f = fx.admin();
+            fx.register(&f);
+            write(&fx.repo, "plans/book.md", "# a new version of the book\n");
+            let newer = commit(&fx.repo, "new book", false);
+            let state = as_state(&fx, "s");
+            let cfg = config(&fx);
+            let key = kp().verifying_key();
+            let before = digest(&fx.root);
+            let show = |base: &str, key: Option<&VerifyingKey>| {
+                let op = AdminOp::Rebaseline {
+                    phase: "p".into(),
+                    base: base.into(),
+                    reason: "r".into(),
+                };
+                preview(&op, &cfg, &state, key).unwrap()["would"]["task_book"].clone()
+            };
+            let old = show(&fx.base, Some(&key));
+            let new = show(&newer, Some(&key));
+            assert_eq!(old["path"], "plans/book.md");
+            assert_eq!(old["sha256"], sha256_hex(BOOK.as_bytes()), "{old}");
+            assert_eq!(
+                new["sha256"],
+                sha256_hex(b"# a new version of the book\n"),
+                "{new}"
+            );
+            assert_eq!(new["commit"], newer.as_str());
+            // Without the pinned key, or for an unknown commit: said so, nothing guessed.
+            assert!(show(&newer, None)["not_resolved"].is_string());
+            assert!(show("no-such-rev", Some(&key))["not_resolved"].is_string());
+            assert_eq!(before, digest(&fx.root), "nothing written");
         }
 
         #[test]

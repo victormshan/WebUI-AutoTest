@@ -140,3 +140,62 @@ exit Some(3) after 5.015161112s from the halt trigger
 test a_halt_with_a_stuck_call_a_silent_runner_and_a_blocked_stderr_exits_3_at_the_deadline ... ok
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.15s
 $ cargo test -p review-gate --lib milestone: 10 of 10 runs passed
+
+
+=== Commit version 3 (gate task m2-step6c-service, base 2795c23) ===
+Answers Codex's implementation review of e3dfe27 + 2795c23 (m2-step6c-impl-review-20261019 n5,
+REWORK, two r2 promises not kept):
+- #1 read_token now checks the owner as well as the mode, both on the same opened file and before
+  reading anything. The only trusted owner is the user the process runs as (reviewgate in
+  production; root and anyone else are refused). Test: another owner is refused and the error
+  does not contain the token.
+- #2 the rebaseline dry run shows the task book it would accept: the path registered for the
+  phase, read from the log with the write-free reader and the pinned key (`admin milestone
+  --pubkey`), hashed at the resolved target commit with read-only git. Without --pubkey, or when
+  something cannot be resolved, the preview says so. Test: two commits with different task
+  books; the preview follows the target commit; the file set and contents stay unchanged.
+- CLI: --pubkey moved to `admin milestone` (used by status and by the rebaseline preview).
+$ cargo fmt -p review-gate --check
+clean
+$ cargo clippy -p review-gate --all-targets  -- -D warnings
+warnings+errors: 0
+$ cargo clippy -p review-gate --all-targets --features fault-injection -- -D warnings
+warnings+errors: 0
+$ cargo test -p review-gate (5 runs)
+run 1:
+test result: ok. 201 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 22.13s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test result: ok. 201 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 21.38s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test result: ok. 201 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 20.43s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 4:
+test result: ok. 201 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 20.83s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 5:
+test result: ok. 201 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 21.33s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo test -p review-gate --features fault-injection --test halt_exit -- --nocapture
+exit Some(3) after 10.108817ms from the halt trigger
+test a_halt_with_nothing_in_flight_exits_3_at_once ... ok
+exit Some(3) after 5.012132575s from the halt trigger
+test a_halt_with_a_stuck_call_a_silent_runner_and_a_blocked_stderr_exits_3_at_the_deadline ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.16s
+$ cargo test -p review-gate --lib milestone: 10 of 10 runs passed

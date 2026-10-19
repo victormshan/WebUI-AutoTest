@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use super::derive::derive;
 use super::flow::{Application, Flow, FlowError, PublishOutcome};
 use super::ledger::read_only;
-use super::record::Record;
+use super::record::{Record, sha256_hex};
 use super::serve::MilestoneConfig;
 use super::sources::Vendors;
 use crate::client::Client;
@@ -105,6 +105,53 @@ fn resolve_commit(repo: &Path, rev: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Read-only git: the content of `path` at `commit`, or nothing.
+fn blob_at(repo: &Path, commit: &str, path: &str) -> Option<Vec<u8>> {
+    let out = Command::new("git")
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(repo)
+        .args(["cat-file", "blob"])
+        .arg(format!("{commit}:{path}"))
+        .output()
+        .ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+/// The task book a rebaseline would accept: the path registered for `phase` (from the log,
+/// read write-free and verified with the pinned key) and its sha256 at `commit`. Whatever cannot
+/// be resolved is said so, never guessed.
+fn task_book_at(
+    cfg: &MilestoneConfig,
+    state: &Path,
+    pubkey: Option<&VerifyingKey>,
+    phase: &str,
+    commit: Option<&str>,
+) -> Value {
+    let Some(key) = pubkey else {
+        return json!({ "not_resolved": "no --pubkey given: the registered task book is not read" });
+    };
+    let ro = match read_only(&state.join("milestones"), &cfg.repo_id, key) {
+        Ok(ro) => ro,
+        Err(e) => return json!({ "not_resolved": format!("the log could not be read: {e:#}") }),
+    };
+    let Some(path) = ro
+        .records
+        .iter()
+        .find(|r| r.phase == phase && r.kind == "phase_registered")
+        .and_then(|r| r.body.get("task_book").and_then(Value::as_str))
+    else {
+        return json!({ "not_resolved": format!("phase {phase} is not registered in the log") });
+    };
+    let Some(commit) = commit else {
+        return json!({ "path": path, "not_resolved": "the base commit is not resolved" });
+    };
+    match blob_at(&cfg.repo, commit, path) {
+        Some(b) => json!({ "path": path, "commit": commit, "sha256": sha256_hex(&b) }),
+        None => json!({ "path": path, "not_resolved": format!("{path} is not in {commit}") }),
+    }
+}
+
 fn read_vendors(file: &Path) -> Result<Vendors> {
     let text =
         std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
@@ -112,7 +159,12 @@ fn read_vendors(file: &Path) -> Result<Vendors> {
 }
 
 /// What a write would do, shown without writing (no key, no ledger, nothing created).
-pub fn preview(op: &AdminOp, cfg: &MilestoneConfig, state: &Path) -> Result<Value> {
+pub fn preview(
+    op: &AdminOp,
+    cfg: &MilestoneConfig,
+    state: &Path,
+    pubkey: Option<&VerifyingKey>,
+) -> Result<Value> {
     let note = "dry run: nothing written. Run again with --yes to write; the real seq/hash are shown after writing.";
     let v = match op {
         AdminOp::Confirm { phase } => {
@@ -130,9 +182,13 @@ pub fn preview(op: &AdminOp, cfg: &MilestoneConfig, state: &Path) -> Result<Valu
             phase,
             base,
             reason,
-        } => json!({ "command": "rebaseline", "phase": phase, "base": base,
-                    "resolved": resolve_commit(&cfg.repo, base).unwrap_or_else(|| "not resolved".into()),
-                    "reason": reason }),
+        } => {
+            let resolved = resolve_commit(&cfg.repo, base);
+            let book = task_book_at(cfg, state, pubkey, phase, resolved.as_deref());
+            json!({ "command": "rebaseline", "phase": phase, "base": base,
+                    "resolved": resolved.unwrap_or_else(|| "not resolved".into()),
+                    "task_book": book, "reason": reason })
+        }
         AdminOp::Waive {
             phase,
             condition,

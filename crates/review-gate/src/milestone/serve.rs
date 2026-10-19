@@ -96,11 +96,24 @@ impl MilestoneConfig {
     }
 }
 
-/// Reads a token from one opened file: its mode is checked on that same file (no group or
-/// other access), then its content. Errors never contain the content.
+/// Reads a token from one opened file: its owner and mode are checked on that same file, then
+/// its content is read. The only trusted owner is the user this process runs as (the
+/// `reviewgate` user in production; not root, not anyone else). Errors never contain the content.
 pub fn read_token(path: &Path) -> Result<String> {
+    read_token_owned_by(path, unsafe { libc::geteuid() })
+}
+
+fn read_token_owned_by(path: &Path, owner: u32) -> Result<String> {
     let mut f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mode = f.metadata()?.mode();
+    let meta = f.metadata()?;
+    if meta.uid() != owner {
+        bail!(
+            "{} is owned by uid {}, not by this service's user (uid {owner}): refusing it",
+            path.display(),
+            meta.uid()
+        );
+    }
+    let mode = meta.mode();
     if mode & 0o077 != 0 {
         bail!(
             "{} is readable by group or others (mode {:o}): refusing it",
@@ -227,6 +240,10 @@ mod tests {
         assert!(e.contains("group or others") && !e.contains(secret), "{e}");
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(read_token(&p).unwrap(), secret);
+        // Another owner: refused before anything is read, whatever the mode.
+        let me = unsafe { libc::geteuid() };
+        let e = read_token_owned_by(&p, me + 1).unwrap_err().to_string();
+        assert!(e.contains("is owned by uid") && !e.contains(secret), "{e}");
         std::fs::write(&p, "short").unwrap();
         let e = read_token(&p).unwrap_err().to_string();
         assert!(e.contains("too short") && !e.contains("short\""), "{e}");

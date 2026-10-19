@@ -243,12 +243,7 @@ enum MilestoneCmd {
 #[derive(Subcommand)]
 enum AdminMilestoneCmd {
     /// Offline diagnostic: reads the log without writing; never a basis for release
-    Status {
-        phase: String,
-        /// The gate's public key to verify the log with (base64, or a file)
-        #[arg(long)]
-        pubkey: String,
-    },
+    Status { phase: String },
     #[command(flatten)]
     Op(review_gate::milestone::cli::AdminOp),
 }
@@ -265,6 +260,10 @@ enum AdminCmd {
         /// Execute the write (without it, only show what would be written)
         #[arg(long)]
         yes: bool,
+        /// The gate's pinned public key (base64, or a file): needed by `status`, and by a
+        /// `rebaseline` dry run to show the task book it would accept
+        #[arg(long)]
+        pubkey: Option<String>,
         #[command(subcommand)]
         cmd: AdminMilestoneCmd,
     },
@@ -564,9 +563,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     state,
                     config,
                     yes,
+                    pubkey,
                     cmd,
                 },
-        } => admin_milestone(state, config, yes, cmd).await,
+        } => admin_milestone(state, config, yes, pubkey, cmd).await,
         Cmd::Milestone { cmd } => milestone(cmd).await,
         Cmd::Ask {
             provider,
@@ -580,19 +580,21 @@ async fn admin_milestone(
     state: PathBuf,
     config: PathBuf,
     yes: bool,
+    pubkey: Option<String>,
     cmd: AdminMilestoneCmd,
 ) -> Result<ExitCode> {
     let mc = MilestoneConfig::load(&config)?;
+    let key = pubkey.as_deref().map(load_pubkey).transpose()?;
     let op = match cmd {
-        AdminMilestoneCmd::Status { phase, pubkey } => {
-            let key = load_pubkey(&pubkey)?;
+        AdminMilestoneCmd::Status { phase } => {
+            let key = key.context("status needs --pubkey (the gate's pinned public key)")?;
             print(&ms_cli::offline_status(&state, &mc.repo_id, &key, &phase)?);
             return Ok(ExitCode::SUCCESS);
         }
         AdminMilestoneCmd::Op(op) => op,
     };
     if !yes {
-        print(&ms_cli::preview(&op, &mc, &state)?);
+        print(&ms_cli::preview(&op, &mc, &state, key.as_ref())?);
         return Ok(ExitCode::SUCCESS);
     }
     anyhow::ensure!(

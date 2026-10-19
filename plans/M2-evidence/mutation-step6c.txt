@@ -38,3 +38,10 @@ Rerun of C2 and C8 (first-run survivors) and C7:
 === Commit version 2 ===
 D1 latch set only after the admission lock (old order) => KILLED ['test milestone::flow::tests::the_latch_is_visible_at_once_while_halt_waits_for_a_send ... FAILED']
 D2 no admission barrier in halt() => KILLED ['test milestone::flow::tests::a_halt_during_the_request_commit_waits_and_the_job_is_not_sent ... FAILED', 'test milestone::flow::tests::a_halt_while_the_line_is_written_waits_for_the_send ... FAILED', 'test milestone::flow::tests::the_latch_is_visible_at_once_while_halt_waits_for_a_send ... FAILED']
+
+
+=== Commit version 3 ===
+E1 token owner not checked => KILLED ['test milestone::serve::tests::a_token_file_open_to_others_or_short_is_refused_without_showing_it ... FAILED']
+E2 preview hashes the book at HEAD, not the target => KILLED ['test milestone::flow::tests::admin_cli::a_rebaseline_preview_shows_the_task_book_at_the_target_commit ... FAILED']
+E3 without --pubkey the preview reads the log anyway (with some other key) => KILLED ['test milestone::flow::tests::admin_cli::a_rebaseline_preview_shows_the_task_book_at_the_target_commit ... FAILED']
+(A first E3 had a borrow of a temporary and did not compile; it is not counted. The rewritten E3 above compiles and is killed.)
