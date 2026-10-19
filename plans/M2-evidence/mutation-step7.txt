@@ -35,3 +35,24 @@ H6 (F9 alone) the divergence check is skipped => KILLED ['f9_a_forked_remote_rec
 H5 (F7 alone) the truncation check is skipped (the arm does nothing) => KILLED ['f7_a_truncated_remote_stops_release_and_a_restored_one_releases']
 (A first H5, `None if false =>`, left None unmatched and did not compile; not counted.)
 opencode reported its own run of H1-H4 (as M1-M4), all killed; the rerun above confirms them and adds H5 and H6, which remove only the truncation or only the divergence check.
+
+
+=== Version 4: all 18 mutants rerun with raw evidence (m2-tools/mut7-raw.py) ===
+A25 the sweep result is ignored => KILLED | AR_FEAT: KILLED exit=101 7.1s ['under_systemd_a_sweep_that_cannot_read_its_cgroup_stops_the_runner']
+S1 an unreadable member list is taken as empty => KILLED | AR_LIB: KILLED exit=101 1.2s ['a_member_list_that_cannot_be_read_is_not_confirmed']; AR_FEAT: KILLED exit=101 7.3s ['under_systemd_a_sweep_that_cannot_read_its_cgroup_stops_the_runner']
+S2 the limit is never applied => KILLED | AR_LIB: KILLED exit=101 3.0s ['members_that_outlive_the_limit_are_not_confirmed_in_bounded_time']
+S3 the sweeper kills itself too => KILLED | AR_LIB: KILLED exit=101 31.2s ['a_member_that_is_killed_and_reaped_is_gone', 'members_that_outlive_the_limit_are_not_confirmed_in_bounded_time']
+G1 (F1) an unparsable answer is read as APPROVE => KILLED | F16: KILLED exit=101 18.8s ['f1_an_unparsable_answer_is_a_failed_job_without_effect_and_release_comes_back']
+G2 (F2) a late result takes effect => KILLED | F16: KILLED exit=101 25.0s ['f2_a_result_after_cancel_is_late_and_without_effect', 'f2_a_result_after_rebaseline_is_late_and_without_effect', 'f2_a_result_after_supersession_is_late_and_without_effect']
+G3 (F3) the reply is not bound to the request id => KILLED | F16: KILLED exit=101 72.8s ['f3_a_replayed_earlier_reply_is_refused_and_does_not_restore_the_release']
+G3b (F3) neither the id nor the sealed input is checked => KILLED | F16: KILLED exit=101 22.3s ['f3_a_replayed_earlier_reply_is_refused_and_does_not_restore_the_release']
+G4 (F4) open blocking conditions do not hold release => KILLED | F16: KILLED exit=101 40.3s ['f4_an_approval_that_leaves_a_blocking_condition_unresolved_does_not_release']
+G5 (F5) release does not wait for the archive => KILLED | F16: KILLED exit=101 58.3s ['f5_a_result_not_yet_archived_releases_only_once_published_and_archived']
+G6 (F6) a longer remote is classified but not imported => KILLED | F16: KILLED exit=101 80.2s ['f6_a_stale_backup_does_not_release_once_the_remote_has_a_newer_request', 'f6_a_stale_backup_does_not_release_once_the_remote_has_a_revoke']
+H1 classify skips every stop (always Equal) => KILLED | F711: KILLED exit=101 41.6s ['f10_an_unreachable_remote_stops_release', 'f9_a_forked_remote_record_stops_release', 'f7_a_truncated_remote_stops_release_and_a_restored_one_releases', 'f11_a_tampered_signature_in_the_imported_tail_is_never_imported', 'f8_a_legitimately_longer
+H2 the remote is never verified (classify and import) => KILLED | F711: KILLED exit=101 101.7s ['f11_a_tampered_signature_in_the_imported_tail_is_never_imported']
+H3 a longer remote is a stop (false reject) => KILLED | F711: KILLED exit=101 26.8s ['f8_a_legitimately_longer_remote_is_imported_without_stop', 'f11_a_tampered_signature_in_the_imported_tail_is_never_imported']
+H4 an unreachable remote is read as empty => KILLED | F711: KILLED exit=101 39.2s ['f10_an_unreachable_remote_stops_release']
+H5 the truncation check is skipped => KILLED | F711: KILLED exit=101 64.0s ['f7_a_truncated_remote_stops_release_and_a_restored_one_releases']
+H6 the divergence check is skipped => KILLED | F711: KILLED exit=101 9.5s ['f9_a_forked_remote_record_stops_release']
+S2 is now killed by its in-test bound (an assertion), not a timeout. Raw files: reviews/m2s7/mutation-raw (SHA256SUMS sha256 d4ab31ca...).

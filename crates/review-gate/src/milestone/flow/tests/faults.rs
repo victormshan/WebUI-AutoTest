@@ -355,6 +355,21 @@ fn backup(fx: &Fx, f: Arc<Flow>, name: &str) -> PathBuf {
     to
 }
 
+/// The service on `fx`'s state again, right after the previous one was dropped. flock follows
+/// the open file: a process a parallel test forks at that moment holds a copy of the descriptor
+/// until it execs, so the lock can take a moment to be free (as in
+/// `a_real_write_failure_stops_a_request_prepared_meanwhile`). In production the old service has
+/// exited first.
+fn reopen(fx: &Fx) -> Arc<Flow> {
+    for _ in 0..50 {
+        if let Ok(f) = Flow::open_service(fx.cfg(), kp(), fx.reader()) {
+            return f;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("the next service did not start once the old one was gone");
+}
+
 /// F6: the local state is an older backup holding an approval, while the remote has moved on.
 /// `revoke`: the user revoked the phase on the live gate. Otherwise: a new request is pending.
 fn stale_backup(revoke: bool) {
@@ -367,7 +382,7 @@ fn stale_backup(revoke: bool) {
     assert!(f.status_archived("p").unwrap().released);
     let old = backup(&fx, f, "backup");
     // The live gate moves on and publishes.
-    let live = fx.service();
+    let live = reopen(&fx);
     let release = if revoke {
         live.revoke("p", "the user revoked it").unwrap();
         None
@@ -418,8 +433,26 @@ fn stale_backup(revoke: bool) {
         assert_eq!(cur.state, RequestState::Pending, "still pending");
     }
     if let Some(tx) = release {
-        let _ = tx.send(());
+        // Let the live gate's held job finish and land before the test's directory goes away
+        // (Codex 7 review n4): its result is a normal, recorded completion.
+        tx.send(()).unwrap();
+        let id = live_request(&live);
+        wait_audit(&live, &id);
+        jobs_finished(&live);
     }
+}
+
+/// The live gate's newest request id.
+fn live_request(f: &Flow) -> String {
+    f.ledger()
+        .load()
+        .unwrap()
+        .records
+        .iter()
+        .rev()
+        .find(|r| r.kind == "request")
+        .map(|r| r.body["request_id"].as_str().unwrap().to_string())
+        .unwrap()
 }
 
 fn first_seq(records: &[Record], id: &str) -> u64 {

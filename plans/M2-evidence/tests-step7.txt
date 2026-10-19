@@ -200,3 +200,66 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.27s
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+=== Version 4 (base 9f11fb1): answers Codex 7 review n4 ===
+- F6 (pending case): the test now releases the live gate's held job only after its Pending
+  assertions, then waits for that job's audit and for the job thread to end before the test's
+  temporary directory goes away (it used to return right after sending the release).
+- S2: the deadline test bounds the sweep inside the test (tokio timeout 2 s), so a sweep that
+  ignores its limit fails an assertion instead of hanging into a harness timeout.
+- Raw mutation evidence: all 18 step-7 mutants rerun with m2-tools/mut7-raw.py, which keeps per
+  mutant the exact patch, the command, full stdout and stderr, the exit code and the duration;
+  copied to E:\rust-agent-browser\reviews\m2s7\mutation-raw\ with the scripts (SHA256SUMS there).
+- Incident, reported as it happened: stopping the first raw run with pkill killed the script while
+  mutant S1 was applied, and its restore did not run; S1 stayed in crates/audit-runner/src/lib.rs.
+  The next run's anchor check refused to apply S1 twice and so exposed it. It was restored by hand
+  and the whole diff against HEAD checked line by line. Nothing was committed or reviewed with it.
+  The A25 result of that run (taken with S1 underneath) is void. The script now restores on
+  SIGTERM/SIGINT and checks after every mutant that the tree equals its baseline diff; the final
+  run's tree hash equals the baseline (0c8e2deb...).
+$ cargo fmt --check (review-gate, audit-runner)
+clean
+$ cargo clippy -p review-gate --all-targets  -- -D warnings
+warnings+errors: 0
+$ cargo clippy -p review-gate --all-targets --features fault-injection -- -D warnings
+warnings+errors: 0
+$ cargo clippy -p audit-runner --all-targets  -- -D warnings
+warnings+errors: 0
+$ cargo clippy -p audit-runner --all-targets --features fault-injection -- -D warnings
+warnings+errors: 0
+$ cargo test -p review-gate --lib milestone::flow::tests::faults (3 runs)
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 27.22s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 15.94s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 13.42s
+$ cargo test -p review-gate (3 runs)
+test result: ok. 215 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 35.77s
+test milestone::flow::tests::faults::f6_a_stale_backup_does_not_release_once_the_remote_has_a_newer_request ... FAILED
+test result: FAILED. 214 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out; finished in 30.76s
+test result: ok. 215 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 33.03s
+$ cargo test -p audit-runner 
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.26s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo test -p audit-runner --features fault-injection
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.79s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo test -p review-gate --lib milestone: 10 of 10 runs passed
+
+Version 4 stability (after the checks above showed one failure):
+- In 3 full runs, f6_..._newer_request failed once (it passed in the 3 targeted runs and 10/10
+  milestone runs). Its message was not kept by the evidence script (which kept summary lines only).
+- Likely cause, not proven: F6 opened a new service on the same state right after dropping the old
+  one (`fx.service()` without a retry). flock follows the open file, and a process a parallel test
+  forks at that moment holds a copy of owner.lock's descriptor until it execs; the 6b test
+  a_real_write_failure_stops_a_request_prepared_meanwhile met the same race and retries. F6 now
+  does the same (`reopen`, 50 × 20 ms).
+- With the retry: 12 full runs (11 ok, 1 failed: the run's output contained "FAILED" but no
+  "panicked" line, and was not saved, so which test failed is unknown); then 15 full runs and 30 full
+  runs, each keeping the whole output of any run not cleanly ok: 45 of 45 clean.
+- So: 56 of 57 full lib runs clean since the retry; one failure remains unexplained.

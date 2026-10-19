@@ -1015,7 +1015,14 @@ not json"#;
                 killed: Mutex::new(vec![]),
             };
             let started = std::time::Instant::now();
-            let out = sweep_cgroup(&ops, me, Duration::from_millis(200)).await;
+            // Bounded inside the test: a sweep that ignores its limit fails here, by assertion,
+            // not by a harness timeout (Codex 7 review n4).
+            let out = tokio::time::timeout(
+                Duration::from_secs(2),
+                sweep_cgroup(&ops, me, Duration::from_millis(200)),
+            )
+            .await
+            .expect("the sweep ends at its limit");
             let took = started.elapsed();
             match out {
                 Cleanup::NotConfirmed(why) => assert!(why.contains("still in"), "{why}"),
