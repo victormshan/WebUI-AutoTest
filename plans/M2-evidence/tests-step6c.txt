@@ -84,3 +84,59 @@ Notes:
 - The halt subprocess tests take their timings from the halt trigger; readiness (the runner has
   read the whole line, the stalled status call has entered) is confirmed by signals before the
   trigger.
+
+
+=== Commit version 2 (gate task m2-step6c-service, base e3dfe27) ===
+Follow-up to DSH's non-blocking review points on e3dfe27:
+- ① halt() now sets the latch (and notifies) first, then takes the admission lock only as a
+  barrier. halted() and the routes see the halt at once, and the watchdog's 5 s start from the
+  latch, even while a send holds the lock. The 6b guarantee holds: once halt() returns, no job
+  line is written. New test: the_latch_is_visible_at_once_while_halt_waits_for_a_send.
+- ③ tests/halt_exit.rs: the child is wrapped in a guard that kills and reaps it on drop.
+- ②④⑤ documented in plans/M2-design.md §6 ("6c 实现说明"): startup failures exit 2, not 3;
+  a bad phase or id is 400 before the 503 gate; GET status may write; admin status always exits
+  0 and never releases.
+$ cargo fmt -p review-gate --check
+clean
+$ cargo clippy -p review-gate --all-targets  -- -D warnings
+warnings+errors: 0
+$ cargo clippy -p review-gate --all-targets --features fault-injection -- -D warnings
+warnings+errors: 0
+$ cargo test -p review-gate (5 runs)
+run 1:
+test result: ok. 200 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 20.32s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 2:
+test result: ok. 200 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 17.97s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 3:
+test result: ok. 200 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 17.96s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 4:
+test result: ok. 200 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 18.43s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+run 5:
+test result: ok. 200 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 17.89s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ cargo test -p review-gate --features fault-injection --test halt_exit -- --nocapture
+exit Some(3) after 20.21306ms from the halt trigger
+test a_halt_with_nothing_in_flight_exits_3_at_once ... ok
+exit Some(3) after 5.015161112s from the halt trigger
+test a_halt_with_a_stuck_call_a_silent_runner_and_a_blocked_stderr_exits_3_at_the_deadline ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.15s
+$ cargo test -p review-gate --lib milestone: 10 of 10 runs passed

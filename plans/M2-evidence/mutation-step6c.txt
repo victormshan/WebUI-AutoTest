@@ -33,3 +33,8 @@ Rerun of C2 and C8 (first-run survivors) and C7:
   waiter is inside the Condvar wait, and only the notification can wake the waiter. Without
   notify_all the test hangs (killed by the 300 s timeout).
 - C7 (wait without the predicate) hangs, as before.
+
+
+=== Commit version 2 ===
+D1 latch set only after the admission lock (old order) => KILLED ['test milestone::flow::tests::the_latch_is_visible_at_once_while_halt_waits_for_a_send ... FAILED']
+D2 no admission barrier in halt() => KILLED ['test milestone::flow::tests::a_halt_during_the_request_commit_waits_and_the_job_is_not_sent ... FAILED', 'test milestone::flow::tests::a_halt_while_the_line_is_written_waits_for_the_send ... FAILED', 'test milestone::flow::tests::the_latch_is_visible_at_once_while_halt_waits_for_a_send ... FAILED']

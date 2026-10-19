@@ -715,13 +715,19 @@ impl Flow {
             .clone()
     }
 
+    /// Sets the latch at once (status, routes and the watchdog see it immediately, DSH's 6c
+    /// review ①), then waits on the admission lock as a barrier: a send in progress under it
+    /// finishes, and once halt() returns no job line is written any more (every send rechecks
+    /// the latch under that lock).
     pub(crate) fn halt(&self, why: String) {
-        let _admit = self.admit.lock().unwrap_or_else(|p| p.into_inner());
-        let mut h = self.halted.lock().unwrap_or_else(|p| p.into_inner());
-        if h.is_none() {
-            *h = Some(why);
+        {
+            let mut h = self.halted.lock().unwrap_or_else(|p| p.into_inner());
+            if h.is_none() {
+                *h = Some(why);
+            }
+            self.halted_cv.notify_all();
         }
-        self.halted_cv.notify_all();
+        drop(self.admit.lock().unwrap_or_else(|p| p.into_inner()));
     }
 
     /// Blocks until the service halts and returns why (the predicate is checked under the
@@ -3762,5 +3768,40 @@ mod tests {
             st.reasons
         );
         assert!(!st.released);
+    }
+
+    /// A send holding the admission lock delays halt()'s return, never the latch (DSH ①).
+    #[test]
+    fn the_latch_is_visible_at_once_while_halt_waits_for_a_send() {
+        let fx = Fx::new();
+        let me: Arc<std::sync::OnceLock<std::sync::Weak<Flow>>> = Arc::default();
+        let halter = Arc::new(Halter::default());
+        let s = Flow::open_service(fx.cfg(), kp(), fx.reader()).unwrap();
+        fx.register(&s);
+        me.set(Arc::downgrade(&s)).unwrap();
+        let seen = Arc::new(Flag::default());
+        let (h2, m2, seen2) = (halter.clone(), me.clone(), seen.clone());
+        let inner = Halter::hook(halter.clone(), me, true).unwrap();
+        s.hooks.lock().unwrap().while_sending = Some(Arc::new(move || {
+            // Start the halt (it must stay blocked: this thread holds the admission lock)...
+            inner();
+            // ...yet the latch is already set, and the watchdog would be woken.
+            let f = m2.get().and_then(std::sync::Weak::upgrade).unwrap();
+            assert!(f.halted().is_some(), "latch set before halt() returns");
+            assert!(
+                !h2.done.wait(Duration::from_millis(50)),
+                "halt() still waiting"
+            );
+            seen2.set();
+        }));
+        s.request("p", &fx.head).unwrap();
+        assert!(seen.wait(Duration::from_secs(10)), "the hook ran");
+        halter.join();
+        jobs_finished(&s);
+        assert_eq!(
+            fx.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the send in progress completed"
+        );
     }
 }

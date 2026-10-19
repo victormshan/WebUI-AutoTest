@@ -74,8 +74,34 @@ fn setup() -> Env {
     }
 }
 
-fn spawn(e: &Env, fault: &str) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_review-gate"))
+/// The service child: killed and reaped when dropped, so a failing assertion leaves nothing
+/// running (DSH's 6c review ③).
+struct Service(Child);
+
+impl std::ops::Deref for Service {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Service {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        if let Ok(None) = self.0.try_wait() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+fn spawn(e: &Env, fault: &str) -> Service {
+    let child = Command::new(env!("CARGO_BIN_EXE_review-gate"))
         .arg("serve")
         .arg("--state")
         .arg(e.root.join("state"))
@@ -90,7 +116,8 @@ fn spawn(e: &Env, fault: &str) -> Child {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .unwrap()
+        .unwrap();
+    Service(child)
 }
 
 /// Waits until the child answers /health.

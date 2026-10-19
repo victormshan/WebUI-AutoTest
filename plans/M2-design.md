@@ -312,6 +312,12 @@ gate 核对：
   - `milestone confirm`、`rebaseline`、`waive`、`drop-source`、`link-task`、`ignore-task`、`revoke`、`resume`；
   - `vendors set`。
 - **客户端 CLI**：`review-gate milestone register|request|status|cancel|publish`。
+- **6c 实现说明（2026-10-19；依据 Codex 对 6c 方案的核验 n4/n6，以及 DSH 6c 代审的非阻断意见）**：
+  - 配置：`serve --milestones <json>`，任何一项无效都拒绝启动；没有这个参数时，里程碑路由一律 404。
+  - 停机：halt 先置位 latch（路由立即返回 503，watchdog 被唤醒），再等准入锁上正在写的那一行写完。5 秒截止从 latch 置位起算，到点以 3 退出；main 若先结束，也以 3 退出。启动期失败（配置、令牌、恢复）不算停机，按普通错误退出（码 2）。
+  - 路由的检查顺序：先鉴权（401），再校验路径参数（非法 phase/id → 400，即使服务已停机），然后是 404/503 门，最后才执行业务调用。
+  - GET status 可能写入（恢复、导入、归档）。`admin milestone status` 是离线诊断：不写任何东西，`released` 恒为 false，诊断成功时退出码恒为 0，不能用退出码判断是否放行。
+  - admin 写命令必须带 `--yes` 才执行。`--yes` 只是工具的执行开关，waive、resume 等决定由用户本人作出。
 
 ## 7. 测试与验收
 - **单元测试**：
