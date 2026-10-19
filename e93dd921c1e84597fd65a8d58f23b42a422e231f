@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-step6b-request-flow
+version: 3/3
+commit: e93dd921c1e84597fd65a8d58f23b42a422e231f
+tree: 77f380571f93364729c4b87019508180d35e03fd
+parent: 83bb705bf768a4d32030fb701845c8b53a161e72
+review: v3-1
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-19T04:29:13Z
+signature: IvKkiiPf0xgQ2O3/nsgqMQXUKtsff7BRkLGOdNtpxAnDSAoMMHbPnPoQc3n1/ZQrVPDQ8Hx8L8quE/KljBYdCA==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
