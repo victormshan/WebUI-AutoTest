@@ -3870,4 +3870,6 @@ mod tests {
     mod faults;
     /// F7–F11: remote faults (written by opencode, reviewed by Claude).
     mod faults_remote;
+    /// E3: reverse authentication of the runner through the whole flow (M2 step 8).
+    mod reverse_auth;
 }

@@ -1,0 +1,44 @@
+M2 step 8 evidence. Part 1: E3, reverse authentication of the runner through the whole flow (Rust tests). Base 335db3d.
+Plan: bridge task m2-step8-plan-20261020 (n1, r2 n4), approved with conditions by Codex (n5, condition 4 for E3).
+File crates/review-gate/src/milestone/flow/tests/reverse_auth.rs; a test-only hook
+runner::BEFORE_LIVENESS (cfg(test), keyed by the sender's pid so parallel tests never meet), run
+after the uid check and before the sender's liveness check. The runner stand-in is a separate
+python process (its own pid and credentials) that reads the request and sends a complete,
+well-formed reply; mode "linger" keeps it alive until the gate closes the connection (after
+authentication), mode "exit" ends it right after the reply.
+- (a) expected uid = mine + 1: "the reply came from uid 1000, not the runner's 1001";
+- (b) uid mine, expected cgroup /system.slice/audit-runner.service: "the reply came from cgroup
+  /non-systemd, not the runner's /system.slice/audit-runner.service";
+- (c) uid and cgroup the sender's own; the gate's liveness check waits (barrier) until the test
+  has reaped the sender: "sender pid … is no longer running: not authenticated";
+- (d) positive control, the same stand-in with the right identity, alive: authenticated, the
+  audit takes effect (state Completed), the job records sender {pid, uid, cgroup}. So (a)-(c) fail
+  at authentication, not at an earlier check.
+Each refused case: the job records the error, the request ends Failed, nothing is resolved, and
+the phase is not released after publish and archive.
+In this WSL environment the test's cgroup reads "/non-systemd"; the deployment check of the real
+runner's cgroup is E4's.
+$ cargo fmt -p review-gate --check
+clean
+$ cargo clippy -p review-gate --all-targets  -- -D warnings
+warnings+errors: 0
+$ cargo clippy -p review-gate --all-targets --features fault-injection -- -D warnings
+warnings+errors: 0
+$ cargo test -p review-gate --lib milestone::flow::tests::reverse_auth -- --nocapture (3 runs)
+E3 sender pid 56474 uid 1000 cgroup /non-systemd: the reply came from uid 1000, not the runner's 1001
+E3 sender pid 56470 uid 1000 cgroup /non-systemd: sender pid 56470 is no longer running: not authenticated: No such file or directory (os error 2)
+E3 sender pid 56468 uid 1000 cgroup /non-systemd: the reply came from cgroup /non-systemd, not the runner's /system.slice/audit-runner.service
+E3 control sender {"cgroup":"/non-systemd","pid":56472,"uid":1000}
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 217 filtered out; finished in 2.17s
+E3 sender pid 56956 uid 1000 cgroup /non-systemd: the reply came from uid 1000, not the runner's 1001
+E3 sender pid 56960 uid 1000 cgroup /non-systemd: the reply came from cgroup /non-systemd, not the runner's /system.slice/audit-runner.service
+E3 sender pid 56964 uid 1000 cgroup /non-systemd: sender pid 56964 is no longer running: not authenticated: No such file or directory (os error 2)
+E3 control sender {"cgroup":"/non-systemd","pid":56953,"uid":1000}
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 217 filtered out; finished in 3.61s
+E3 sender pid 57469 uid 1000 cgroup /non-systemd: the reply came from uid 1000, not the runner's 1001
+E3 sender pid 57460 uid 1000 cgroup /non-systemd: sender pid 57460 is no longer running: not authenticated: No such file or directory (os error 2)
+E3 sender pid 57459 uid 1000 cgroup /non-systemd: the reply came from cgroup /non-systemd, not the runner's /system.slice/audit-runner.service
+E3 control sender {"cgroup":"/non-systemd","pid":57446,"uid":1000}
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 217 filtered out; finished in 2.03s
+$ cargo test -p review-gate (5 runs, whole output kept if not clean)
+clean: 5 of 5

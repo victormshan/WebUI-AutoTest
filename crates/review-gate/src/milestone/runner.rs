@@ -128,6 +128,29 @@ fn recv_piece(s: &UnixStream, buf: &mut [u8]) -> Result<(usize, Option<libc::ucr
 }
 
 /// Reads one reply line; every piece must carry the same credentials.
+/// Tests: run once the whole reply is in and the uid checked, before the sender's liveness
+/// check, for a reply from this pid only (so tests running in parallel never meet). E3 uses it
+/// to make sure the sender has exited and been reaped by then.
+#[cfg(test)]
+pub(crate) type LivenessHook = (i32, std::sync::Arc<dyn Fn() + Send + std::marker::Sync>);
+
+#[cfg(test)]
+pub(crate) static BEFORE_LIVENESS: std::sync::Mutex<Vec<LivenessHook>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn before_liveness(pid: i32) {
+    let hook = BEFORE_LIVENESS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|(p, _)| *p == pid)
+        .map(|(_, h)| h.clone());
+    if let Some(h) = hook {
+        h();
+    }
+}
+
 pub fn receive(s: &UnixStream, expect: &Expected) -> Result<Reply> {
     let mut data = Vec::new();
     let mut who: Option<libc::ucred> = None;
@@ -168,6 +191,8 @@ pub fn receive(s: &UnixStream, expect: &Expected) -> Result<Reply> {
             expect.uid
         );
     }
+    #[cfg(test)]
+    before_liveness(w.pid);
     // The pid is checked once the whole reply is in: a sender that is gone by then (exited, or
     // its pid reused) is not taken on trust.
     let cgroup = cgroup_of(w.pid).with_context(|| {
