@@ -46,7 +46,9 @@ impl Client {
     pub fn from_env() -> Result<Self> {
         let url =
             std::env::var("AGENT_BRIDGE_URL").unwrap_or_else(|_| "http://127.0.0.1:7879".into());
-        if let Ok(t) = std::env::var("AGENT_BRIDGE_TOKEN") {
+        if let Ok(t) = std::env::var("AGENT_BRIDGE_TOKEN")
+            && !t.trim().is_empty()
+        {
             return Ok(Self::new(&url, &t));
         }
         let file = std::env::var("AGENT_BRIDGE_TOKEN_FILE").unwrap_or_else(|_| {

@@ -1,0 +1,89 @@
+M2 step 8, bridge integration (Codex option B, bridge task m2-step8-bridge-integration-20261020 n3).
+Base: m2-step1 @ 46e24996773d33eaf641f60e349bc81a8dcad852. Live bridge line: settle-conflict-20261018 @ 4e34e25e77165af3689b13a1b0835568d643988a; merge-base 3cc549109c700409b8069dbe920a96759cb47faa.
+
+All commits on the live line since the merge-base, and what was taken:
+- d47eb348f52de0800bac427cc50bd8f74ae09e1c docs: document OpenCode browser MCP integration handoff
+    not taken (no crates/agent-bridge change)
+- 90242174e7a7c3307f876dfd552e4d647f82388f feat(agent-bridge): add Codex and OpenCode collaboration workers
+    taken: its crates/agent-bridge/ diff ( 18 files changed, 2931 insertions(+), 20 deletions(-)); left out: CLAUDE.md plans/Agent-bridge-Codex-OpenCode-evidence.txt plans/Agent-bridge-Codex-OpenCode.md
+- 0a483c95549b01b0bd605ff26d64780f710888e3 docs(agent-bridge): record deployment and live participant checks
+    taken: its crates/agent-bridge/ diff ( 1 file changed, 1 insertion(+), 1 deletion(-)); left out: plans/Agent-bridge-Codex-OpenCode.md plans/Agent-bridge-deployment-20261017.md
+- 8d30c0b538443bda208eca9bbefeda18258c827b fix(agent-bridge): enable scoped local Codex task-tool approvals
+    taken: its crates/agent-bridge/ diff ( 7 files changed, 101 insertions(+), 6 deletions(-)); left out: plans/Agent-bridge-Codex-OpenCode.md plans/Agent-bridge-deployment-20261017.md plans/Agent-bridge-repair-20261017.md
+- 80c1fdab92bc42959c7539a5a667d95e11d7e063 docs(agent-bridge): record DSH session recovery and M2 pause
+    not taken (no crates/agent-bridge change)
+- 9701761fc33f4e407bc782bb409a2fd62b96d84d docs: archive multi-agent collaboration report and Claude recovery handoff
+    not taken (no crates/agent-bridge change)
+- d63703e78de3e900fca6aa141b8845e2eb92d0d9 docs: record participant handoff receipts and pending Claude notification
+    not taken (no crates/agent-bridge change)
+- 7e49a41eb69a9bb62579bd0756eda1a145297db7 feat(agent-bridge): let the user settle a conflicting pending item
+    taken: its crates/agent-bridge/ diff ( 4 files changed, 599 insertions(+), 21 deletions(-)); left out: nothing
+- 4e34e25e77165af3689b13a1b0835568d643988a fix(agent-bridge): address the settle review (idempotent retry, restated words, explicit form)
+    taken: its crates/agent-bridge/ diff ( 4 files changed, 289 insertions(+), 82 deletions(-)); left out: nothing
+d47eb34 is deliberately not taken (it must not reach any pushed ref).
+
+Method: for each taken commit, `git diff c^ c -- crates/agent-bridge | git apply --3way`, one commit
+each (author and date kept); no conflicts. Then one integration fix (below). The six commits were
+then squashed into this one so that every commit on m2-step1 carries a gate attestation; the
+per-commit mapping (intermediate ids) is in m2-tools/bridge-int-percommit.txt and listed here:
+  c66c793b83ccad10047e1663d4f61e4b22250373 agent-bridge: list /v1/identity in the observer route table (bridge integration)
+  e27f0503e17405ed6d72ae468fdde1ebb7f9b006 fix(agent-bridge): address the settle review (idempotent retry, restated words, explicit form)
+  afb16f6d73f1cfd7720bc8807cbd491d67745710 feat(agent-bridge): let the user settle a conflicting pending item
+  d9be482b1becc7667bf642d1ad36ecea3169d842 fix(agent-bridge): enable scoped local Codex task-tool approvals
+  c6c415a953c0dcfc3bb9effd08c913e583b7b01f docs(agent-bridge): record deployment and live participant checks
+  7ca837fcfc0693ba2ffa286d653d469129675df1 feat(agent-bridge): add Codex and OpenCode collaboration workers
+Checks:
+- each replayed commit's changed lines equal its original's (sha256 of the -/+ lines; for 4e34e25
+  the same lines with different diff alignment, equal as a multiset);
+- the result is exactly the live line plus the observer delta: the sorted changed lines of
+  3cc5491..46e2499 and of 4e34e25..<integration> -- crates/agent-bridge have the same sha256
+  (5732c6a95fd682d5…).
+Integration fix: route_list_matches_the_router_source failed after combining: GET /v1/identity
+(from the workers commit) was missing from the observer route table ROUTES. The observer gate is
+an allowlist and already refused an observer there; the route is now listed, so
+an_observer_token_does_nothing_else checks that refusal too. A mutant letting an observer through
+on /v1/identity is caught (that test fails: 401 instead of 403).
+
+Tests on the integrated tree:
+bridge integration candidate e27f0503e17405ed6d72ae468fdde1ebb7f9b006 (tree 43f867b64c430dc8481e878ba90493461d00f8cb)
+$ cargo fmt --check -p agent-bridge -p review-gate -p audit-runner
+clean
+$ cargo clippy -p agent-bridge --all-targets -- -D warnings
+(end clippy)
+$ cargo test -p agent-bridge
+     Running unittests src/lib.rs (target/debug/deps/agent_bridge-88ae72f3514c6861)
+test service::observe_tests::route_list_matches_the_router_source ... FAILED
+thread 'service::observe_tests::route_list_matches_the_router_source' (144932) panicked at crates/agent-bridge/src/service.rs:3514:9:
+test result: FAILED. 88 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.25s
+$ python3 crates/agent-bridge/clients/cli/test_bridge_agents.py
+
+----------------------------------------------------------------------
+Ran 69 tests in 21.589s
+
+OK
+$ cargo test -p review-gate -p audit-runner
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.47s
+test result: ok. 219 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 34.23s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+After the fix: cargo test -p agent-bridge: 89 unit + 1 + 3 (multi_agent) + 4 (serve_observers) passed.
+
+Isolated real-binary observer check (m2-tools/bridge-observer-e2e.sh; temporary HOME, its own port):
+binary sha256: a2dbd4d43247b6e588f6dbfdcdb5a9301f875e0a3a5adf91b8d3b6ca661ba3d0
+read-only observers ["review-gate"]
+ok   200 agent creates a task
+ok   200 observer lists tasks
+ok   the list names the task
+ok   200 observer reads one task
+ok   metadata only: no message body in the observer view
+ok   403 observer refused: GET /v1/tasks
+ok   403 observer refused: GET /v1/tasks/obs-e2e-1
+ok   403 observer refused: GET /v1/identity
+ok   403 observer refused: GET /v1/inbox
+ok   403 observer refused: GET /v1/health
+ok   403 observer refused: POST /v1/tasks/obs-e2e-1/messages
+ok   403 agent refused the observe route
+ok   401 no token on the observe route
+ok   401 wrong token on the observe route
+ALL OK

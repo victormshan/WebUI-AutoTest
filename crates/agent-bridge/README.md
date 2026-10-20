@@ -144,11 +144,18 @@ agent-bridge rewake           # Claude Code hook: exits 2 on a message that has 
 replay service pushes only to targets given with `--notify`.
 
 MCP (Claude Code): `{"mcpServers": {"agent-bridge": {"command": "agent-bridge", "args": ["mcp"]}}}` —
-tools `bridge_tasks`, `bridge_show`, `bridge_send`, `bridge_post`, `bridge_inbox`, `bridge_ack`,
+tools `bridge_identity`, `bridge_tasks`, `bridge_show`, `bridge_send`, `bridge_post`, `bridge_inbox`, `bridge_ack`,
 `bridge_pending`, `bridge_asked`, `bridge_decide`, `bridge_presence`, `bridge_health`.
 
 Node (DSH): `crates/agent-bridge/clients/node/bridge-client.mjs` (reference client: built-in fetch,
 4xx final, idempotent retries, explicit UTF-8).
+
+## Codex / OpenCode collaboration
+
+Native two-way clients, independent identities and optional inbox workers are documented in
+[clients/cli/README.md](clients/cli/README.md). Existing Claude/DSH clients and the reviewer below
+keep their roles. Use `codex-collab` for collaboration if the existing reviewer already consumes
+`codex`. `bridge_identity` checks identity and discovers peers.
 
 ## Codex reviewer
 
@@ -183,6 +190,7 @@ All routes except `/v1/health` need `Authorization: Bearer <token>`.
 
 | Route | |
 |---|---|
+| `GET /v1/identity` | authenticated agent id, registered peers and protocol |
 | `GET /v1/health` | status, open tasks, live waiters, unread per agent, pending for user, stalled, wakes, presence, derivedTasks, mirror |
 | `POST /v1/tasks` | `{id, kind:"task", protocol:"2", body, meta:{to, title, priority?, expr_id?, parent?}, wake?, client_msg_id?}` |
 | `GET /v1/tasks[?open=true]` · `GET /v1/tasks/{id}` | tasks you take part in · one task with its messages |

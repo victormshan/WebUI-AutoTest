@@ -90,6 +90,8 @@ pub enum Phase {
 pub enum Relay {
     Claude,
     Dsh,
+    Codex,
+    Opencode,
     Either,
 }
 

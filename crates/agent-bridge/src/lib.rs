@@ -1,5 +1,5 @@
 //! agent-bridge: two-way task dispatch and collaboration between agents — Claude Code and the
-//! DSH main agent. Either side can hand the other a task; the service, not the agents' good
+//! DSH main agent, with native Codex and OpenCode clients. Any registered agent can hand the other a task; the service, not the agents' good
 //! intentions, enforces who may say what and when (design: `DESIGN-agent-bridge-FINAL.md`,
 //! agreed with DSH over the file protocol it replaces).
 //!

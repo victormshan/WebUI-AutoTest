@@ -855,6 +855,7 @@ enum Role {
 
 pub fn router(state: Arc<AppState>) -> Router {
     let api = Router::new()
+        .route("/v1/identity", get(identity))
         .route("/v1/tasks", get(list_tasks).post(create_task))
         .route("/v1/tasks/{id}", get(show_task))
         .route("/v1/tasks/{id}/messages", post(post_message))
@@ -1080,6 +1081,17 @@ async fn health(State(s): State<Arc<AppState>>) -> Json<Value> {
         "presence": g.presence, "derivedTasks": derived,
         "mirror": s.copier.mirror_dir().map(|d| json!({ "dir": d, "stats": s.copier.stats() })),
     }))
+}
+
+/// Authenticated identity and available peers; never returns credentials.
+async fn identity(
+    State(s): State<Arc<AppState>>,
+    Extension(Caller(me)): Extension<Caller>,
+) -> Json<Value> {
+    let g = s.lock();
+    Json(
+        json!({"agent": me, "agents": g.bridge.agents().collect::<Vec<_>>(), "protocol": PROTOCOL}),
+    )
 }
 
 #[derive(Deserialize)]
@@ -1318,6 +1330,12 @@ struct DecisionBody {
     /// `verbatim` (default: the user's own words) or `paraphrase` (a retelling).
     #[serde(default)]
     form: Option<String>,
+    /// `true`: the user is settling a conflict instead of adding another text.
+    #[serde(default)]
+    settle: Option<bool>,
+    /// The exact hashes being settled (optional; must match the current conflict set).
+    #[serde(default)]
+    settles: Option<Vec<String>>,
 }
 
 /// Records the user's decision as relayed by the caller; a paused task resumes on it.
@@ -1338,6 +1356,21 @@ async fn user_decision(
             "form must be verbatim or paraphrase, not {form:?}"
         ))
         .into());
+    }
+    let settle = b.settle.unwrap_or(false);
+    if settle {
+        if b.task.is_some() {
+            return Err(
+                BridgeError::Invalid("settle needs a pending item, not a task".into()).into(),
+            );
+        }
+        // The CLI and MCP fill this in; over HTTP the caller must state the form.
+        if b.form.is_none() {
+            return Err(BridgeError::Invalid(
+                "a settle needs form=verbatim (the user's own words)".into(),
+            )
+            .into());
+        }
     }
     let (status, decision, resumed, task, item_id) = {
         let mut g = s.lock();
@@ -1375,15 +1408,35 @@ async fn user_decision(
                 BridgeError::Forbidden(format!("{me} is not a party to task {}", t.id)).into(),
             );
         }
-        let (status, decision) = g
-            .decisions
-            .record(&item.item, &b.verbatim, &me, Some(form))
-            .map_err(BridgeError::Io)?;
+        let (status, decision) = if settle {
+            g.decisions
+                .record_settle(
+                    &item.item,
+                    &b.verbatim,
+                    &me,
+                    Some(form),
+                    b.settles.as_deref(),
+                )
+                .map_err(|e| match e.downcast::<crate::user::SettleRefused>() {
+                    Ok(refused) => BridgeError::Invalid(refused.0),
+                    Err(e) => BridgeError::Io(e),
+                })?
+        } else {
+            g.decisions
+                .record(&item.item, &b.verbatim, &me, Some(form))
+                .map_err(BridgeError::Io)?
+        };
         let resumed = if item.source == "paused"
             && status == ItemStatus::Decided
             && t.state == TaskState::PausedForUser
         {
-            Some(g.bridge.resume(&t.id, &me, decision.verbatim.as_str())?)
+            // A settle is a decision too; the resume text carries the user's words unchanged.
+            let reason = if settle {
+                format!("[settle] {}", decision.verbatim)
+            } else {
+                decision.verbatim.clone()
+            };
+            Some(g.bridge.resume(&t.id, &me, reason.as_str())?)
         } else {
             None
         };
@@ -1408,14 +1461,20 @@ async fn user_decision(
             let mut p = push_for(&task, &last, &other, "decision");
             p.kind = "user_decision".into();
             p.extra.key = Some(format!(
-                "decision:{}:{}",
+                "{}:{}:{}",
+                if settle { "settle" } else { "decision" },
                 item_id,
                 &decision.sha256[..12.min(decision.sha256.len())]
             ));
             p.summary = format!(
-                "{}用户对 {} 做了决定（{}转达{}）：{}",
+                "{}用户对 {} 做了{}（{}转达{}）：{}",
                 snapshot_lead(&task.id, decision.at),
                 item_id,
+                if settle {
+                    "了结（settle）"
+                } else {
+                    "决定"
+                },
                 me,
                 if form == "paraphrase" {
                     "，转述"
@@ -1435,7 +1494,8 @@ async fn user_decision(
     Ok((
         code,
         Json(
-            json!({ "item": item_id, "status": status, "decision": decision, "resumed": resumed }),
+            json!({ "item": item_id, "status": status, "decision": decision,
+                    "resumed": resumed, "settled": settle }),
         ),
     )
         .into_response())
@@ -2990,6 +3050,335 @@ pub(crate) mod tests {
             json!({ "task": "t", "from": 3, "to": 3 })
         );
     }
+    /// Puts one needs_user item into a two-text conflict and returns its id.
+    pub(crate) async fn conflicted_needs_user_item(e: &Env) -> String {
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "progress", "protocol": PROTOCOL, "needs_user": ["要不要重启？"] }),
+        )
+        .await;
+        let items = e.get(CLAUDE, "/v1/user/pending").await.1["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let id = items[0]["item"].as_str().unwrap().to_string();
+        let (c, _) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "重启吧" }),
+            )
+            .await;
+        assert_eq!(c, 200);
+        let (c, v) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "别重启" }),
+            )
+            .await;
+        assert_eq!((c, v["status"].as_str()), (409, Some("conflict")));
+        id
+    }
+
+    #[tokio::test]
+    async fn the_user_settles_a_conflict_and_it_leaves_pending() {
+        let e = start().await;
+        let id = conflicted_needs_user_item(&e).await;
+        assert!(!pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+        // The settle words may repeat a text that is already on file.
+        let (c, v) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "重启吧", "settle": true, "form": "verbatim" }),
+            )
+            .await;
+        assert_eq!((c, v["status"].as_str()), (200, Some("decided")), "{v}");
+        assert_eq!(
+            (v["settled"].as_bool(), v["decision"]["kind"].as_str()),
+            (Some(true), Some("settle"))
+        );
+        assert_eq!(v["decision"]["settles"].as_array().unwrap().len(), 2);
+        assert!(
+            pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty(),
+            "a settled item leaves the pending list"
+        );
+        let all = e.get(CLAUDE, "/v1/user/pending?all=true").await.1;
+        let item = all["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["item"] == id.as_str())
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (item["status"].as_str(), item["settled"].as_bool()),
+            (Some("decided"), Some(true))
+        );
+        assert_eq!(
+            item["decisions"].as_array().unwrap().len(),
+            3,
+            "texts and settle all kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_text_newer_than_the_settle_is_a_conflict_again() {
+        let e = start().await;
+        let id = conflicted_needs_user_item(&e).await;
+        e.post(
+            CLAUDE,
+            "/v1/user/decisions",
+            json!({ "item": id, "verbatim": "重启吧", "settle": true, "form": "verbatim" }),
+        )
+        .await;
+        let (c, v) = e
+            .post(
+                DSH,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "先别重启" }),
+            )
+            .await;
+        assert_eq!((c, v["status"].as_str()), (409, Some("conflict")));
+        assert!(!pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+        // The current (smaller) set settles it; the server computes it when not given.
+        let (c, v) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "先别重启", "settle": true, "form": "verbatim" }),
+            )
+            .await;
+        assert_eq!((c, v["status"].as_str()), (200, Some("decided")), "{v}");
+        assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+    }
+
+    #[tokio::test]
+    async fn settle_is_refused_when_the_item_is_not_in_conflict() {
+        let e = start().await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(DSH, "/v1/tasks/t/messages", k("ack")).await;
+        e.post(
+            DSH,
+            "/v1/tasks/t/messages",
+            json!({ "kind": "progress", "protocol": PROTOCOL, "needs_user": ["要不要重启？"] }),
+        )
+        .await;
+        let items = e.get(CLAUDE, "/v1/user/pending").await.1["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let id = items[0]["item"].as_str().unwrap().to_string();
+        let (c, v) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "重启吧", "settle": true, "form": "verbatim" }),
+            )
+            .await;
+        assert_eq!(c, 400, "{v}");
+        assert!(v.to_string().contains("not in conflict"), "{v}");
+        e.post(
+            CLAUDE,
+            "/v1/user/decisions",
+            json!({ "item": id, "verbatim": "重启吧" }),
+        )
+        .await;
+        let (c, _) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "重启吧", "settle": true, "form": "verbatim" }),
+            )
+            .await;
+        assert_eq!(c, 400, "one text is decided, not conflicted");
+    }
+
+    #[tokio::test]
+    async fn settle_requires_verbatim_words_and_the_current_hash_set() {
+        let e = start().await;
+        let id = conflicted_needs_user_item(&e).await;
+        let (c, v) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "重启吧", "settle": true, "form": "paraphrase" }),
+            )
+            .await;
+        assert_eq!(c, 400, "{v}");
+        let (c, v) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "重启吧", "settle": true, "form": "verbatim", "settles": ["00"] }),
+            )
+            .await;
+        assert_eq!(c, 400, "{v}");
+        assert!(
+            v.to_string()
+                .contains("does not match the current conflict set"),
+            "{v}"
+        );
+        let (c, v) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "task": "t", "verbatim": "重启吧", "settle": true, "form": "verbatim" }),
+            )
+            .await;
+        assert_eq!(c, 400, "{v}");
+        // Refused attempts recorded nothing.
+        let all = e.get(CLAUDE, "/v1/user/pending?all=true").await.1;
+        let item = all["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["item"] == id.as_str())
+            .unwrap()
+            .clone();
+        assert_eq!(item["status"], "conflict");
+        assert_eq!(item["decisions"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_stale_set_cannot_settle_a_later_conflict() {
+        let e = start().await;
+        let id = conflicted_needs_user_item(&e).await;
+        let (_, first) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "重启吧", "settle": true, "form": "verbatim" }),
+            )
+            .await;
+        let old = first["decision"]["settles"].clone();
+        e.post(
+            DSH,
+            "/v1/user/decisions",
+            json!({ "item": id, "verbatim": "先别重启" }),
+        )
+        .await;
+        let (c, v) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "重启吧", "settle": true, "form": "verbatim", "settles": old }),
+            )
+            .await;
+        assert_eq!(c, 400, "{v}");
+        assert!(
+            v.to_string()
+                .contains("does not match the current conflict set"),
+            "{v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_direct_item_can_be_settled_too() {
+        let e = start().await;
+        e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
+        e.post(
+            DSH,
+            "/v1/user/decisions",
+            json!({ "task": "t", "verbatim": "合并吧" }),
+        )
+        .await;
+        e.post(
+            DSH,
+            "/v1/user/decisions",
+            json!({ "item": "t#direct#1", "verbatim": "先别合并" }),
+        )
+        .await;
+        let (c, v) = e
+            .post(
+                DSH,
+                "/v1/user/decisions",
+                json!({ "item": "t#direct#1", "verbatim": "合并吧", "settle": true, "form": "verbatim" }),
+            )
+            .await;
+        assert_eq!((c, v["status"].as_str()), (200, Some("decided")), "{v}");
+    }
+    #[tokio::test]
+    async fn over_http_the_same_settle_twice_is_idempotent() {
+        let e = start().await;
+        let id = conflicted_needs_user_item(&e).await;
+        let req = json!({ "item": id, "verbatim": "那就重启", "settle": true, "form": "verbatim" });
+        let (c1, v1) = e.post(CLAUDE, "/v1/user/decisions", req.clone()).await;
+        let (c2, v2) = e.post(CLAUDE, "/v1/user/decisions", req).await;
+        assert_eq!((c1, c2), (200, 200), "{v1} / {v2}");
+        assert_eq!(v1["decision"]["sha256"], v2["decision"]["sha256"]);
+        assert_eq!(v2["status"], "decided");
+        let all = e.get(CLAUDE, "/v1/user/pending?all=true").await.1;
+        let item = all["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["item"] == id.as_str())
+            .unwrap()
+            .clone();
+        assert_eq!(
+            item["decisions"].as_array().unwrap().len(),
+            3,
+            "a retry adds no line"
+        );
+    }
+
+    #[tokio::test]
+    async fn restating_the_settle_words_is_not_a_new_conflict() {
+        let e = start().await;
+        let id = conflicted_needs_user_item(&e).await;
+        // The settle words are new, not one of the two conflicting texts.
+        e.post(
+            CLAUDE,
+            "/v1/user/decisions",
+            json!({ "item": id, "verbatim": "那就重启", "settle": true, "form": "verbatim" }),
+        )
+        .await;
+        let (c, v) = e
+            .post(
+                DSH,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "那就重启" }),
+            )
+            .await;
+        assert_eq!((c, v["status"].as_str()), (200, Some("decided")), "{v}");
+        assert!(pending_sources(&e.get(CLAUDE, "/v1/user/pending").await.1).is_empty());
+        let (c, v) = e
+            .post(
+                DSH,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "先别重启" }),
+            )
+            .await;
+        assert_eq!((c, v["status"].as_str()), (409, Some("conflict")), "{v}");
+    }
+
+    #[tokio::test]
+    async fn a_settle_must_state_its_form_over_http() {
+        let e = start().await;
+        let id = conflicted_needs_user_item(&e).await;
+        let (c, v) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "重启吧", "settle": true }),
+            )
+            .await;
+        assert_eq!(c, 400, "{v}");
+        assert!(v.to_string().contains("form=verbatim"), "{v}");
+        let (c, _) = e
+            .post(
+                CLAUDE,
+                "/v1/user/decisions",
+                json!({ "item": id, "verbatim": "重启吧", "settle": true, "form": "paraphrase" }),
+            )
+            .await;
+        assert_eq!(c, 400);
+    }
 }
 
 #[cfg(test)]
@@ -3104,6 +3493,7 @@ mod observe_tests {
         ("POST", "/v1/user/asked"),
         ("POST", "/v1/presence"),
         ("GET", "/v1/health"),
+        ("GET", "/v1/identity"),
         ("GET", "/v1/observe/tasks"),
         ("GET", "/v1/observe/tasks/{id}"),
     ];

@@ -1,0 +1,16 @@
+[Unit]
+Description=agent-bridge native CLI worker (%i)
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/mnt/c/Windows/System32
+Environment=BRIDGE_WORKER_OPTIONS=
+EnvironmentFile=%h/.config/agent-bridge/%i.worker.env
+ExecStart=/usr/bin/python3 %h/.local/share/agent-bridge/bridge_agents.py worker --client ${BRIDGE_CLIENT} --agent %i --url ${AGENT_BRIDGE_URL} --bridge-bin ${BRIDGE_BIN} --client-bin ${BRIDGE_CLIENT_BIN} --workdir ${BRIDGE_WORKDIR} --token-file %h/.config/agent-bridge/%i.token --state-dir %h/.local/state/agent-bridge-cli/%i $BRIDGE_WORKER_OPTIONS
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=default.target

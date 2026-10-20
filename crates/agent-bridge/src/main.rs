@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 #[command(
     name = "agent-bridge",
     version,
-    about = "Two-way task dispatch and collaboration between agents (Claude Code ⇄ DSH)"
+    about = "Two-way task dispatch and collaboration between Claude Code, DSH, Codex and OpenCode"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -72,6 +72,8 @@ enum Cmd {
     },
     /// Read a token on stdin and print the hash to put in agents.json
     HashToken,
+    /// Authenticated identity and registered peers
+    Identity,
     /// Service status
     Health,
     /// Tasks you take part in
@@ -153,6 +155,12 @@ enum Cmd {
         /// verbatim | paraphrase
         #[arg(long)]
         form: Option<String>,
+        /// Settle a conflicting pending item with the user's own words
+        #[arg(long)]
+        settle: bool,
+        /// The exact hashes being settled (optional; must match the current conflict set)
+        #[arg(long, value_delimiter = ',')]
+        settles: Option<Vec<String>>,
     },
     /// Say you have put a pending item to the user
     Asked {
@@ -232,6 +240,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let t = t.trim();
             anyhow::ensure!(t.len() >= 32, "token too short (need >= 32 chars)");
             println!("{}", service::hex(&service::sha256(t)));
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Identity => {
+            print(&Client::from_env()?.get("/v1/identity").await?);
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Health => {
@@ -358,13 +370,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             task,
             verbatim,
             form,
+            settle,
+            settles,
         } => {
-            let mut b = json!({ "verbatim": verbatim });
-            for (k, v) in [("item", item), ("task", task), ("form", form)] {
-                if let Some(v) = v {
-                    b[k] = json!(v);
-                }
-            }
+            let b = decide_body(item, task, verbatim, form, settle, settles);
             print(&Client::from_env()?.post("/v1/user/decisions", b).await?);
             Ok(ExitCode::SUCCESS)
         }
@@ -574,5 +583,78 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             service::serve(app, listener).await?;
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// The `/v1/user/decisions` body for `decide`; `--settle` states `form=verbatim` for the user
+/// (over HTTP the form must be explicit).
+fn decide_body(
+    item: Option<String>,
+    task: Option<String>,
+    verbatim: String,
+    form: Option<String>,
+    settle: bool,
+    settles: Option<Vec<String>>,
+) -> Value {
+    let form = if settle {
+        Some(form.unwrap_or_else(|| "verbatim".to_string()))
+    } else {
+        form
+    };
+    let mut b = json!({ "verbatim": verbatim });
+    for (k, v) in [("item", item), ("task", task), ("form", form)] {
+        if let Some(v) = v {
+            b[k] = json!(v);
+        }
+    }
+    if settle {
+        b["settle"] = json!(true);
+    }
+    if let Some(s) = settles {
+        b["settles"] = json!(s);
+    }
+    b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_settle_states_form_verbatim_but_a_plain_decision_keeps_the_default() {
+        let b = decide_body(
+            Some("t#1#1".into()),
+            None,
+            "用户原话".into(),
+            None,
+            true,
+            None,
+        );
+        assert_eq!(b["form"], "verbatim");
+        assert_eq!(b["settle"], true);
+        let b = decide_body(
+            Some("t#1#1".into()),
+            None,
+            "用户原话".into(),
+            None,
+            false,
+            None,
+        );
+        assert!(
+            b.get("form").is_none(),
+            "a plain decision keeps the server default"
+        );
+        let b = decide_body(
+            Some("t#1#1".into()),
+            None,
+            "用户原话".into(),
+            Some("paraphrase".into()),
+            true,
+            None,
+        );
+        assert_eq!(
+            b["form"], "paraphrase",
+            "an explicit form is not overridden"
+        );
     }
 }

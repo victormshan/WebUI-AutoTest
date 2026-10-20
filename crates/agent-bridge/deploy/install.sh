@@ -49,11 +49,7 @@ for f in token dsh.token dsh-notify.token; do
   fi
   chmod 0600 "$CFG/$f"
 done
-printf '{"claude":"%s","dsh":"%s"}\n' \
-  "$("$AB" hash-token < "$CFG/token")" "$("$AB" hash-token < "$CFG/dsh.token")" > "$CFG/agents.json"
-cat > "$CFG/notify.json" <<JSON
-{"dsh": {"url": "http://127.0.0.1:3080/dsh-web-relay/bridge/notify", "token_file": "$CFG/dsh-notify.token", "transport": "auto"}}
-JSON
+python3 "$(dirname "$0")/merge_config.py" "$CFG"
 chmod 0600 "$CFG/agents.json" "$CFG/notify.json"
 
 # 3. Windows user environment for the DSH host (read from stdin, nothing on argv)

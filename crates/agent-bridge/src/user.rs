@@ -5,6 +5,13 @@
 //! relayed by an agent, stored append-only with its SHA-256 and the relaying agent. Nothing can
 //! edit or remove it; a second, different text for the same item is kept too and marks the item
 //! as a conflict for the user to settle — an agent cannot quietly "correct" what the user said.
+//!
+//! A conflict is closed only by the user: a `settle` record follows the same append-only, hashed,
+//! verbatim rules and lists the hashes it reconciles. `status` reports Decided while no text newer
+//! than the last settle is left unsettled, and Conflict again as soon as one appears. The settle
+//! text may repeat a text that is already on file, which is why the `record` text-dedupe is not
+//! used for it. A binary that does not know `kind` counts the settle text as an ordinary decision,
+//! so the item shows Conflict again after a downgrade: fail-safe, nothing is lost.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -30,6 +37,12 @@ pub struct Decision {
     /// pass as the user's words (P3). Older records carry none and were recorded as verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub form: Option<String>,
+    /// `None` for an ordinary decision; `Some("settle")` for the user's settlement of a conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// For a settle record: the decision hashes the user settled (sorted, unique).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settles: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -61,6 +74,9 @@ pub struct PendingItem {
     /// Undecided and nobody has asked the user for longer than allowed (Q5).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub overdue: bool,
+    /// Decided because the user settled a conflict (so a UI can tell it apart).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub settled: bool,
 }
 
 impl PendingItem {
@@ -76,9 +92,22 @@ impl PendingItem {
             asked_by: None,
             asked_at: None,
             overdue: false,
+            settled: false,
         }
     }
 }
+
+/// A settle the rules refuse (mapped to HTTP 400), as opposed to a storage failure.
+#[derive(Debug)]
+pub struct SettleRefused(pub String);
+
+impl std::fmt::Display for SettleRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SettleRefused {}
 
 /// Who asked the user about which item (`asked.jsonl`, append-only).
 pub fn load_asked(root: &Path) -> Result<BTreeMap<String, (String, DateTime<Utc>)>> {
@@ -172,17 +201,78 @@ impl Decisions {
             .collect()
     }
 
-    pub fn status(&self, item: &str) -> ItemStatus {
-        let hashes: BTreeSet<&str> = self
-            .list
+    fn is_settle(d: &Decision) -> bool {
+        d.kind.as_deref() == Some("settle")
+    }
+
+    /// Index of the last settle record for `item`, if any.
+    fn last_settle(&self, item: &str) -> Option<usize> {
+        self.list
             .iter()
-            .filter(|d| d.item == item)
-            .map(|d| d.sha256.as_str())
+            .rposition(|d| d.item == item && Self::is_settle(d))
+    }
+
+    /// The texts that the last settle record does not cover (all texts when there is none).
+    fn unsettled_hashes(&self, item: &str) -> BTreeSet<String> {
+        let Some(last) = self.last_settle(item) else {
+            return self
+                .list
+                .iter()
+                .filter(|d| d.item == item && !Self::is_settle(d))
+                .map(|d| d.sha256.clone())
+                .collect();
+        };
+        // The settle's own words count as covered: repeating them as a normal decision is
+        // the user restating the settlement, not a new disagreement.
+        let mut settled: BTreeSet<&str> = self.list[last]
+            .settles
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(String::as_str)
             .collect();
-        match hashes.len() {
-            0 => ItemStatus::Open,
-            1 => ItemStatus::Decided,
-            _ => ItemStatus::Conflict,
+        settled.insert(self.list[last].sha256.as_str());
+        self.list[last + 1..]
+            .iter()
+            .filter(|d| d.item == item && !Self::is_settle(d))
+            .map(|d| d.sha256.clone())
+            .filter(|h| !settled.contains(h.as_str()))
+            .collect()
+    }
+
+    /// The hashes the user would settle right now (empty unless the item is in conflict).
+    pub fn conflict_set(&self, item: &str) -> BTreeSet<String> {
+        if self.status(item) == ItemStatus::Conflict {
+            self.unsettled_hashes(item)
+        } else {
+            BTreeSet::new()
+        }
+    }
+
+    /// Whether the item is Decided *because of* a settle record.
+    pub fn is_settled(&self, item: &str) -> bool {
+        self.last_settle(item).is_some() && self.status(item) == ItemStatus::Decided
+    }
+
+    pub fn status(&self, item: &str) -> ItemStatus {
+        if self.last_settle(item).is_none() {
+            let hashes: BTreeSet<&str> = self
+                .list
+                .iter()
+                .filter(|d| d.item == item && !Self::is_settle(d))
+                .map(|d| d.sha256.as_str())
+                .collect();
+            return match hashes.len() {
+                0 => ItemStatus::Open,
+                1 => ItemStatus::Decided,
+                _ => ItemStatus::Conflict,
+            };
+        }
+        // A settle closes the conflict; only a text it does not cover reopens it.
+        if self.unsettled_hashes(item).is_empty() {
+            ItemStatus::Decided
+        } else {
+            ItemStatus::Conflict
         }
     }
 
@@ -206,14 +296,95 @@ impl Decisions {
             relayed_by: by.into(),
             at: Utc::now(),
             form: form.map(str::to_string),
+            kind: None,
+            settles: None,
         };
         if let Some(same) = self
             .list
             .iter()
-            .find(|x| x.item == item && x.sha256 == d.sha256)
+            .find(|x| x.item == item && !Self::is_settle(x) && x.sha256 == d.sha256)
         {
             return Ok((self.status(item), same.clone()));
         }
+        self.append(&d)?;
+        Ok((self.status(item), d))
+    }
+
+    /// Closes a conflict with the user's own words (append-only and hashed like any decision).
+    ///
+    /// `expect` is the set the caller believes it is settling: when given it must equal the
+    /// conflict set right now, so a stale list cannot settle a later conflict.
+    pub fn record_settle(
+        &mut self,
+        item: &str,
+        verbatim: &str,
+        by: &str,
+        form: Option<&str>,
+        expect: Option<&[String]>,
+    ) -> Result<(ItemStatus, Decision)> {
+        let verbatim = verbatim.trim();
+        let refuse = |why: String| anyhow::Error::new(SettleRefused(why));
+        if verbatim.is_empty() {
+            return Err(refuse(
+                "a settle is the user's own words; it cannot be empty".into(),
+            ));
+        }
+        if form != Some("verbatim") {
+            return Err(refuse(
+                "a settle needs form=verbatim (the user's own words)".into(),
+            ));
+        }
+        let hash = hex(&sha256(verbatim));
+        if self.status(item) != ItemStatus::Conflict {
+            // Retrying the same settlement is a no-op (a lost response must not become a
+            // 400); a different text on a non-conflicted item is refused.
+            if let Some(last) = self.last_settle(item)
+                && self.list[last].sha256 == hash
+            {
+                return Ok((self.status(item), self.list[last].clone()));
+            }
+            return Err(refuse(format!(
+                "item {item:?} is not in conflict; nothing to settle"
+            )));
+        }
+        let settles: Vec<String> = self.conflict_set(item).into_iter().collect();
+        if settles.is_empty() {
+            return Err(refuse("no conflicting texts to settle".into()));
+        }
+        if let Some(expected) = expect {
+            let want: BTreeSet<&str> = settles.iter().map(String::as_str).collect();
+            let got: BTreeSet<&str> = expected.iter().map(String::as_str).collect();
+            if got != want {
+                return Err(refuse(
+                    "settles does not match the current conflict set".into(),
+                ));
+            }
+        }
+        let d = Decision {
+            item: item.into(),
+            verbatim: verbatim.into(),
+            sha256: hash.clone(),
+            relayed_by: by.into(),
+            at: Utc::now(),
+            form: Some("verbatim".into()),
+            kind: Some("settle".into()),
+            settles: Some(settles.clone()),
+        };
+        // Dedupe on the settlement, not on the text: the user's words often repeat a text
+        // that is already on file, which `record` would treat as a no-op.
+        if let Some(same) = self.list.iter().find(|x| {
+            x.item == item
+                && Self::is_settle(x)
+                && x.settles.as_ref() == Some(&settles)
+                && x.sha256 == d.sha256
+        }) {
+            return Ok((self.status(item), same.clone()));
+        }
+        self.append(&d)?;
+        Ok((self.status(item), d))
+    }
+
+    fn append(&mut self, d: &Decision) -> Result<()> {
         let mut opts = OpenOptions::new();
         opts.append(true).create(true);
         #[cfg(unix)]
@@ -225,13 +396,13 @@ impl Decisions {
         let mut f = opts
             .open(&self.path)
             .with_context(|| format!("opening {}", self.path.display()))?;
-        f.write_all(format!("{}\n", serde_json::to_string(&d)?).as_bytes())?;
+        f.write_all(format!("{}\n", serde_json::to_string(d)?).as_bytes())?;
         f.sync_all()?;
         if new_file && let Some(dir) = self.path.parent() {
             fs::File::open(dir)?.sync_all()?;
         }
         self.list.push(d.clone());
-        Ok((self.status(item), d))
+        Ok(())
     }
 }
 
@@ -254,6 +425,7 @@ pub fn pending(
     let mut push = |mut p: PendingItem| {
         p.status = decisions.status(&p.item);
         p.decisions = decisions.for_item(&p.item);
+        p.settled = decisions.is_settled(&p.item);
         if let Some((by, at)) = ctx.asked.get(&p.item) {
             p.asked_by = Some(by.clone());
             p.asked_at = Some(*at);
@@ -276,6 +448,8 @@ pub fn pending(
                     p.relay = Some(match nu.relay {
                         Some(crate::model::Relay::Claude) => "claude".into(),
                         Some(crate::model::Relay::Dsh) => "dsh".into(),
+                        Some(crate::model::Relay::Codex) => "codex".into(),
+                        Some(crate::model::Relay::Opencode) => "opencode".into(),
                         Some(crate::model::Relay::Either) => "either".into(),
                         None => m.from.clone(),
                     });
@@ -364,5 +538,115 @@ mod tests {
         fs::write(&p, s).unwrap();
         let ds = Decisions::open(d.path()).unwrap();
         assert_eq!((ds.bad_lines, ds.status("t#1#1")), (1, ItemStatus::Decided));
+    }
+    #[test]
+    fn settle_needs_a_conflict_verbatim_words_and_the_current_set() {
+        let d = tempfile::tempdir().unwrap();
+        let mut ds = Decisions::open(d.path()).unwrap();
+        assert!(
+            ds.record_settle("t#1#1", "x", "claude", Some("verbatim"), None)
+                .is_err(),
+            "an open item cannot be settled"
+        );
+        ds.record("t#1#1", "保留 Windows", "claude", None).unwrap();
+        assert!(
+            ds.record_settle("t#1#1", "x", "claude", Some("verbatim"), None)
+                .is_err(),
+            "a decided item cannot be settled"
+        );
+        ds.record("t#1#1", "保留 WSL", "dsh", None).unwrap();
+        assert_eq!(ds.status("t#1#1"), ItemStatus::Conflict);
+        assert!(
+            ds.record_settle("t#1#1", "x", "claude", Some("paraphrase"), None)
+                .is_err(),
+            "a paraphrase is not the user's own words"
+        );
+        let stale = vec!["00".to_string()];
+        assert!(
+            ds.record_settle("t#1#1", "x", "claude", Some("verbatim"), Some(&stale))
+                .is_err(),
+            "a stale set is refused"
+        );
+        let current: Vec<String> = ds.conflict_set("t#1#1").into_iter().collect();
+        assert_eq!(current.len(), 2);
+        // The settle text repeats a text that is already on file and is still recorded.
+        let (status, first) = ds
+            .record_settle(
+                "t#1#1",
+                "保留 Windows",
+                "claude",
+                Some("verbatim"),
+                Some(&current),
+            )
+            .unwrap();
+        assert_eq!(status, ItemStatus::Decided);
+        assert_eq!(
+            (first.kind.as_deref(), first.settles.as_ref().map(Vec::len)),
+            (Some("settle"), Some(2))
+        );
+        assert_eq!(ds.status("t#1#1"), ItemStatus::Decided);
+        assert!(ds.is_settled("t#1#1"));
+        assert_eq!(ds.for_item("t#1#1").len(), 3, "the settle joins the texts");
+        // A text newer than the settle reopens the conflict; the old set cannot settle it.
+        ds.record("t#1#1", "先别重启", "codex", None).unwrap();
+        assert_eq!(ds.status("t#1#1"), ItemStatus::Conflict);
+        assert!(!ds.is_settled("t#1#1"));
+        let old = first.settles.clone().unwrap();
+        assert!(
+            ds.record_settle("t#1#1", "先别重启", "codex", Some("verbatim"), Some(&old))
+                .is_err(),
+            "the old, larger set is stale now"
+        );
+        assert_eq!(ds.conflict_set("t#1#1").len(), 1);
+        let (status, _) = ds
+            .record_settle("t#1#1", "先别重启", "codex", Some("verbatim"), None)
+            .unwrap();
+        assert_eq!(status, ItemStatus::Decided);
+        // Settling the same fact twice with the same words is a no-op.
+        let count = ds.for_item("t#1#1").len();
+        ds.record_settle("t#1#1", "先别重启", "codex", Some("verbatim"), None)
+            .unwrap();
+        assert_eq!(ds.for_item("t#1#1").len(), count);
+    }
+
+    #[test]
+    fn settle_records_survive_a_reload_and_stay_append_only() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("decisions.jsonl");
+        let mut ds = Decisions::open(d.path()).unwrap();
+        ds.record("t#1#1", "a", "claude", None).unwrap();
+        ds.record("t#1#1", "b", "dsh", None).unwrap();
+        let before = fs::read_to_string(&p).unwrap().lines().count();
+        ds.record_settle("t#1#1", "a", "claude", Some("verbatim"), None)
+            .unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert_eq!(
+            text.lines().count(),
+            before + 1,
+            "one appended line, nothing rewritten"
+        );
+        drop(ds);
+        let ds = Decisions::open(d.path()).unwrap();
+        assert_eq!((ds.bad_lines, ds.status("t#1#1")), (0, ItemStatus::Decided));
+        assert!(ds.is_settled("t#1#1"));
+        assert_eq!(ds.for_item("t#1#1").len(), 3);
+    }
+    #[test]
+    fn restating_the_settle_words_keeps_the_item_decided() {
+        let d = tempfile::tempdir().unwrap();
+        let mut ds = Decisions::open(d.path()).unwrap();
+        ds.record("t#1#1", "a", "claude", None).unwrap();
+        ds.record("t#1#1", "b", "dsh", None).unwrap();
+        // The settle words are new (not one of the conflicting texts).
+        ds.record_settle("t#1#1", "用新的话了结", "claude", Some("verbatim"), None)
+            .unwrap();
+        assert_eq!(ds.status("t#1#1"), ItemStatus::Decided);
+        // Saying the same words again as an ordinary decision is not a new disagreement.
+        ds.record("t#1#1", "用新的话了结", "dsh", None).unwrap();
+        assert_eq!(ds.status("t#1#1"), ItemStatus::Decided);
+        assert!(ds.is_settled("t#1#1"));
+        // A different text is.
+        ds.record("t#1#1", "改成别的", "dsh", None).unwrap();
+        assert_eq!(ds.status("t#1#1"), ItemStatus::Conflict);
     }
 }
