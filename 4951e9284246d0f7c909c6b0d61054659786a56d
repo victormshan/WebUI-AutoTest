@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-step8-bridge
+version: 1/3
+commit: 4951e9284246d0f7c909c6b0d61054659786a56d
+tree: fe4a87bb2c0dd360b5ad53fa3541dd622080d771
+parent: 46e24996773d33eaf641f60e349bc81a8dcad852
+review: v1-1
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-20T06:28:50Z
+signature: b9vCKFcTldMV5GoLZDxpJIj+AtFZxCtenTVFZLB36Lk/0mtFjR4JI05C2h3TiwV96VTkn0jB9RY8rXeQflJiCw==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
