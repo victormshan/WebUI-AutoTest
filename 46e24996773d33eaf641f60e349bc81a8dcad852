@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-step8-deploy
+version: 1/5
+commit: 46e24996773d33eaf641f60e349bc81a8dcad852
+tree: 6851bc958da29cb6a6da2cc6fa549bb25fd790ad
+parent: 335db3d35dc51cb0f19e54e5d990d71131e78b77
+review: v1-1
+reviewer: external-api/gemini-api
+verdict: approved
+at: 2026-10-20T02:06:12Z
+signature: 04Cjd2DyDG2I80FJ1ln4km2cioMaCYWUFAnjoVgFCnVRUxYXV4UMIjCN5EAO/q9if2NFl6h56Tc76UjURD2vBw==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
