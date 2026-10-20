@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::model::Channel;
+use crate::identity::canonical_family;
+use crate::model::{Channel, external_family_ok};
 
 /// An external model's answer and where it came from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -47,6 +48,10 @@ pub struct ReviewerConfig {
     pub gemini_base_url: String,
     /// (base URL, API key, model)
     pub openai: Option<(String, String, String)>,
+    /// The model vendor behind the OpenAI-compatible endpoint, as configured by the
+    /// administrator (`REVIEW_GATE_OPENAI_FAMILY`). `None` means unknown: such an endpoint may
+    /// not act as an independent external reviewer. Protocol names are never used as vendors.
+    pub openai_family: Option<String>,
     pub bridge: String,
     pub web_attempts: u32,
     pub web_timeout: Duration,
@@ -60,19 +65,29 @@ pub struct ReviewerConfig {
 impl ReviewerConfig {
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-        let openai = match (
+        let configured_family = var("REVIEW_GATE_OPENAI_FAMILY");
+        let (openai, openai_family) = match (
             var("REVIEW_GATE_BASE_URL"),
             var("REVIEW_GATE_API_KEY"),
             var("REVIEW_GATE_MODEL"),
         ) {
-            (Some(b), Some(k), Some(m)) => Some((b, k, m)),
-            _ => var("DEEPSEEK_API_KEY").map(|k| {
-                (
-                    "https://api.deepseek.com".into(),
-                    k,
-                    var("REVIEW_GATE_MODEL").unwrap_or("deepseek-chat".into()),
-                )
-            }),
+            (Some(b), Some(k), Some(m)) => {
+                // Only an official endpoint gets a default, and it is the vendor's own name.
+                // Any other base URL stays unknown unless the administrator names the vendor.
+                let family = configured_family.or_else(|| official_family(&b));
+                (Some((b, k, m)), family)
+            }
+            _ => match var("DEEPSEEK_API_KEY") {
+                Some(k) => (
+                    Some((
+                        "https://api.deepseek.com".into(),
+                        k,
+                        var("REVIEW_GATE_MODEL").unwrap_or("deepseek-chat".into()),
+                    )),
+                    Some("deepseek".into()),
+                ),
+                None => (None, None),
+            },
         };
         Self {
             gemini_api_key: var("GEMINI_API_KEY"),
@@ -81,6 +96,7 @@ impl ReviewerConfig {
             gemini_base_url: var("REVIEW_GATE_GEMINI_BASE_URL")
                 .unwrap_or("https://generativelanguage.googleapis.com".into()),
             openai,
+            openai_family,
             bridge: var("DSH_RELAY_BRIDGE")
                 .unwrap_or("http://localhost:8899".into())
                 .trim_end_matches('/')
@@ -103,6 +119,30 @@ impl ReviewerConfig {
 
 pub const PROVIDERS: &[&str] = &["gemini-api", "openai", "web-gemini"];
 
+/// The vendor of a known official endpoint, derived from the parsed URL (never from substrings:
+/// `api.openai.com.evil.example` or `/x/api.openai.com` must not count). Only HTTPS.
+fn official_family(base: &str) -> Option<String> {
+    let url = reqwest::Url::parse(base).ok()?;
+    if url.scheme() != "https" {
+        return None;
+    }
+    match url.host_str()? {
+        "api.openai.com" => Some("openai".into()),
+        "api.deepseek.com" => Some("deepseek".into()),
+        _ => None,
+    }
+}
+
+/// The canonical family a provider is known to call, before any network request.
+/// `None` means the service configuration does not establish a vendor.
+pub fn provider_family(cfg: &ReviewerConfig, provider: &str) -> Option<&'static str> {
+    match provider {
+        "gemini-api" | "web-gemini" => Some("gemini"),
+        "openai" => cfg.openai_family.as_deref().and_then(canonical_family),
+        _ => None,
+    }
+}
+
 /// Which providers are usable right now.
 pub async fn probe(cfg: &ReviewerConfig) -> Vec<(&'static str, bool)> {
     let mut out = Vec::new();
@@ -122,7 +162,17 @@ async fn available(cfg: &ReviewerConfig, provider: &str) -> bool {
 }
 
 /// Asks `provider` (or the first available one for `auto`).
-pub async fn ask(cfg: &ReviewerConfig, prompt: &str, provider: &str) -> Result<Reply, AskError> {
+///
+/// `implementer_family` is the family frozen on the task. Providers from that family are never
+/// contacted: `auto` skips them silently-but-visibly (the reason lands in the error/fallback
+/// list), and an explicit request is refused with a clear error. A provider whose vendor is
+/// unknown (an unconfigured OpenAI-compatible endpoint) is refused the same way.
+pub async fn ask(
+    cfg: &ReviewerConfig,
+    prompt: &str,
+    provider: &str,
+    implementer_family: &str,
+) -> Result<Reply, AskError> {
     let names: Vec<&str> = if provider == "auto" {
         PROVIDERS.to_vec()
     } else {
@@ -140,11 +190,29 @@ pub async fn ask(cfg: &ReviewerConfig, prompt: &str, provider: &str) -> Result<R
             errors.push(format!("{name}: unavailable"));
             continue;
         }
+        let Some(family) = provider_family(cfg, name) else {
+            let why = format!(
+                "{name}: the model family of this endpoint is not configured; an unknown vendor cannot be an independent reviewer"
+            );
+            if provider != "auto" {
+                return Err(AskError::Failed(why));
+            }
+            errors.push(why);
+            continue;
+        };
+        if let Err(e) = external_family_ok(implementer_family, family) {
+            let why = format!("{name}: {e}");
+            if provider != "auto" {
+                return Err(AskError::Failed(why));
+            }
+            errors.push(why);
+            continue;
+        }
         any_available = true;
         let res = match name {
-            "gemini-api" => gemini_api(cfg, prompt).await,
-            "openai" => openai(cfg, prompt).await,
-            _ => web_gemini(cfg, prompt).await,
+            "gemini-api" => gemini_api(cfg, prompt, implementer_family).await,
+            "openai" => openai(cfg, prompt, implementer_family).await,
+            _ => web_gemini(cfg, prompt, implementer_family).await,
         };
         match res {
             Ok(mut r) => {
@@ -169,7 +237,22 @@ pub async fn ask(cfg: &ReviewerConfig, prompt: &str, provider: &str) -> Result<R
     })
 }
 
-async fn gemini_api(cfg: &ReviewerConfig, prompt: &str) -> anyhow::Result<Reply> {
+/// Re-checks the family rule at every retry, not only when the provider was selected.
+fn check_retry_family(
+    provider: &str,
+    family: &str,
+    implementer_family: &str,
+) -> anyhow::Result<()> {
+    external_family_ok(implementer_family, family)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{provider}: {e}"))
+}
+
+async fn gemini_api(
+    cfg: &ReviewerConfig,
+    prompt: &str,
+    implementer_family: &str,
+) -> anyhow::Result<Reply> {
     let key = cfg.gemini_api_key.as_deref().unwrap_or_default();
     // The key goes in a header, never the URL: a reqwest error prints its URL, and that error
     // ends up in logs and in the review record.
@@ -181,6 +264,8 @@ async fn gemini_api(cfg: &ReviewerConfig, prompt: &str) -> anyhow::Result<Reply>
     let body = json!({ "contents": [{ "role": "user", "parts": [{ "text": prompt }] }] });
     let mut attempt = 0;
     let v: Value = loop {
+        // Every retry revalidates: a family change or a misconfiguration cannot slip through.
+        check_retry_family("gemini-api", "gemini", implementer_family)?;
         let resp = reqwest::Client::new()
             .post(&url)
             .header("x-goog-api-key", key)
@@ -226,14 +311,24 @@ async fn gemini_api(cfg: &ReviewerConfig, prompt: &str) -> anyhow::Result<Reply>
     })
 }
 
-async fn openai(cfg: &ReviewerConfig, prompt: &str) -> anyhow::Result<Reply> {
+async fn openai(
+    cfg: &ReviewerConfig,
+    prompt: &str,
+    implementer_family: &str,
+) -> anyhow::Result<Reply> {
     use llm::Llm;
     let (base, key, model) = cfg.openai.clone().expect("checked by available()");
-    let family = if format!("{base}{model}").to_lowercase().contains("deepseek") {
-        "deepseek"
-    } else {
-        "openai-compatible"
-    };
+    // The vendor comes from the administrator's configuration, never from the URL or model name.
+    let family = cfg
+        .openai_family
+        .as_deref()
+        .and_then(canonical_family)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "openai: the model family of {base} is not configured (REVIEW_GATE_OPENAI_FAMILY); an unknown vendor cannot be an independent reviewer"
+            )
+        })?;
+    check_retry_family("openai", family, implementer_family)?;
     let settings = llm::Settings {
         provider: llm::Provider::OpenAi,
         model: model.clone(),
@@ -249,7 +344,7 @@ async fn openai(cfg: &ReviewerConfig, prompt: &str) -> anyhow::Result<Reply> {
     Ok(Reply {
         provider: "openai".into(),
         model: Some(model),
-        family: family.into(),
+        family: family.to_string(),
         channel: Channel::ExternalApi,
         answer,
         fallbacks: Vec::new(),
@@ -390,12 +485,17 @@ impl Bridge {
     }
 }
 
-async fn web_gemini(cfg: &ReviewerConfig, prompt: &str) -> anyhow::Result<Reply> {
+async fn web_gemini(
+    cfg: &ReviewerConfig,
+    prompt: &str,
+    implementer_family: &str,
+) -> anyhow::Result<Reply> {
     let bridge = Bridge::connect(&cfg.bridge)
         .await
         .ok_or_else(|| anyhow::anyhow!("bridge unreachable"))?;
     let mut last = None;
     for attempt in 1..=cfg.web_attempts {
+        check_retry_family("web-gemini", "gemini", implementer_family)?;
         match web_gemini_once(&bridge, cfg, prompt).await {
             Ok(answer) => {
                 return Ok(Reply {
@@ -585,6 +685,7 @@ pub(crate) mod tests {
             gemini_model: "m".into(),
             gemini_base_url: "http://127.0.0.1:9".into(),
             openai: None,
+            openai_family: None,
             bridge: bridge.into(),
             web_attempts: 4,
             web_timeout: Duration::from_secs(5),
@@ -602,7 +703,7 @@ pub(crate) mod tests {
             Ok("VERDICT: APPROVED"),
         ])
         .await;
-        let r = ask(&cfg(&url), "审核这个", "auto").await.unwrap();
+        let r = ask(&cfg(&url), "审核这个", "auto", "claude").await.unwrap();
         assert_eq!(r.answer, "VERDICT: APPROVED");
         assert_eq!(
             (r.channel, r.provider.as_str(), r.family.as_str()),
@@ -614,7 +715,9 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn gives_up_after_the_attempt_budget() {
         let (url, prompts) = mock_bridge(vec![Err("x"); 4]).await;
-        let e = ask(&cfg(&url), "p", "web-gemini").await.unwrap_err();
+        let e = ask(&cfg(&url), "p", "web-gemini", "claude")
+            .await
+            .unwrap_err();
         assert!(matches!(e, AskError::Failed(_)), "{e}");
         assert_eq!(prompts.lock().unwrap().len(), 4);
     }
@@ -623,7 +726,7 @@ pub(crate) mod tests {
     async fn a_refused_create_task_is_a_failed_attempt_retried_not_a_panic() {
         // Refused twice, then taken: the review still completes on the third attempt.
         let (url, prompts) = mock_bridge_refusing(2, vec![Ok("VERDICT: APPROVED")]).await;
-        let r = ask(&cfg(&url), "p", "web-gemini").await.unwrap();
+        let r = ask(&cfg(&url), "p", "web-gemini", "claude").await.unwrap();
         assert_eq!(r.answer, "VERDICT: APPROVED");
         assert_eq!(
             prompts.lock().unwrap().len(),
@@ -632,7 +735,9 @@ pub(crate) mod tests {
         );
         // Refused every time: a failure that says so, after the attempt budget.
         let (url, prompts) = mock_bridge_refusing(4, vec![]).await;
-        let e = ask(&cfg(&url), "p", "web-gemini").await.unwrap_err();
+        let e = ask(&cfg(&url), "p", "web-gemini", "claude")
+            .await
+            .unwrap_err();
         assert!(
             matches!(&e, AskError::Failed(m) if m.contains("create-task failed")),
             "{e}"
@@ -662,7 +767,7 @@ pub(crate) mod tests {
         let mut c = cfg("http://127.0.0.1:9");
         c.gemini_api_key = Some(KEY.into());
         c.gemini_base_url = base;
-        let r = ask(&c, "p", "gemini-api").await.unwrap();
+        let r = ask(&c, "p", "gemini-api", "claude").await.unwrap();
         assert_eq!(
             (r.answer.as_str(), r.channel),
             ("VERDICT: APPROVED", Channel::ExternalApi)
@@ -680,7 +785,10 @@ pub(crate) mod tests {
         );
         // A failed request reports an error without the key (it lands in logs and records).
         c.gemini_base_url = "http://127.0.0.1:9".into();
-        let e = ask(&c, "p", "gemini-api").await.unwrap_err().to_string();
+        let e = ask(&c, "p", "gemini-api", "claude")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(!e.contains(KEY), "{e}");
     }
 
@@ -730,7 +838,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn an_overloaded_gemini_api_is_retried_before_anything_falls_back() {
         let (base, hits) = mock_gemini(vec![503, 503, 200]).await;
-        let r = ask(&gemini_cfg(base), "p", "auto").await.unwrap();
+        let r = ask(&gemini_cfg(base), "p", "auto", "claude").await.unwrap();
         assert_eq!(
             (r.provider.as_str(), r.channel),
             ("gemini-api", Channel::ExternalApi)
@@ -742,7 +850,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn retries_are_bounded_and_say_how_many_were_made() {
         let (base, hits) = mock_gemini(vec![503, 429, 503, 200]).await;
-        let e = ask(&gemini_cfg(base), "p", "gemini-api")
+        let e = ask(&gemini_cfg(base), "p", "gemini-api", "claude")
             .await
             .unwrap_err()
             .to_string();
@@ -753,7 +861,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn other_api_errors_are_not_retried() {
         let (base, hits) = mock_gemini(vec![400, 200]).await;
-        let e = ask(&gemini_cfg(base), "p", "gemini-api")
+        let e = ask(&gemini_cfg(base), "p", "gemini-api", "claude")
             .await
             .unwrap_err()
             .to_string();
@@ -767,7 +875,7 @@ pub(crate) mod tests {
         c.web_attempts = 1;
         // curl.exe may exist (WSL) but cannot reach a closed port either
         assert!(matches!(
-            ask(&c, "p", "auto").await,
+            ask(&c, "p", "auto", "claude").await,
             Err(AskError::Unavailable(_))
         ));
         assert!(probe(&c).await.iter().all(|(_, ok)| !ok));
@@ -803,5 +911,99 @@ pub(crate) mod tests {
             curl_exe_from(None, None, &none),
             std::path::PathBuf::from("curl.exe")
         );
+    }
+    #[test]
+    fn official_endpoints_are_recognized_by_https_host_not_by_substring() {
+        assert_eq!(
+            official_family("https://api.openai.com").as_deref(),
+            Some("openai")
+        );
+        assert_eq!(
+            official_family("https://api.openai.com/v1/").as_deref(),
+            Some("openai")
+        );
+        assert_eq!(
+            official_family("https://api.deepseek.com/v1").as_deref(),
+            Some("deepseek")
+        );
+        // Lookalikes, userinfo tricks, paths and plain HTTP are not an official vendor.
+        for bad in [
+            "https://api.openai.com.evil.example",
+            "https://x/api.openai.com",
+            "https://api.openai.com@evil.example",
+            "http://api.openai.com",
+        ] {
+            assert_eq!(official_family(bad), None, "{bad}");
+        }
+        // The port does not change the host.
+        assert_eq!(
+            official_family("https://api.openai.com:8443/v1").as_deref(),
+            Some("openai")
+        );
+        assert_eq!(
+            official_family("https://api.openai.com:443/v1").as_deref(),
+            Some("openai")
+        );
+    }
+
+    #[tokio::test]
+    async fn same_family_providers_are_skipped_before_any_request() {
+        let (gemini, hits) = mock_gemini(vec![200]).await;
+        let (bridge, prompts) = mock_bridge(vec![Ok("VERDICT: APPROVED")]).await;
+        let mut c = cfg(&bridge);
+        c.gemini_api_key = Some("k".into());
+        c.gemini_base_url = gemini;
+        // Implementer is Gemini: both Gemini channels are same-family.
+        let e = ask(&c, "p", "auto", "gemini").await.unwrap_err();
+        assert!(matches!(e, AskError::Unavailable(_)), "{e}");
+        assert_eq!(*hits.lock().unwrap(), 0, "gemini-api was never contacted");
+        assert!(
+            prompts.lock().unwrap().is_empty(),
+            "the web was never contacted"
+        );
+        let e = ask(&c, "p", "gemini-api", "gemini").await.unwrap_err();
+        assert!(e.to_string().contains("implementer's family"), "{e}");
+        assert_eq!(*hits.lock().unwrap(), 0);
+        let e = ask(&c, "p", "web-gemini", "gemini").await.unwrap_err();
+        assert!(e.to_string().contains("implementer's family"), "{e}");
+        assert!(prompts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_without_a_configured_vendor_is_not_an_independent_reviewer() {
+        let mut c = cfg("http://127.0.0.1:9");
+        c.openai = Some(("http://127.0.0.1:9".into(), "k".into(), "m".into()));
+        c.openai_family = None;
+        assert_eq!(provider_family(&c, "openai"), None);
+        let e = ask(&c, "p", "openai", "claude").await.unwrap_err();
+        assert!(e.to_string().contains("not configured"), "{e}");
+        let e = ask(&c, "p", "auto", "claude").await.unwrap_err();
+        assert!(matches!(e, AskError::Unavailable(_)), "{e}");
+        assert!(e.to_string().contains("not configured"), "{e}");
+
+        // A configured vendor that is the implementer's is refused too.
+        c.openai_family = Some("DeepSeek".into());
+        assert_eq!(provider_family(&c, "openai"), Some("deepseek"));
+        let e = ask(&c, "p", "openai", "deepseek").await.unwrap_err();
+        assert!(e.to_string().contains("implementer's family"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_fallback_never_lands_on_the_implementer_family() {
+        let (gemini, hits) = mock_gemini(vec![200, 200]).await;
+        let (bridge, prompts) = mock_bridge(vec![Ok("VERDICT: APPROVED")]).await;
+        let mut c = cfg(&bridge);
+        c.gemini_api_key = Some("k".into());
+        c.gemini_base_url = gemini;
+        // The only other-vendor channel is down; the two Gemini channels must not be tried.
+        c.openai = Some(("http://127.0.0.1:9".into(), "k".into(), "m".into()));
+        c.openai_family = Some("claude".into());
+        let e = ask(&c, "p", "auto", "gemini").await.unwrap_err();
+        assert!(matches!(e, AskError::Failed(_)), "{e}");
+        let msg = e.to_string();
+        assert!(msg.contains("gemini-api: reviewer family gemini"), "{msg}");
+        assert!(msg.contains("web-gemini: reviewer family gemini"), "{msg}");
+        assert_eq!(*hits.lock().unwrap(), 0, "no gemini-api request");
+        assert!(prompts.lock().unwrap().is_empty(), "no web-gemini request");
     }
 }

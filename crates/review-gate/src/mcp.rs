@@ -44,6 +44,9 @@ pub struct InitArgs {
     pub repo: String,
     /// external-api | web-gemini | claude-subagent | self-review | manual (default web-gemini)
     pub min_reviewer: Option<String>,
+    /// Self-reported implementer family: only checked against the authenticated identity,
+    /// never trusted as the task's frozen family.
+    pub implementer_family: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -131,7 +134,8 @@ impl GateMcp {
             .post(
                 "/tasks",
                 json!({ "id": a.id, "goal": a.goal, "acceptance": a.acceptance, "iterations": a.iterations,
-                        "repo": a.repo, "min_reviewer": a.min_reviewer.unwrap_or_else(|| "web-gemini".into()) }),
+                        "repo": a.repo, "min_reviewer": a.min_reviewer.unwrap_or_else(|| "web-gemini".into()),
+                        "implementer_family": a.implementer_family }),
             )
             .await)
     }

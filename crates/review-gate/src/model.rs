@@ -5,6 +5,8 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::identity::canonical_family;
+
 /// Where a review came from. Strength follows dsh-web-relay's `--min-reviewer` scale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -123,6 +125,16 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
+    /// The authenticated principal that created the task; frozen at creation. Tasks from older
+    /// versions have no such field and belong to `legacy-claude` (see [`Task::owner_principal`]).
+    #[serde(default)]
+    pub principal: String,
+    /// Non-secret accountability: which credential created the task and which configuration
+    /// content was in force. Older tasks have neither.
+    #[serde(default)]
+    pub credential: String,
+    #[serde(default)]
+    pub config_digest: Option<String>,
     #[serde(default)]
     pub expr_id: Option<String>,
     pub goal: String,
@@ -143,6 +155,80 @@ pub struct Task {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub history: Vec<HistoryEntry>,
+}
+
+impl Task {
+    /// The principal that owns this task. Unfrozen legacy tasks belong only to `legacy-claude`;
+    /// they cannot be claimed by any other identity.
+    pub fn owner_principal(&self) -> &str {
+        if self.principal.is_empty() {
+            crate::identity::LEGACY_PRINCIPAL
+        } else {
+            &self.principal
+        }
+    }
+
+    pub fn canonical_implementer_family(&self) -> Option<&'static str> {
+        canonical_family(&self.implementer_family)
+    }
+}
+
+/// The single eligibility rule for a review channel under implementer neutrality.
+///
+/// - `external-api` and `web-gemini` must come from a **known** family that is not the frozen
+///   implementer family; unknown families are no independent review, and same-family is refused.
+/// - `claude-subagent` and `self-review` belong to the implementer's own family, with their
+///   existing strengths (2 and 1); a mismatched claim is replaced by the frozen family.
+/// - `manual` is limited to the administrator.
+///
+/// On success returns the canonical family the record may carry.
+pub fn review_eligibility(
+    implementer_family: &str,
+    channel: Channel,
+    reviewer_family: &str,
+    caller_is_admin: bool,
+) -> Result<String, String> {
+    let implementer = canonical_family(implementer_family).ok_or_else(|| {
+        format!(
+            "unknown implementer family {implementer_family:?}: a task must freeze a model vendor"
+        )
+    })?;
+    match channel {
+        Channel::Manual => {
+            if !caller_is_admin {
+                return Err("manual reviews are accepted only from the administrator".into());
+            }
+            Ok("human".into())
+        }
+        Channel::ExternalApi | Channel::WebGemini => {
+            // One rule: do not keep a second copy of the vendor comparison here.
+            external_family_ok(implementer_family, reviewer_family).map(str::to_string)
+        }
+        Channel::ClaudeSubagent | Channel::SelfReview => Ok(implementer.to_string()),
+    }
+}
+
+/// The external-only part of the rule, also used before a provider is contacted.
+pub fn external_family_ok(
+    implementer_family: &str,
+    reviewer_family: &str,
+) -> Result<&'static str, String> {
+    let implementer = canonical_family(implementer_family).ok_or_else(|| {
+        format!(
+            "unknown implementer family {implementer_family:?}: a task must freeze a model vendor"
+        )
+    })?;
+    let reviewer = canonical_family(reviewer_family).ok_or_else(|| {
+        format!(
+            "unknown reviewer family {reviewer_family:?} is not a known model family; the administrator must configure the model vendor of this endpoint"
+        )
+    })?;
+    if reviewer == implementer {
+        return Err(format!(
+            "reviewer family {reviewer} is the implementer's family; a review from the same vendor is not independent"
+        ));
+    }
+    Ok(reviewer)
 }
 
 /// What the implementer must do next.

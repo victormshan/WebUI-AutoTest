@@ -9,7 +9,10 @@ use std::path::Path;
 use chrono::Utc;
 
 use crate::attest::{self, Keypair, Statement};
-use crate::model::{Action, Channel, HistoryEntry, Outcome, ReviewRecord, Status, Task, Verdict};
+use crate::identity::{Identity, canonical_family};
+use crate::model::{
+    Action, Channel, HistoryEntry, Outcome, ReviewRecord, Status, Task, Verdict, review_eligibility,
+};
 use crate::relay::RelayTrace;
 use crate::store::{Store, valid_id};
 use crate::{GateError, git};
@@ -19,6 +22,16 @@ pub const MAX_ITERATIONS: u32 = 10;
 
 pub struct NewTask {
     pub id: String,
+    /// The authenticated principal that creates the task; frozen with the task.
+    pub principal: String,
+    /// The creator's canonical model family; frozen as the implementer family.
+    pub implementer_family: String,
+    /// Non-secret accountability: the credential id that created the task and the digest of the
+    /// identity configuration in force.
+    pub credential: String,
+    pub config_digest: Option<String>,
+    /// Optional self-report from the client: only checked for consistency, never trusted.
+    pub claimed_family: Option<String>,
     pub goal: String,
     pub final_acceptance: String,
     pub repo: String,
@@ -106,6 +119,28 @@ impl Gate {
         if !valid_id(&t.id) {
             return Err(GateError::InvalidId(t.id));
         }
+        if !valid_id(&t.principal) {
+            return Err(GateError::Invalid(format!(
+                "invalid principal {:?}",
+                t.principal
+            )));
+        }
+        let implementer_family = canonical_family(&t.implementer_family).ok_or_else(|| {
+            GateError::Invalid(format!(
+                "unknown implementer family {:?}; the service identity must map to a known model family",
+                t.implementer_family
+            ))
+        })?;
+        if let Some(claim) = t.claimed_family.as_deref() {
+            let claim = canonical_family(claim).ok_or_else(|| {
+                GateError::Mismatch(format!("unknown claimed implementer family {claim:?}"))
+            })?;
+            if claim != implementer_family {
+                return Err(GateError::Mismatch(format!(
+                    "claimed implementer family {claim} does not match the authenticated family {implementer_family}"
+                )));
+            }
+        }
         if !(1..=MAX_ITERATIONS).contains(&t.iterations) {
             return Err(GateError::Invalid(format!(
                 "iterations must be 1-{MAX_ITERATIONS}"
@@ -125,6 +160,9 @@ impl Gate {
         let now = Utc::now();
         let task = Task {
             id: t.id,
+            principal: t.principal,
+            credential: t.credential,
+            config_digest: t.config_digest,
             expr_id: None,
             goal: t.goal,
             final_acceptance: t.final_acceptance,
@@ -134,7 +172,7 @@ impl Gate {
             reject_streak: 0,
             min_reviewer: t.min_reviewer,
             review_provider: t.review_provider,
-            implementer_family: "claude".into(),
+            implementer_family: implementer_family.to_string(),
             status: Status::Running,
             stop_reason: None,
             created_at: now,
@@ -145,16 +183,37 @@ impl Gate {
         Ok(task)
     }
 
-    pub fn link(&self, id: &str, expr_id: &str) -> Result<Task, GateError> {
+    /// Whether `who` may read or change this task. The administrator may access every task;
+    /// anybody else is confined to the principal frozen at creation.
+    pub fn can_access(&self, task: &Task, who: &Identity) -> bool {
+        who.admin || task.owner_principal() == who.principal
+    }
+
+    pub fn ensure_owner(&self, task: &Task, who: &Identity) -> Result<(), GateError> {
+        if self.can_access(task, who) {
+            Ok(())
+        } else {
+            Err(GateError::Forbidden(format!(
+                "task {} belongs to principal {}, not {}",
+                task.id,
+                task.owner_principal(),
+                who.principal
+            )))
+        }
+    }
+
+    pub fn link(&self, who: &Identity, id: &str, expr_id: &str) -> Result<Task, GateError> {
         let mut task = self.store.load_task(id)?;
+        self.ensure_owner(&task, who)?;
         task.expr_id = Some(expr_id.to_string());
         task.updated_at = Utc::now();
         self.store.save_task(&task)?;
         Ok(task)
     }
 
-    pub fn pause(&self, id: &str, reason: &str) -> Result<Task, GateError> {
+    pub fn pause(&self, who: &Identity, id: &str, reason: &str) -> Result<Task, GateError> {
         let mut task = self.store.load_task(id)?;
+        self.ensure_owner(&task, who)?;
         task.status = Status::Paused;
         task.stop_reason = Some(reason.to_string());
         task.updated_at = Utc::now();
@@ -164,10 +223,25 @@ impl Gate {
 
     /// Stores a new review record for the task's current version. Only the gate calls this:
     /// from an external model's reply, or from an explicitly submitted weaker channel.
-    pub fn add_review(&self, task: &Task, input: ReviewInput) -> Result<ReviewRecord, GateError> {
+    pub fn add_review(
+        &self,
+        who: &Identity,
+        task: &Task,
+        input: ReviewInput,
+    ) -> Result<ReviewRecord, GateError> {
+        self.ensure_owner(task, who)?;
         if task.status != Status::Running {
             return Err(GateError::NotRunning(task.id.clone(), task.status));
         }
+        // The same rule at the storage boundary: a record can never claim a family the
+        // implementer-neutral policy forbids, whatever produced it.
+        let family = review_eligibility(
+            &task.implementer_family,
+            input.channel,
+            &input.family,
+            who.admin,
+        )
+        .map_err(|e| GateError::Mismatch(format!("review is not eligible: {e}")))?;
         let attempt = self.store.review_count(&task.id, task.current_iteration)? + 1;
         let r = ReviewRecord {
             id: format!("v{}-{attempt}", task.current_iteration),
@@ -180,7 +254,7 @@ impl Gate {
             channel: input.channel,
             provider: input.provider,
             model: input.model,
-            family: input.family,
+            family,
             prompt_sha: input.prompt_sha,
             text: input.text,
             at: Utc::now(),
@@ -209,6 +283,7 @@ impl Gate {
     /// running task holds an unused approved review (strong enough) for exactly `tree` on `base`.
     pub fn check_commit(
         &self,
+        who: &Identity,
         repo: &str,
         tree: &str,
         base: &str,
@@ -217,17 +292,28 @@ impl Gate {
             .map_err(|e| GateError::Invalid(format!("repo {repo}: {e}")))?
             .to_string_lossy()
             .into_owned();
-        let Some(task) = self
+        let running: Vec<Task> = self
             .store
             .list_tasks()?
             .into_iter()
-            .find(|t| t.repo == repo && t.status == Status::Running)
-        else {
+            .filter(|t| t.repo == repo && t.status == Status::Running)
+            .collect();
+        if running.is_empty() {
             return Ok(CommitCheck {
                 allowed: true,
                 task: None,
                 review: None,
                 reason: "no running auto-iterate task for this repository".into(),
+            });
+        }
+        let Some(task) = running.into_iter().find(|t| self.can_access(t, who)) else {
+            // The running task belongs to another principal. Do not hide it and let the
+            // commit through, and do not leak its id or goal to the caller.
+            return Ok(CommitCheck {
+                allowed: false,
+                task: None,
+                review: None,
+                reason: "a running task for this repository belongs to another principal; only that principal may commit under it".into(),
             });
         };
         let count = self.store.review_count(&task.id, task.current_iteration)?;
@@ -238,10 +324,18 @@ impl Gate {
             if task.history.iter().any(|h| h.review == r.id) {
                 continue;
             }
+            let eligible = review_eligibility(
+                &task.implementer_family,
+                r.channel,
+                &r.family,
+                true, // a manual record was created by the administrator
+            )
+            .is_ok();
             if r.verdict == Verdict::Approved
                 && r.tree == tree
                 && r.base == base
                 && r.channel.strength() >= task.min_reviewer.strength()
+                && eligible
             {
                 return Ok(CommitCheck {
                     allowed: true,
@@ -265,16 +359,26 @@ impl Gate {
     /// Applies a review record. `commit`/`tag` are required when the review approved.
     pub fn record(
         &self,
+        who: &Identity,
         id: &str,
         review_id: &str,
         commit: Option<&str>,
         tag: Option<&str>,
     ) -> Result<Recorded, GateError> {
         let mut task = self.store.load_task(id)?;
+        self.ensure_owner(&task, who)?;
         if task.status != Status::Running {
             return Err(GateError::NotRunning(task.id.clone(), task.status));
         }
         let r = self.store.load_review(id, review_id)?;
+        // Legacy records are not grandfathered: an external record whose family is unknown or
+        // the implementer's own cannot finalize a version. Signed history still verifies.
+        review_eligibility(&task.implementer_family, r.channel, &r.family, true).map_err(|e| {
+            GateError::Mismatch(format!(
+                "review {} cannot be finalized under implementer neutrality: {e}",
+                r.id
+            ))
+        })?;
         if r.iteration != task.current_iteration {
             return Err(GateError::Mismatch(format!(
                 "review {} is for version {}, task is at version {}",
@@ -441,7 +545,12 @@ impl Gate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::Identity;
     use std::fs;
+
+    fn legacy() -> Identity {
+        Identity::legacy()
+    }
     use std::path::PathBuf;
 
     struct Env {
@@ -476,6 +585,11 @@ mod tests {
         e.gate
             .init(NewTask {
                 id: id.into(),
+                principal: crate::identity::LEGACY_PRINCIPAL.into(),
+                implementer_family: crate::identity::LEGACY_FAMILY.into(),
+                credential: "test".into(),
+                config_digest: None,
+                claimed_family: None,
                 goal: "g".into(),
                 final_acceptance: "a".into(),
                 repo: e.repo.to_string_lossy().into(),
@@ -502,7 +616,7 @@ mod tests {
             prompt_sha: String::new(),
             text: "ok".into(),
         };
-        e.gate.add_review(&task, input).unwrap()
+        e.gate.add_review(&legacy(), &task, input).unwrap()
     }
 
     fn commit_tag(e: &Env, tag: &str) -> String {
@@ -522,7 +636,7 @@ mod tests {
         let bad = commit_tag(&e, "bad");
         let err = e
             .gate
-            .record("t", &r.id, Some(&bad), Some("bad"))
+            .record(&legacy(), "t", &r.id, Some(&bad), Some("bad"))
             .unwrap_err();
         assert!(
             err.to_string().contains("提交内容与被审内容不一致"),
@@ -535,7 +649,7 @@ mod tests {
         let good = commit_tag(&e, "good");
         let out = e
             .gate
-            .record("t", &r.id, Some(&good), Some("good"))
+            .record(&legacy(), "t", &r.id, Some(&good), Some("good"))
             .unwrap();
         assert_eq!(out.action, Action::Finalize);
         assert_eq!(out.task.status, Status::Done);
@@ -548,17 +662,20 @@ mod tests {
         init(&e, "t", 2, Channel::WebGemini);
         let r = review(&e, "t", "v1\n", Verdict::Approved, Channel::WebGemini);
         assert!(matches!(
-            e.gate.record("t", &r.id, None, None),
+            e.gate.record(&legacy(), "t", &r.id, None, None),
             Err(GateError::Invalid(_))
         ));
         let c = commit_tag(&e, "v1");
         sh(&e.repo, &["tag", "elsewhere", "HEAD~1"]);
         let err = e
             .gate
-            .record("t", &r.id, Some(&c), Some("elsewhere"))
+            .record(&legacy(), "t", &r.id, Some(&c), Some("elsewhere"))
             .unwrap_err();
         assert!(err.to_string().contains("没有指向"), "{err}");
-        let out = e.gate.record("t", &r.id, Some(&c), Some("v1")).unwrap();
+        let out = e
+            .gate
+            .record(&legacy(), "t", &r.id, Some(&c), Some("v1"))
+            .unwrap();
         assert_eq!(
             (out.action, out.task.current_iteration),
             (Action::StartRound, 2)
@@ -591,11 +708,11 @@ mod tests {
             prompt_sha: String::new(),
             text: "ok".into(),
         };
-        let r = e.gate.add_review(&task, input).unwrap();
+        let r = e.gate.add_review(&legacy(), &task, input).unwrap();
         let merge = commit_tag(&e, "m1");
         let err = e
             .gate
-            .record("t", &r.id, Some(&merge), Some("m1"))
+            .record(&legacy(), "t", &r.id, Some(&merge), Some("m1"))
             .unwrap_err();
         assert!(err.to_string().contains("有 2 个父提交"), "{err}");
     }
@@ -606,17 +723,23 @@ mod tests {
         init(&e, "t", 3, Channel::WebGemini);
         let r = review(&e, "t", "v1\n", Verdict::Rejected, Channel::WebGemini);
         assert_eq!(
-            e.gate.record("t", &r.id, None, None).unwrap().action,
+            e.gate
+                .record(&legacy(), "t", &r.id, None, None)
+                .unwrap()
+                .action,
             Action::RetrySameRound
         );
-        let again = e.gate.record("t", &r.id, None, None).unwrap_err();
+        let again = e
+            .gate
+            .record(&legacy(), "t", &r.id, None, None)
+            .unwrap_err();
         assert!(again.to_string().contains("already used"));
         assert!(matches!(
-            e.gate.record("t", "v9-1", None, None),
+            e.gate.record(&legacy(), "t", "v9-1", None, None),
             Err(GateError::NoSuchReview(_))
         ));
         assert!(matches!(
-            e.gate.record("t", "../../x", None, None),
+            e.gate.record(&legacy(), "t", "../../x", None, None),
             Err(GateError::InvalidId(_))
         ));
     }
@@ -626,7 +749,10 @@ mod tests {
         let e = env();
         init(&e, "t", 2, Channel::WebGemini);
         let r = review(&e, "t", "v1\n", Verdict::Approved, Channel::ClaudeSubagent);
-        let out = e.gate.record("t", &r.id, Some("HEAD"), Some("x")).unwrap();
+        let out = e
+            .gate
+            .record(&legacy(), "t", &r.id, Some("HEAD"), Some("x"))
+            .unwrap();
         assert_eq!(out.action, Action::Pause);
         assert_eq!(out.task.reject_streak, 0);
         assert!(out.task.stop_reason.unwrap().contains("强度不足"));
@@ -634,7 +760,7 @@ mod tests {
         // paused tasks accept nothing more
         let r2 = e.gate.store().load_review("t", &r.id).unwrap();
         assert!(matches!(
-            e.gate.record("t", &r2.id, None, None),
+            e.gate.record(&legacy(), "t", &r2.id, None, None),
             Err(GateError::NotRunning(..))
         ));
     }
@@ -647,7 +773,7 @@ mod tests {
         let c = commit_tag(&e, "v1");
         assert_eq!(
             e.gate
-                .record("t", &r.id, Some(&c), Some("v1"))
+                .record(&legacy(), "t", &r.id, Some(&c), Some("v1"))
                 .unwrap()
                 .action,
             Action::Finalize
@@ -666,13 +792,13 @@ mod tests {
                 Verdict::Rejected,
                 Channel::WebGemini,
             );
-            e.gate.record("t", &r.id, None, None).unwrap();
+            e.gate.record(&legacy(), "t", &r.id, None, None).unwrap();
         }
         let r = review(&e, "t", "v1\n", Verdict::Approved, Channel::WebGemini);
         let c = commit_tag(&e, "v1");
         assert_eq!(
             e.gate
-                .record("t", &r.id, Some(&c), Some("v1"))
+                .record(&legacy(), "t", &r.id, Some(&c), Some("v1"))
                 .unwrap()
                 .task
                 .reject_streak,
@@ -687,7 +813,7 @@ mod tests {
                 Verdict::Rejected,
                 Channel::WebGemini,
             );
-            last = Some(e.gate.record("t", &r.id, None, None).unwrap());
+            last = Some(e.gate.record(&legacy(), "t", &r.id, None, None).unwrap());
         }
         let last = last.unwrap();
         assert_eq!(last.action, Action::Pause);
@@ -713,6 +839,11 @@ mod tests {
         let e = env();
         let base = |id: &str, n: u32| NewTask {
             id: id.into(),
+            principal: crate::identity::LEGACY_PRINCIPAL.into(),
+            implementer_family: crate::identity::LEGACY_FAMILY.into(),
+            credential: "test".into(),
+            config_digest: None,
+            claimed_family: None,
             goal: "g".into(),
             final_acceptance: "a".into(),
             repo: e.repo.to_string_lossy().into(),
@@ -759,7 +890,7 @@ mod tests {
         let e = env();
         let repo = e.repo.to_string_lossy().to_string();
         let head = sh(&e.repo, &["rev-parse", "HEAD"]).trim().to_string();
-        let free = e.gate.check_commit(&repo, "x", &head).unwrap();
+        let free = e.gate.check_commit(&legacy(), &repo, "x", &head).unwrap();
         assert!(
             free.allowed && free.task.is_none(),
             "no task: anything goes"
@@ -767,25 +898,31 @@ mod tests {
 
         init(&e, "t", 2, Channel::WebGemini);
         let rej = review(&e, "t", "v1\n", Verdict::Rejected, Channel::WebGemini);
-        let c = e.gate.check_commit(&repo, &rej.tree, &rej.base).unwrap();
+        let c = e
+            .gate
+            .check_commit(&legacy(), &repo, &rej.tree, &rej.base)
+            .unwrap();
         assert!(!c.allowed && c.task.as_deref() == Some("t"));
         let weak = review(&e, "t", "v1\n", Verdict::Approved, Channel::SelfReview);
         assert!(
             !e.gate
-                .check_commit(&repo, &weak.tree, &weak.base)
+                .check_commit(&legacy(), &repo, &weak.tree, &weak.base)
                 .unwrap()
                 .allowed,
             "too weak"
         );
         let ok = review(&e, "t", "v1\n", Verdict::Approved, Channel::WebGemini);
-        let c = e.gate.check_commit(&repo, &ok.tree, &ok.base).unwrap();
+        let c = e
+            .gate
+            .check_commit(&legacy(), &repo, &ok.tree, &ok.base)
+            .unwrap();
         assert!(
             c.allowed && c.review.as_deref() == Some(ok.id.as_str()),
             "{c:?}"
         );
         assert!(
             !e.gate
-                .check_commit(&repo, &rej.base, &rej.base)
+                .check_commit(&legacy(), &repo, &rej.base, &rej.base)
                 .unwrap()
                 .allowed,
             "other tree"
@@ -794,14 +931,321 @@ mod tests {
         sh(&e.repo, &["commit", "-qm", "v1"]);
         sh(&e.repo, &["tag", "v1"]);
         e.gate
-            .record("t", &ok.id, Some("HEAD"), Some("v1"))
+            .record(&legacy(), "t", &ok.id, Some("HEAD"), Some("v1"))
             .unwrap();
         assert!(
             !e.gate
-                .check_commit(&repo, &ok.tree, &ok.base)
+                .check_commit(&legacy(), &repo, &ok.tree, &ok.base)
                 .unwrap()
                 .allowed,
             "used review"
         );
+    }
+    fn who(principal: &str, family: &str) -> Identity {
+        Identity::new(principal, family)
+    }
+
+    fn init_as(e: &Env, id: &str, principal: &str, family: &str, claimed: Option<&str>) -> Task {
+        e.gate
+            .init(NewTask {
+                id: id.into(),
+                principal: principal.into(),
+                implementer_family: family.into(),
+                credential: "test".into(),
+                config_digest: None,
+                claimed_family: claimed.map(str::to_string),
+                goal: "g".into(),
+                final_acceptance: "a".into(),
+                repo: e.repo.to_string_lossy().into(),
+                iterations: 1,
+                min_reviewer: Channel::WebGemini,
+                review_provider: "auto".into(),
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn init_freezes_the_authenticated_principal_and_family() {
+        let e = env();
+        let task = init_as(&e, "t", "opencode", "deepseek", Some("DeepSeek"));
+        assert_eq!(task.principal, "opencode");
+        assert_eq!(task.implementer_family, "deepseek");
+
+        // A self-report is only a consistency check, never the source of truth.
+        let err = e
+            .gate
+            .init(NewTask {
+                id: "u".into(),
+                principal: "opencode".into(),
+                implementer_family: "deepseek".into(),
+                credential: "test".into(),
+                config_digest: None,
+                claimed_family: Some("openai".into()),
+                goal: "g".into(),
+                final_acceptance: "a".into(),
+                repo: e.repo.to_string_lossy().into(),
+                iterations: 1,
+                min_reviewer: Channel::WebGemini,
+                review_provider: "auto".into(),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+
+        let err = e
+            .gate
+            .init(NewTask {
+                id: "v".into(),
+                principal: "opencode".into(),
+                implementer_family: "openai-compatible".into(),
+                credential: "test".into(),
+                config_digest: None,
+                claimed_family: None,
+                goal: "g".into(),
+                final_acceptance: "a".into(),
+                repo: e.repo.to_string_lossy().into(),
+                iterations: 1,
+                min_reviewer: Channel::WebGemini,
+                review_provider: "auto".into(),
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown implementer family"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn another_principal_cannot_read_write_review_or_record_the_task() {
+        let e = env();
+        init_as(&e, "t", "opencode", "deepseek", None);
+        let owner = who("opencode", "deepseek");
+        let other = who("claude", "claude");
+        let task = e.gate.store().load_task("t").unwrap();
+
+        assert!(e.gate.ensure_owner(&task, &owner).is_ok());
+        assert!(matches!(
+            e.gate.ensure_owner(&task, &other),
+            Err(GateError::Forbidden(_))
+        ));
+        assert!(matches!(
+            e.gate.link(&other, "t", "x"),
+            Err(GateError::Forbidden(_))
+        ));
+        fs::write(e.repo.join("a.txt"), "v1\n").unwrap();
+        let (tree, base) = git::stage_all(&e.repo).unwrap();
+        let input = ReviewInput {
+            tree,
+            base,
+            verdict: Verdict::Approved,
+            channel: Channel::WebGemini,
+            provider: "web-gemini".into(),
+            model: None,
+            family: "gemini".into(),
+            prompt_sha: String::new(),
+            text: "VERDICT: APPROVED".into(),
+        };
+        assert!(matches!(
+            e.gate.add_review(&other, &task, input),
+            Err(GateError::Forbidden(_))
+        ));
+        assert!(matches!(
+            e.gate.record(&other, "t", "v1-1", None, None),
+            Err(GateError::Forbidden(_))
+        ));
+
+        // The hook must not hide another principal's running task and let the commit through.
+        let repo = e.repo.to_string_lossy().to_string();
+        let (tree, base) = git::stage_all(&e.repo).unwrap();
+        let unseen = e.gate.check_commit(&other, &repo, &tree, &base).unwrap();
+        assert!(!unseen.allowed, "{unseen:?}");
+        assert!(
+            unseen.task.is_none(),
+            "a non-owner must not see the task's content"
+        );
+
+        // The owner passes with an eligible approval …
+        let owner_ok = e
+            .gate
+            .add_review(
+                &owner,
+                &task,
+                ReviewInput {
+                    tree: tree.clone(),
+                    base: base.clone(),
+                    verdict: Verdict::Approved,
+                    channel: Channel::WebGemini,
+                    provider: "web-gemini".into(),
+                    model: None,
+                    family: "gemini".into(),
+                    prompt_sha: String::new(),
+                    text: "VERDICT: APPROVED".into(),
+                },
+            )
+            .unwrap();
+        let seen_by_owner = e.gate.check_commit(&owner, &repo, &tree, &base).unwrap();
+        assert!(
+            seen_by_owner.allowed && seen_by_owner.review.as_deref() == Some(owner_ok.id.as_str()),
+            "{seen_by_owner:?}"
+        );
+        // … but another principal cannot borrow the owner's approval.
+        let borrowed = e.gate.check_commit(&other, &repo, &tree, &base).unwrap();
+        assert!(!borrowed.allowed, "{borrowed:?}");
+        assert!(borrowed.task.is_none() && borrowed.review.is_none());
+    }
+
+    #[test]
+    fn tasks_without_a_principal_belong_only_to_legacy_claude() {
+        let e = env();
+        let mut task = init_as(&e, "t", "legacy-claude", "claude", None);
+        task.principal.clear();
+        e.gate.store().save_task(&task).unwrap();
+        let loaded = e.gate.store().load_task("t").unwrap();
+        assert_eq!(loaded.owner_principal(), "legacy-claude");
+        assert!(e.gate.ensure_owner(&loaded, &legacy()).is_ok());
+        assert!(matches!(
+            e.gate.ensure_owner(&loaded, &who("opencode", "deepseek")),
+            Err(GateError::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn external_reviews_must_come_from_another_known_family() {
+        let e = env();
+        init_as(&e, "t", "opencode", "deepseek", None);
+        let owner = who("opencode", "deepseek");
+        let task = e.gate.store().load_task("t").unwrap();
+        fs::write(e.repo.join("a.txt"), "v1\n").unwrap();
+        let (tree, base) = git::stage_all(&e.repo).unwrap();
+        let input = |ch, family: &str| ReviewInput {
+            tree: tree.clone(),
+            base: base.clone(),
+            verdict: Verdict::Approved,
+            channel: ch,
+            provider: "p".into(),
+            model: None,
+            family: family.into(),
+            prompt_sha: String::new(),
+            text: "VERDICT: APPROVED".into(),
+        };
+
+        // Each external channel refuses the implementer's own vendor.
+        for ch in [Channel::ExternalApi, Channel::WebGemini] {
+            let err = e
+                .gate
+                .add_review(&owner, &task, input(ch, "deepseek"))
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("implementer's family"),
+                "{ch}: {err}"
+            );
+            let err = e
+                .gate
+                .add_review(&owner, &task, input(ch, "openai-compatible"))
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("unknown reviewer family"),
+                "{ch}: {err}"
+            );
+        }
+
+        // A different, known vendor is accepted and recorded canonically.
+        let mut gemini = input(Channel::WebGemini, "Google");
+        gemini.family = "Google".into();
+        let r = e.gate.add_review(&owner, &task, gemini).unwrap();
+        assert_eq!(r.family, "gemini");
+        assert_eq!(r.channel, Channel::WebGemini);
+
+        // Weak channels stay in the implementer's family, with their existing strengths.
+        let r = e
+            .gate
+            .add_review(&owner, &task, input(Channel::ClaudeSubagent, "gemini"))
+            .unwrap();
+        assert_eq!(r.family, "deepseek");
+        assert_eq!(r.channel.strength(), 2);
+        assert_eq!(Channel::SelfReview.strength(), 1);
+    }
+
+    #[test]
+    fn check_commit_refuses_same_family_and_unknown_family_external_records() {
+        let e = env();
+        init_as(&e, "t", "opencode", "deepseek", None);
+        let owner = who("opencode", "deepseek");
+        let repo = e.repo.to_string_lossy().to_string();
+        fs::write(e.repo.join("a.txt"), "v1\n").unwrap();
+        let (tree, base) = git::stage_all(&e.repo).unwrap();
+        for (attempt, family) in [(1u32, "deepseek"), (2, "openai-compatible")] {
+            let r = ReviewRecord {
+                id: format!("v1-{attempt}"),
+                task: "t".into(),
+                iteration: 1,
+                attempt,
+                tree: tree.clone(),
+                base: base.clone(),
+                verdict: Verdict::Approved,
+                channel: Channel::ExternalApi,
+                provider: "p".into(),
+                model: None,
+                family: family.into(),
+                prompt_sha: String::new(),
+                text: "VERDICT: APPROVED".into(),
+                at: Utc::now(),
+            };
+            e.gate.store().save_review(&r).unwrap();
+            let c = e.gate.check_commit(&owner, &repo, &tree, &base).unwrap();
+            assert!(!c.allowed, "{family} must not authorize a commit: {c:?}");
+        }
+    }
+
+    #[test]
+    fn manual_is_admin_only_and_legacy_external_records_cannot_finalize() {
+        let e = env();
+        init_as(&e, "t", "legacy-claude", "claude", None);
+        let task = e.gate.store().load_task("t").unwrap();
+        fs::write(e.repo.join("a.txt"), "v1\n").unwrap();
+        let (tree, base) = git::stage_all(&e.repo).unwrap();
+        let manual = |family: &str| ReviewInput {
+            tree: tree.clone(),
+            base: base.clone(),
+            verdict: Verdict::Approved,
+            channel: Channel::Manual,
+            provider: "manual".into(),
+            model: None,
+            family: family.into(),
+            prompt_sha: String::new(),
+            text: "VERDICT: APPROVED".into(),
+        };
+        assert!(matches!(
+            e.gate.add_review(&legacy(), &task, manual("human")),
+            Err(GateError::Mismatch(_))
+        ));
+        assert!(
+            e.gate
+                .add_review(&Identity::admin(), &task, manual("human"))
+                .is_ok()
+        );
+
+        // Two records written by an older gate: same vendor, and an unknown protocol family.
+        for (id, family) in [("v1-9", "claude"), ("v1-10", "openai-compatible")] {
+            let r = ReviewRecord {
+                id: id.into(),
+                task: "t".into(),
+                iteration: 1,
+                attempt: 9,
+                tree: tree.clone(),
+                base: base.clone(),
+                verdict: Verdict::Approved,
+                channel: Channel::ExternalApi,
+                provider: "openai".into(),
+                model: None,
+                family: family.into(),
+                prompt_sha: String::new(),
+                text: "VERDICT: APPROVED".into(),
+                at: Utc::now(),
+            };
+            e.gate.store().save_review(&r).unwrap();
+            let err = e.gate.record(&legacy(), "t", id, None, None).unwrap_err();
+            assert!(err.to_string().contains("cannot be finalized"), "{err}");
+        }
+        // Signed history is untouched by this rule: attestation verification has no channel.
     }
 }

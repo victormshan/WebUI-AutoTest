@@ -1,0 +1,1133 @@
+Test evidence: implementer-neutral step A rework
+worktree: /home/administrator/projects/Chrome-MCP-ai-A
+date: 2026-10-20T08:01:44.165947+00:00
+$ git rev-parse HEAD HEAD^{tree}
+1a031b5f9af5d94f8ed38e929885bb92d88d87ea
+9e9d9078186b5b47703028e5a4063b73b0acbc18
+[exit 0]
+
+$ git status --porcelain --untracked-files=all
+?? plans/M2-evidence/mutation-ai-A.txt
+[exit 0]
+
+--- cargo test -p review-gate, run 1/3 ---
+$ cargo test -p review-gate
+
+running 236 tests
+test attest::tests::key_is_created_once_with_private_permissions_and_reloaded ... ok
+test gate::tests::channel_names_and_strengths ... ok
+test attest::tests::sign_verify_and_tamper_detection ... ok
+test gate::tests::check_commit_refuses_same_family_and_unknown_family_external_records ... ok
+test gate::tests::another_principal_cannot_read_write_review_or_record_the_task ... ok
+test gate::tests::init_freezes_the_authenticated_principal_and_family ... ok
+test gate::tests::approval_checks_parent_and_tag_and_needs_both ... ok
+test gate::tests::external_reviews_must_come_from_another_known_family ... ok
+test gate::tests::check_commit_needs_an_unused_approved_review_of_the_staged_tree ... ok
+test gate::tests::approval_requires_the_reviewed_tree ... ok
+test gate::tests::init_validates_input ... ok
+test gate::tests::explicitly_lowered_threshold_accepts_a_subagent_review ... ok
+test attest::tests::note_at_finds_fanned_out_notes ... ok
+test gate::tests::manual_is_admin_only_and_legacy_external_records_cannot_finalize ... ok
+test gate::tests::records_are_single_use_and_bound_to_the_version ... ok
+test hook::tests::finds_git_commit_and_push_in_shell_commands ... ok
+test identity::tests::a_missing_file_is_an_error_the_caller_may_treat_as_legacy ... ok
+test identity::tests::families_are_canonical_and_protocols_are_not_vendors ... ok
+test identity::tests::invalid_configurations_are_fail_closed ... ok
+test identity::tests::revocation_and_rotation_keep_the_principal ... ok
+test identity::tests::the_legacy_entry_maps_to_legacy_claude_and_never_falls_back ... ok
+test identity::tests::the_three_principals_authenticate_to_their_own_family ... ok
+test gate::tests::tasks_without_a_principal_belong_only_to_legacy_claude ... ok
+test milestone::answer::tests::a_full_answer ... ok
+test milestone::answer::tests::conditions_outside_their_section_are_refused ... ok
+test milestone::answer::tests::invalid_carries_no_partial_result ... ok
+test milestone::answer::tests::section_rules ... ok
+test milestone::answer::tests::sections_are_optional_and_may_be_empty ... ok
+test milestone::answer::tests::the_format_shown_to_the_auditor_follows_this_grammar ... ok
+test milestone::answer::tests::verdict_rules ... ok
+test gate::tests::review_ids_number_attempts_per_version ... ok
+test gate::tests::weak_channel_pauses_without_counting_as_rejection ... ok
+test milestone::derive::tests::a_late_result_neither_resolves_nor_counts ... ok
+test milestone::derive::tests::a_condition_without_its_blocking_flag_is_malformed_not_non_blocking ... ok
+test milestone::derive::tests::a_rebaseline_ends_approvals_and_pending_requests_but_keeps_conditions_and_count ... ok
+test milestone::derive::tests::a_record_missing_a_field_is_never_read_as_empty_and_stops_release ... ok
+test gate::tests::merge_commits_are_not_versions ... ok
+test milestone::derive::tests::a_reused_request_id_is_malformed_and_cannot_pick_up_an_old_result ... ok
+test milestone::derive::tests::a_request_on_an_old_baseline_or_without_independence_never_releases ... ok
+test milestone::derive::tests::a_terminal_state_is_never_rewritten ... ok
+test milestone::derive::tests::a_valid_audit_condition_with_a_boolean_blocking_flag_is_accepted ... ok
+test milestone::derive::tests::a_superseding_phase_keeps_open_conditions_and_the_count ... ok
+test milestone::derive::tests::a_waiver_releases_only_once_archived ... ok
+test milestone::derive::tests::a_chain_too_deep_stops_release_instead_of_dropping_conditions ... ok
+test milestone::derive::tests::an_approval_that_is_not_archived_does_not_release ... ok
+test milestone::derive::tests::a_waiver_that_completes_a_release_also_ends_the_run ... ok
+test milestone::derive::tests::an_ancestor_s_own_reasons_are_not_carried_over ... ok
+test milestone::derive::tests::an_approval_of_a_revoked_request_does_not_end_the_run ... ok
+test milestone::derive::tests::an_unarchived_new_request_ends_the_old_approval_at_once ... ok
+test milestone::derive::tests::an_approved_archived_request_releases ... ok
+test milestone::derive::tests::an_unarchived_revoke_ends_the_approval_at_once ... ok
+test milestone::derive::tests::an_unregistered_phase_never_releases ... ok
+test milestone::derive::tests::approve_cannot_skip_an_open_blocking_condition ... ok
+test milestone::derive::tests::inheritance_cutoff_holds_for_the_first_record_and_several_levels ... ok
+test milestone::derive::tests::inherited_conditions_keep_their_lineage ... ok
+test milestone::derive::tests::only_the_first_valid_audit_of_a_request_counts ... ok
+test milestone::derive::tests::invalid_audits_and_run_failures_do_not_count ... ok
+test milestone::derive::tests::inheritance_is_fixed_at_registration ... ok
+test milestone::derive::tests::unarchived_source_handling_cannot_release ... ok
+test milestone::derive::tests::three_rejections_pause_until_the_user_resumes ... ok
+test milestone::derive::tests::superseding_must_name_an_earlier_phase_once ... ok
+test milestone::derive::tests::unknown_implementation_sources_stop_release_and_a_missing_flag_is_malformed ... ok
+test attest::tests::verify_commit_at_reads_the_fixed_notes_commit ... ok
+test gate::tests::three_rejections_trip_the_breaker_and_approval_resets_the_streak ... ok
+test milestone::derive::tests::the_count_resets_on_release_not_on_an_approval_that_leaves_a_blocking_condition_open ... ok
+test milestone::flow::tests::a_changed_manifest_is_never_sent ... ok
+test milestone::flow::tests::a_changed_snapshot_is_never_sent ... ok
+test milestone::flow::tests::a_committed_job_not_yet_sent_when_halted_is_not_sent ... ok
+test hook::tests::blocks_unreviewed_commits_and_unattested_pushes ... ok
+test mcp::tests::review_and_record_through_mcp_tools ... ok
+test milestone::flow::tests::a_halt_during_preparation_admits_no_new_job ... ok
+test milestone::flow::tests::a_halt_just_before_the_send_keeps_the_job_from_going_out ... ok
+test milestone::flow::tests::a_halt_during_the_request_commit_waits_and_the_job_is_not_sent ... ok
+test milestone::flow::tests::a_halt_while_the_line_is_written_waits_for_the_send ... ok
+test milestone::flow::tests::a_remote_lost_while_preparing_refuses_the_request ... ok
+test milestone::flow::tests::a_crash_inside_the_confirm_group_is_completed ... ok
+test milestone::flow::tests::a_request_without_independence_or_sources_is_refused_and_writes_nothing ... ok
+test milestone::flow::tests::a_failed_archive_before_status_withholds_release ... ok
+test milestone::flow::tests::a_real_write_failure_stops_a_request_prepared_meanwhile ... ok
+test milestone::flow::tests::a_resolution_without_its_audit_stops_recovery ... ok
+test milestone::flow::tests::a_second_request_while_one_is_pending_is_refused ... ok
+test milestone::flow::tests::a_result_that_cannot_be_written_halts_the_service ... ok
+test milestone::flow::tests::a_result_after_cancel_is_kept_as_late_without_effect ... ok
+test milestone::flow::tests::a_runner_that_is_not_the_expected_one_is_a_failed_job ... ok
+test milestone::flow::tests::a_request_runs_records_and_releases_once_archived ... ok
+test milestone::flow::tests::admin_cli::a_rebaseline_preview_shows_the_task_book_at_the_target_commit ... ok
+test milestone::flow::tests::admin_cli::yes_writes_and_shows_the_real_record ... ok
+test milestone::flow::tests::a_second_result_for_the_same_job_is_refused ... ok
+test milestone::flow::tests::a_log_that_changed_while_preparing_is_prepared_again ... ok
+test milestone::flow::tests::an_unreachable_remote_stops_requests ... ok
+test milestone::flow::tests::a_crash_inside_the_result_group_is_completed_exactly ... ok
+test milestone::flow::tests::admin_steps_check_their_preconditions ... ok
+test milestone::flow::tests::confirm_checks_the_task_book_again ... ok
+test milestone::flow::tests::a_supersession_published_while_preparing_is_seen_before_committing ... ok
+test milestone::flow::tests::archive_imports_a_longer_remote_and_stops_at_its_length ... ok
+test milestone::flow::tests::an_admin_process_never_closes_a_running_request ... ok
+test milestone::flow::tests::admin_cli::the_offline_status_never_releases_even_a_released_phase ... ok
+test milestone::flow::tests::admin_cli::dry_runs_and_the_offline_status_write_nothing ... ok
+test milestone::flow::tests::archive_never_goes_past_what_the_remote_holds ... ok
+test milestone::flow::tests::bad_results_are_recorded_as_failed_without_effect ... ok
+test milestone::flow::tests::faults::f2_a_result_after_cancel_is_late_and_without_effect ... ok
+test milestone::flow::tests::faults::f2_a_result_after_rebaseline_is_late_and_without_effect ... ok
+test milestone::flow::tests::faults::f5_a_result_not_yet_archived_releases_only_once_published_and_archived ... ok
+test milestone::flow::tests::faults::f1_an_unparsable_answer_is_a_failed_job_without_effect_and_release_comes_back ... ok
+test milestone::flow::tests::faults::f2_a_result_after_supersession_is_late_and_without_effect ... ok
+test milestone::flow::tests::faults_remote::f10_an_unreachable_remote_stops_release ... ok
+test milestone::flow::tests::faults::f4_an_approval_that_leaves_a_blocking_condition_unresolved_does_not_release ... ok
+test milestone::flow::tests::faults::f6_a_stale_backup_does_not_release_once_the_remote_has_a_revoke ... ok
+test milestone::flow::tests::faults_remote::f11_a_tampered_signature_in_the_imported_tail_is_never_imported ... ok
+test milestone::flow::tests::head_only_moves_forward ... ok
+test milestone::flow::tests::faults_remote::f7_a_truncated_remote_stops_release_and_a_restored_one_releases ... ok
+test milestone::flow::tests::faults::f6_a_stale_backup_does_not_release_once_the_remote_has_a_newer_request ... ok
+test milestone::flow::tests::only_one_service_and_a_restart_closes_jobless_pending_requests ... ok
+test milestone::flow::tests::request_ids_fit_the_runner ... ok
+test milestone::flow::tests::range_and_signature_rules_are_checked_before_anything_is_recorded ... ok
+test milestone::flow::tests::records_that_are_not_what_the_job_calls_for_stop_recovery ... ok
+test milestone::flow::tests::one_recovery_completes_a_confirm_group_and_a_job_group_together ... ok
+test milestone::flow::tests::routes::a_halted_service_answers_503_on_every_route ... ok
+test milestone::flow::tests::faults_remote::f8_a_legitimately_longer_remote_is_imported_without_stop ... ok
+test milestone::flow::tests::routes::published_but_not_on_the_remote_is_a_partial_success ... ok
+test milestone::flow::tests::routes::publish_checks_the_pinned_key_before_writing_anything ... ok
+test milestone::flow::tests::routes::a_halt_during_a_call_turns_its_answer_into_503 ... ok
+test milestone::flow::tests::routes::without_milestones_404_once_authenticated_and_401_before ... ok
+test milestone::flow::tests::the_state_directory_must_be_absolute ... ok
+test milestone::flow::tests::faults::f3_a_replayed_earlier_reply_is_refused_and_does_not_restore_the_release ... ok
+test milestone::flow::tests::wait_halted_returns_once_halted_even_if_halted_before_waiting ... ok
+test milestone::input::tests::a_missing_baseline_task_book_is_refused ... ok
+test milestone::input::tests::child_assembly ... ignored, run by assemble_in_child only
+test milestone::flow::tests::confirm_refuses_a_chain_too_deep ... ok
+test milestone::input::tests::assembles_every_section_deterministically ... ok
+test milestone::flow::tests::the_latch_is_visible_at_once_while_halt_waits_for_a_send ... ok
+test milestone::input::tests::evidence_that_cannot_be_shown_is_listed_not_converted ... ok
+test milestone::input::tests::committed_attributes_of_head_do_count ... ok
+test milestone::flow::tests::faults_remote::f9_a_forked_remote_record_stops_release ... ok
+test milestone::input::tests::sha256_repositories_work_and_formats_must_match ... ok
+test milestone::input::tests::objects_are_found_in_worktrees_and_bare_repos_and_ids_are_typed ... ok
+test milestone::flow::tests::superseding_cancels_the_old_request_and_freezes_what_is_inherited ... ok
+test milestone::input::tests::merge_commits_and_notes_are_listed ... ok
+test milestone::ledger::tests::a_checkpoint_ahead_of_a_rolled_back_log_stops_and_is_never_lowered ... ok
+test milestone::ledger::tests::a_checkpoint_hash_conflict_stops ... ok
+test milestone::input::tests::task_book_rules ... ok
+test milestone::ledger::tests::a_cut_off_line_is_an_error_and_is_not_truncated ... ok
+test milestone::input::tests::the_work_tree_does_not_count ... ok
+test milestone::ledger::tests::a_stopped_log_refuses_a_transaction ... ok
+test milestone::ledger::tests::a_tampered_log_is_an_error ... ok
+test milestone::ledger::tests::a_crash_inside_a_transaction_leaves_a_prefix_of_the_group ... ok
+test milestone::ledger::tests::appends_chain_and_survive_a_reload ... ok
+test milestone::ledger::tests::a_transaction_checks_under_the_lock_and_writes_the_whole_group ... ok
+test milestone::ledger::tests::an_archived_record_naming_a_position_off_the_chain_stops ... ok
+test milestone::ledger::tests::archiving_never_lowers_the_checkpoint ... ok
+test milestone::input::tests::the_evidence_directory_must_be_a_plain_relative_path ... ok
+test milestone::ledger::tests::archiving_writes_the_record_first_then_the_checkpoint ... ok
+test milestone::ledger::tests::crash_gap_temporary_checkpoint_not_renamed_is_ignored ... ok
+test milestone::ledger::tests::crash_gap_archived_written_checkpoint_not_yet_is_rebuilt_from_the_log ... ok
+test milestone::ledger::tests::import_classifies_again_under_the_lock_and_never_writes_otherwise ... ok
+test milestone::record::tests::a_cut_off_or_rewritten_log_line_is_an_error ... ok
+test milestone::record::tests::a_sealed_chain_verifies_and_round_trips_through_the_log ... ok
+test milestone::record::tests::canonical_json_sorts_keys_and_has_no_whitespace ... ok
+test milestone::ledger::tests::importing_a_longer_remote_copies_its_records_byte_for_byte ... ok
+test milestone::runner::tests::a_closed_connection_without_a_whole_line_is_an_error ... ok
+test milestone::record::tests::tampering_is_caught_record_by_record ... ok
+test milestone::ledger::tests::the_offline_view_writes_nothing_and_reports_what_it_could_not_check ... ok
+test milestone::runner::tests::a_reply_without_credentials_is_refused ... ok
+test milestone::runner::tests::a_reply_whose_control_data_does_not_fit_is_refused ... ok
+test milestone::runner::tests::a_reply_from_the_expected_sender_is_authenticated_across_pieces ... ok
+test milestone::runner::tests::passed_file_descriptors_alone ... ignored, run alone by passed_file_descriptors_are_closed_and_the_reply_refused
+test milestone::runner::tests::a_sender_that_is_gone_when_the_reply_is_in_is_not_authenticated ... ok
+test milestone::runner::tests::the_wrong_uid_or_cgroup_is_refused ... ok
+test milestone::serve::tests::a_config_with_a_relative_path_or_an_empty_field_is_refused ... ok
+test milestone::serve::tests::a_token_file_open_to_others_or_short_is_refused_without_showing_it ... ok
+test milestone::sources::tests::a_broken_link_of_a_superseded_phase_carries_over ... ok
+test milestone::sources::tests::a_clean_phase_is_known_and_independent ... ok
+test milestone::sources::tests::a_link_brings_its_ancestors_and_descendants ... ok
+test milestone::sources::tests::a_link_to_another_phase_matches_without_joining_this_one ... ok
+test milestone::sources::tests::a_linked_task_in_a_cycle_brings_the_cycle ... ok
+test milestone::sources::tests::a_linked_task_with_a_broken_chain_stays_a_member ... ok
+test milestone::sources::tests::an_unreadable_bridge_is_unknown_sources ... ok
+test milestone::sources::tests::bad_links_and_ignores_are_unknown_sources ... ok
+test milestone::sources::tests::broken_and_circular_chains_are_unknown_sources ... ok
+test milestone::sources::tests::descendants_of_a_prefix_task_with_a_broken_chain_count ... ok
+test milestone::sources::tests::first_table_maps_as_the_design_says ... ok
+test milestone::sources::tests::ignores_count_for_their_phase_and_its_successors_only ... ok
+test milestone::sources::tests::independence_is_checked_on_every_participant_and_the_auditor ... ok
+test milestone::sources::tests::independence_needs_attestations_and_mapped_participants ... ok
+test milestone::sources::tests::known_ancestors_and_descendants_of_a_broken_link_count ... ok
+test milestone::sources::tests::overlapping_rules_conflict_instead_of_first_match ... ok
+test milestone::runner::tests::passed_file_descriptors_are_closed_and_the_reply_refused ... ok
+test milestone::sources::tests::tasks_of_no_phase_are_unmatched_tasks_of_another_phase_are_not ... ok
+test milestone::sources::tests::the_window_spans_registration_and_every_commit ... ok
+test milestone::sources::tests::trailer_names ... ok
+test milestone::sync::tests::a_remote_growing_past_the_checkpoint_is_normal ... ok
+test milestone::sync::tests::an_unreachable_remote_is_never_read_as_empty ... ok
+test milestone::sources::tests::reads_a_real_bridge_through_the_observer_routes ... ok
+test milestone::sync::tests::equal_behind_and_ahead ... ok
+test milestone::input::tests::no_local_or_user_configuration_changes_the_bytes ... ok
+test milestone::sync::tests::publish_and_fetch_round_trip_byte_for_byte ... ok
+test relay::tests::appends_entries_in_relay_format_to_the_gate_file ... ok
+test milestone::sync::tests::publish_refuses_to_overwrite_a_newer_or_different_remote ... ok
+test milestone::sync::tests::stops_on_truncation_rewrite_divergence_tampering_and_no_reach ... ok
+test review::tests::chunks_pack_small_files_and_split_big_ones ... ok
+test milestone::flow::tests::the_request_line_must_fit_what_the_runner_reads ... ok
+test review::tests::a_fallback_to_a_weaker_channel_is_written_into_the_record ... ok
+test review::tests::cached_same_family_answers_are_discarded_not_reused ... ok
+test milestone::runner::tests::a_reply_written_by_two_processes_is_refused ... ok
+test review::tests::large_diff_is_chunked_and_any_rejection_rejects ... ok
+test review::tests::the_record_takes_the_weakest_channel_of_its_chunks ... ok
+test review::tests::verdicts ... ok
+test review::tests::staged_from_is_read_only_and_checks_inputs ... ok
+test reviewer::tests::a_fallback_never_lands_on_the_implementer_family ... ok
+test review::tests::small_diff_is_one_prompt_from_the_template_bound_to_the_tree ... ok
+test milestone::flow::tests::routes::each_route_answers_on_a_real_flow ... ok
+test reviewer::tests::curl_exe_is_found_without_the_interactive_path ... ok
+test reviewer::tests::an_overloaded_gemini_api_is_retried_before_anything_falls_back ... ok
+test review::tests::every_chunk_is_rechecked_not_only_the_weakest_summary ... ok
+test reviewer::tests::official_endpoints_are_recognized_by_https_host_not_by_substring ... ok
+test reviewer::tests::other_api_errors_are_not_retried ... ok
+test reviewer::tests::retries_are_bounded_and_say_how_many_were_made ... ok
+test reviewer::tests::same_family_providers_are_skipped_before_any_request ... ok
+test reviewer::tests::the_gemini_key_travels_in_a_header_and_never_in_a_url_or_an_error ... ok
+test reviewer::tests::a_refused_create_task_is_a_failed_attempt_retried_not_a_panic ... ok
+test service::tests::a_broken_identity_config_never_falls_back_to_the_legacy_token ... ok
+test review::tests::rerun_reuses_answered_chunks ... ok
+test service::tests::errors_map_to_status_codes ... ok
+test reviewer::tests::gives_up_after_the_attempt_budget ... ok
+test milestone::ledger::tests::concurrent_appenders_keep_one_chain ... ok
+test service::tests::health_is_open_everything_else_needs_the_token ... ok
+test service::tests::weak_channels_only_and_never_manual_over_http ... ok
+test store::tests::directories_are_private ... ok
+test store::tests::ids ... ok
+test reviewer::tests::web_gemini_retries_failed_sends_and_reports_channel ... ok
+test service::tests::three_credentials_freeze_their_principal_and_family_and_isolate_tasks ... ok
+test service::tests::full_flow_over_http_external_review_then_record ... ok
+test reviewer::tests::an_endpoint_without_a_configured_vendor_is_not_an_independent_reviewer ... ok
+test milestone::input::tests::the_limit_is_on_final_bytes ... ok
+test service::tests::unavailable_external_ai_is_reported_not_downgraded ... ok
+test reviewer::tests::nothing_configured_is_unavailable ... ok
+
+test result: ok. 234 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 29.29s
+
+
+running 1 test
+test tests::an_absent_default_config_is_the_only_state_that_allows_legacy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test a_write_without_yes_changes_nothing_and_with_yes_writes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+
+running 1 test
+test without_the_feature_faults_are_ignored ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Compiling review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-ai-A/crates/review-gate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.83s
+     Running unittests src/lib.rs (target/debug/deps/review_gate-1522528178370701)
+     Running unittests src/main.rs (target/debug/deps/review_gate-03818987497d41ff)
+     Running tests/admin_cli.rs (target/debug/deps/admin_cli-01d92144602a9224)
+     Running tests/halt_exit.rs (target/debug/deps/halt_exit-53d3416518587269)
+   Doc-tests review_gate
+[exit 0]
+
+--- cargo test -p review-gate, run 2/3 ---
+$ cargo test -p review-gate
+
+running 236 tests
+test gate::tests::channel_names_and_strengths ... ok
+test attest::tests::key_is_created_once_with_private_permissions_and_reloaded ... ok
+test attest::tests::sign_verify_and_tamper_detection ... ok
+test gate::tests::check_commit_refuses_same_family_and_unknown_family_external_records ... ok
+test gate::tests::another_principal_cannot_read_write_review_or_record_the_task ... ok
+test gate::tests::init_freezes_the_authenticated_principal_and_family ... ok
+test gate::tests::external_reviews_must_come_from_another_known_family ... ok
+test gate::tests::approval_checks_parent_and_tag_and_needs_both ... ok
+test attest::tests::note_at_finds_fanned_out_notes ... ok
+test gate::tests::check_commit_needs_an_unused_approved_review_of_the_staged_tree ... ok
+test gate::tests::approval_requires_the_reviewed_tree ... ok
+test gate::tests::init_validates_input ... ok
+test gate::tests::explicitly_lowered_threshold_accepts_a_subagent_review ... ok
+test gate::tests::tasks_without_a_principal_belong_only_to_legacy_claude ... ok
+test gate::tests::manual_is_admin_only_and_legacy_external_records_cannot_finalize ... ok
+test hook::tests::finds_git_commit_and_push_in_shell_commands ... ok
+test identity::tests::a_missing_file_is_an_error_the_caller_may_treat_as_legacy ... ok
+test identity::tests::families_are_canonical_and_protocols_are_not_vendors ... ok
+test gate::tests::records_are_single_use_and_bound_to_the_version ... ok
+test identity::tests::revocation_and_rotation_keep_the_principal ... ok
+test identity::tests::invalid_configurations_are_fail_closed ... ok
+test identity::tests::the_legacy_entry_maps_to_legacy_claude_and_never_falls_back ... ok
+test identity::tests::the_three_principals_authenticate_to_their_own_family ... ok
+test milestone::answer::tests::a_full_answer ... ok
+test milestone::answer::tests::conditions_outside_their_section_are_refused ... ok
+test milestone::answer::tests::invalid_carries_no_partial_result ... ok
+test milestone::answer::tests::section_rules ... ok
+test milestone::answer::tests::sections_are_optional_and_may_be_empty ... ok
+test milestone::answer::tests::the_format_shown_to_the_auditor_follows_this_grammar ... ok
+test milestone::answer::tests::verdict_rules ... ok
+test gate::tests::weak_channel_pauses_without_counting_as_rejection ... ok
+test gate::tests::review_ids_number_attempts_per_version ... ok
+test milestone::derive::tests::a_late_result_neither_resolves_nor_counts ... ok
+test milestone::derive::tests::a_condition_without_its_blocking_flag_is_malformed_not_non_blocking ... ok
+test milestone::derive::tests::a_rebaseline_ends_approvals_and_pending_requests_but_keeps_conditions_and_count ... ok
+test milestone::derive::tests::a_request_on_an_old_baseline_or_without_independence_never_releases ... ok
+test milestone::derive::tests::a_record_missing_a_field_is_never_read_as_empty_and_stops_release ... ok
+test milestone::derive::tests::a_reused_request_id_is_malformed_and_cannot_pick_up_an_old_result ... ok
+test milestone::derive::tests::a_terminal_state_is_never_rewritten ... ok
+test milestone::derive::tests::a_valid_audit_condition_with_a_boolean_blocking_flag_is_accepted ... ok
+test milestone::derive::tests::a_waiver_releases_only_once_archived ... ok
+test gate::tests::merge_commits_are_not_versions ... ok
+test milestone::derive::tests::a_superseding_phase_keeps_open_conditions_and_the_count ... ok
+test attest::tests::verify_commit_at_reads_the_fixed_notes_commit ... ok
+test milestone::derive::tests::a_chain_too_deep_stops_release_instead_of_dropping_conditions ... ok
+test milestone::derive::tests::a_waiver_that_completes_a_release_also_ends_the_run ... ok
+test milestone::derive::tests::an_ancestor_s_own_reasons_are_not_carried_over ... ok
+test milestone::derive::tests::an_approval_that_is_not_archived_does_not_release ... ok
+test milestone::derive::tests::an_approved_archived_request_releases ... ok
+test milestone::derive::tests::an_unarchived_new_request_ends_the_old_approval_at_once ... ok
+test milestone::derive::tests::an_approval_of_a_revoked_request_does_not_end_the_run ... ok
+test gate::tests::three_rejections_trip_the_breaker_and_approval_resets_the_streak ... ok
+test milestone::derive::tests::an_unregistered_phase_never_releases ... ok
+test milestone::derive::tests::an_unarchived_revoke_ends_the_approval_at_once ... ok
+test milestone::derive::tests::inherited_conditions_keep_their_lineage ... ok
+test milestone::derive::tests::inheritance_cutoff_holds_for_the_first_record_and_several_levels ... ok
+test milestone::derive::tests::approve_cannot_skip_an_open_blocking_condition ... ok
+test milestone::derive::tests::invalid_audits_and_run_failures_do_not_count ... ok
+test milestone::derive::tests::only_the_first_valid_audit_of_a_request_counts ... ok
+test milestone::derive::tests::inheritance_is_fixed_at_registration ... ok
+test milestone::derive::tests::unarchived_source_handling_cannot_release ... ok
+test milestone::derive::tests::unknown_implementation_sources_stop_release_and_a_missing_flag_is_malformed ... ok
+test milestone::derive::tests::superseding_must_name_an_earlier_phase_once ... ok
+test milestone::derive::tests::three_rejections_pause_until_the_user_resumes ... ok
+test milestone::derive::tests::the_count_resets_on_release_not_on_an_approval_that_leaves_a_blocking_condition_open ... ok
+test milestone::flow::tests::a_changed_snapshot_is_never_sent ... ok
+test milestone::flow::tests::a_changed_manifest_is_never_sent ... ok
+test milestone::flow::tests::a_committed_job_not_yet_sent_when_halted_is_not_sent ... ok
+test hook::tests::blocks_unreviewed_commits_and_unattested_pushes ... ok
+test mcp::tests::review_and_record_through_mcp_tools ... ok
+test milestone::flow::tests::a_halt_during_preparation_admits_no_new_job ... ok
+test milestone::flow::tests::a_halt_during_the_request_commit_waits_and_the_job_is_not_sent ... ok
+test milestone::flow::tests::a_halt_just_before_the_send_keeps_the_job_from_going_out ... ok
+test milestone::flow::tests::a_halt_while_the_line_is_written_waits_for_the_send ... ok
+test milestone::flow::tests::a_remote_lost_while_preparing_refuses_the_request ... ok
+test milestone::flow::tests::a_crash_inside_the_confirm_group_is_completed ... ok
+test milestone::flow::tests::a_failed_archive_before_status_withholds_release ... ok
+test milestone::flow::tests::a_request_without_independence_or_sources_is_refused_and_writes_nothing ... ok
+test milestone::flow::tests::a_real_write_failure_stops_a_request_prepared_meanwhile ... ok
+test milestone::flow::tests::a_resolution_without_its_audit_stops_recovery ... ok
+test milestone::flow::tests::a_result_that_cannot_be_written_halts_the_service ... ok
+test milestone::flow::tests::a_runner_that_is_not_the_expected_one_is_a_failed_job ... ok
+test milestone::flow::tests::a_second_request_while_one_is_pending_is_refused ... ok
+test milestone::flow::tests::a_result_after_cancel_is_kept_as_late_without_effect ... ok
+test milestone::flow::tests::admin_cli::a_rebaseline_preview_shows_the_task_book_at_the_target_commit ... ok
+test milestone::flow::tests::a_request_runs_records_and_releases_once_archived ... ok
+test milestone::flow::tests::admin_cli::yes_writes_and_shows_the_real_record ... ok
+test milestone::flow::tests::a_second_result_for_the_same_job_is_refused ... ok
+test milestone::flow::tests::an_unreachable_remote_stops_requests ... ok
+test milestone::flow::tests::a_log_that_changed_while_preparing_is_prepared_again ... ok
+test milestone::flow::tests::admin_steps_check_their_preconditions ... ok
+test milestone::flow::tests::a_crash_inside_the_result_group_is_completed_exactly ... ok
+test milestone::flow::tests::confirm_checks_the_task_book_again ... ok
+test milestone::flow::tests::a_supersession_published_while_preparing_is_seen_before_committing ... ok
+test milestone::flow::tests::archive_imports_a_longer_remote_and_stops_at_its_length ... ok
+test milestone::flow::tests::an_admin_process_never_closes_a_running_request ... ok
+test milestone::flow::tests::admin_cli::the_offline_status_never_releases_even_a_released_phase ... ok
+test milestone::flow::tests::admin_cli::dry_runs_and_the_offline_status_write_nothing ... ok
+test milestone::flow::tests::archive_never_goes_past_what_the_remote_holds ... ok
+test milestone::flow::tests::bad_results_are_recorded_as_failed_without_effect ... ok
+test milestone::flow::tests::faults::f2_a_result_after_cancel_is_late_and_without_effect ... ok
+test milestone::flow::tests::faults::f2_a_result_after_rebaseline_is_late_and_without_effect ... ok
+test milestone::flow::tests::faults::f5_a_result_not_yet_archived_releases_only_once_published_and_archived ... ok
+test milestone::flow::tests::faults::f1_an_unparsable_answer_is_a_failed_job_without_effect_and_release_comes_back ... ok
+test milestone::flow::tests::faults::f2_a_result_after_supersession_is_late_and_without_effect ... ok
+test milestone::flow::tests::faults_remote::f10_an_unreachable_remote_stops_release ... ok
+test milestone::flow::tests::faults::f4_an_approval_that_leaves_a_blocking_condition_unresolved_does_not_release ... ok
+test milestone::flow::tests::faults::f6_a_stale_backup_does_not_release_once_the_remote_has_a_revoke ... ok
+test milestone::flow::tests::faults_remote::f11_a_tampered_signature_in_the_imported_tail_is_never_imported ... ok
+test milestone::flow::tests::head_only_moves_forward ... ok
+test milestone::flow::tests::faults::f6_a_stale_backup_does_not_release_once_the_remote_has_a_newer_request ... ok
+test milestone::flow::tests::faults_remote::f7_a_truncated_remote_stops_release_and_a_restored_one_releases ... ok
+test milestone::flow::tests::only_one_service_and_a_restart_closes_jobless_pending_requests ... ok
+test milestone::flow::tests::request_ids_fit_the_runner ... ok
+test milestone::flow::tests::range_and_signature_rules_are_checked_before_anything_is_recorded ... ok
+test milestone::flow::tests::records_that_are_not_what_the_job_calls_for_stop_recovery ... ok
+test milestone::flow::tests::one_recovery_completes_a_confirm_group_and_a_job_group_together ... ok
+test milestone::flow::tests::routes::a_halted_service_answers_503_on_every_route ... ok
+test milestone::flow::tests::routes::publish_checks_the_pinned_key_before_writing_anything ... ok
+test milestone::flow::tests::routes::published_but_not_on_the_remote_is_a_partial_success ... ok
+test milestone::flow::tests::faults_remote::f8_a_legitimately_longer_remote_is_imported_without_stop ... ok
+test milestone::flow::tests::routes::a_halt_during_a_call_turns_its_answer_into_503 ... ok
+test milestone::flow::tests::routes::without_milestones_404_once_authenticated_and_401_before ... ok
+test milestone::flow::tests::the_state_directory_must_be_absolute ... ok
+test milestone::flow::tests::wait_halted_returns_once_halted_even_if_halted_before_waiting ... ok
+test milestone::flow::tests::faults::f3_a_replayed_earlier_reply_is_refused_and_does_not_restore_the_release ... ok
+test milestone::flow::tests::confirm_refuses_a_chain_too_deep ... ok
+test milestone::input::tests::child_assembly ... ignored, run by assemble_in_child only
+test milestone::input::tests::a_missing_baseline_task_book_is_refused ... ok
+test milestone::input::tests::assembles_every_section_deterministically ... ok
+test milestone::flow::tests::the_latch_is_visible_at_once_while_halt_waits_for_a_send ... ok
+test milestone::input::tests::evidence_that_cannot_be_shown_is_listed_not_converted ... ok
+test milestone::input::tests::committed_attributes_of_head_do_count ... ok
+test milestone::input::tests::sha256_repositories_work_and_formats_must_match ... ok
+test milestone::flow::tests::faults_remote::f9_a_forked_remote_record_stops_release ... ok
+test milestone::input::tests::objects_are_found_in_worktrees_and_bare_repos_and_ids_are_typed ... ok
+test milestone::flow::tests::superseding_cancels_the_old_request_and_freezes_what_is_inherited ... ok
+test milestone::input::tests::merge_commits_and_notes_are_listed ... ok
+test milestone::ledger::tests::a_checkpoint_ahead_of_a_rolled_back_log_stops_and_is_never_lowered ... ok
+test milestone::ledger::tests::a_checkpoint_hash_conflict_stops ... ok
+test milestone::input::tests::the_work_tree_does_not_count ... ok
+test milestone::input::tests::task_book_rules ... ok
+test milestone::ledger::tests::a_cut_off_line_is_an_error_and_is_not_truncated ... ok
+test milestone::ledger::tests::a_tampered_log_is_an_error ... ok
+test milestone::ledger::tests::a_stopped_log_refuses_a_transaction ... ok
+test milestone::ledger::tests::a_crash_inside_a_transaction_leaves_a_prefix_of_the_group ... ok
+test milestone::ledger::tests::appends_chain_and_survive_a_reload ... ok
+test milestone::ledger::tests::a_transaction_checks_under_the_lock_and_writes_the_whole_group ... ok
+test milestone::ledger::tests::an_archived_record_naming_a_position_off_the_chain_stops ... ok
+test milestone::ledger::tests::archiving_writes_the_record_first_then_the_checkpoint ... ok
+test milestone::ledger::tests::archiving_never_lowers_the_checkpoint ... ok
+test milestone::ledger::tests::crash_gap_temporary_checkpoint_not_renamed_is_ignored ... ok
+test milestone::input::tests::the_evidence_directory_must_be_a_plain_relative_path ... ok
+test milestone::ledger::tests::crash_gap_archived_written_checkpoint_not_yet_is_rebuilt_from_the_log ... ok
+test milestone::ledger::tests::import_classifies_again_under_the_lock_and_never_writes_otherwise ... ok
+test milestone::record::tests::a_cut_off_or_rewritten_log_line_is_an_error ... ok
+test milestone::record::tests::a_sealed_chain_verifies_and_round_trips_through_the_log ... ok
+test milestone::record::tests::canonical_json_sorts_keys_and_has_no_whitespace ... ok
+test milestone::ledger::tests::importing_a_longer_remote_copies_its_records_byte_for_byte ... ok
+test milestone::ledger::tests::the_offline_view_writes_nothing_and_reports_what_it_could_not_check ... ok
+test milestone::record::tests::tampering_is_caught_record_by_record ... ok
+test milestone::runner::tests::a_closed_connection_without_a_whole_line_is_an_error ... ok
+test milestone::runner::tests::a_reply_without_credentials_is_refused ... ok
+test milestone::runner::tests::a_reply_whose_control_data_does_not_fit_is_refused ... ok
+test milestone::runner::tests::a_reply_from_the_expected_sender_is_authenticated_across_pieces ... ok
+test milestone::runner::tests::passed_file_descriptors_alone ... ignored, run alone by passed_file_descriptors_are_closed_and_the_reply_refused
+test milestone::runner::tests::a_sender_that_is_gone_when_the_reply_is_in_is_not_authenticated ... ok
+test milestone::runner::tests::the_wrong_uid_or_cgroup_is_refused ... ok
+test milestone::serve::tests::a_config_with_a_relative_path_or_an_empty_field_is_refused ... ok
+test milestone::serve::tests::a_token_file_open_to_others_or_short_is_refused_without_showing_it ... ok
+test milestone::sources::tests::a_broken_link_of_a_superseded_phase_carries_over ... ok
+test milestone::sources::tests::a_clean_phase_is_known_and_independent ... ok
+test milestone::sources::tests::a_link_brings_its_ancestors_and_descendants ... ok
+test milestone::sources::tests::a_link_to_another_phase_matches_without_joining_this_one ... ok
+test milestone::sources::tests::a_linked_task_in_a_cycle_brings_the_cycle ... ok
+test milestone::sources::tests::a_linked_task_with_a_broken_chain_stays_a_member ... ok
+test milestone::sources::tests::an_unreadable_bridge_is_unknown_sources ... ok
+test milestone::sources::tests::bad_links_and_ignores_are_unknown_sources ... ok
+test milestone::sources::tests::broken_and_circular_chains_are_unknown_sources ... ok
+test milestone::sources::tests::descendants_of_a_prefix_task_with_a_broken_chain_count ... ok
+test milestone::sources::tests::first_table_maps_as_the_design_says ... ok
+test milestone::sources::tests::ignores_count_for_their_phase_and_its_successors_only ... ok
+test milestone::sources::tests::independence_is_checked_on_every_participant_and_the_auditor ... ok
+test milestone::sources::tests::independence_needs_attestations_and_mapped_participants ... ok
+test milestone::sources::tests::known_ancestors_and_descendants_of_a_broken_link_count ... ok
+test milestone::sources::tests::overlapping_rules_conflict_instead_of_first_match ... ok
+test milestone::runner::tests::passed_file_descriptors_are_closed_and_the_reply_refused ... ok
+test milestone::sources::tests::tasks_of_no_phase_are_unmatched_tasks_of_another_phase_are_not ... ok
+test milestone::sources::tests::the_window_spans_registration_and_every_commit ... ok
+test milestone::sources::tests::trailer_names ... ok
+test milestone::sync::tests::a_remote_growing_past_the_checkpoint_is_normal ... ok
+test milestone::sync::tests::an_unreachable_remote_is_never_read_as_empty ... ok
+test milestone::sources::tests::reads_a_real_bridge_through_the_observer_routes ... ok
+test milestone::sync::tests::equal_behind_and_ahead ... ok
+test milestone::input::tests::no_local_or_user_configuration_changes_the_bytes ... ok
+test milestone::sync::tests::publish_and_fetch_round_trip_byte_for_byte ... ok
+test relay::tests::appends_entries_in_relay_format_to_the_gate_file ... ok
+test milestone::sync::tests::publish_refuses_to_overwrite_a_newer_or_different_remote ... ok
+test milestone::sync::tests::stops_on_truncation_rewrite_divergence_tampering_and_no_reach ... ok
+test review::tests::chunks_pack_small_files_and_split_big_ones ... ok
+test milestone::flow::tests::the_request_line_must_fit_what_the_runner_reads ... ok
+test review::tests::a_fallback_to_a_weaker_channel_is_written_into_the_record ... ok
+test review::tests::cached_same_family_answers_are_discarded_not_reused ... ok
+test milestone::runner::tests::a_reply_written_by_two_processes_is_refused ... ok
+test review::tests::large_diff_is_chunked_and_any_rejection_rejects ... ok
+test review::tests::the_record_takes_the_weakest_channel_of_its_chunks ... ok
+test review::tests::verdicts ... ok
+test review::tests::staged_from_is_read_only_and_checks_inputs ... ok
+test milestone::flow::tests::routes::each_route_answers_on_a_real_flow ... ok
+test reviewer::tests::a_fallback_never_lands_on_the_implementer_family ... ok
+test review::tests::small_diff_is_one_prompt_from_the_template_bound_to_the_tree ... ok
+test reviewer::tests::curl_exe_is_found_without_the_interactive_path ... ok
+test reviewer::tests::an_overloaded_gemini_api_is_retried_before_anything_falls_back ... ok
+test review::tests::every_chunk_is_rechecked_not_only_the_weakest_summary ... ok
+test reviewer::tests::official_endpoints_are_recognized_by_https_host_not_by_substring ... ok
+test reviewer::tests::other_api_errors_are_not_retried ... ok
+test reviewer::tests::retries_are_bounded_and_say_how_many_were_made ... ok
+test reviewer::tests::same_family_providers_are_skipped_before_any_request ... ok
+test reviewer::tests::the_gemini_key_travels_in_a_header_and_never_in_a_url_or_an_error ... ok
+test review::tests::rerun_reuses_answered_chunks ... ok
+test reviewer::tests::gives_up_after_the_attempt_budget ... ok
+test service::tests::a_broken_identity_config_never_falls_back_to_the_legacy_token ... ok
+test reviewer::tests::a_refused_create_task_is_a_failed_attempt_retried_not_a_panic ... ok
+test service::tests::errors_map_to_status_codes ... ok
+test milestone::ledger::tests::concurrent_appenders_keep_one_chain ... ok
+test service::tests::health_is_open_everything_else_needs_the_token ... ok
+test service::tests::weak_channels_only_and_never_manual_over_http ... ok
+test store::tests::directories_are_private ... ok
+test store::tests::ids ... ok
+test reviewer::tests::web_gemini_retries_failed_sends_and_reports_channel ... ok
+test service::tests::three_credentials_freeze_their_principal_and_family_and_isolate_tasks ... ok
+test reviewer::tests::an_endpoint_without_a_configured_vendor_is_not_an_independent_reviewer ... ok
+test service::tests::full_flow_over_http_external_review_then_record ... ok
+test milestone::input::tests::the_limit_is_on_final_bytes ... ok
+test service::tests::unavailable_external_ai_is_reported_not_downgraded ... ok
+test reviewer::tests::nothing_configured_is_unavailable ... ok
+
+test result: ok. 234 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 29.33s
+
+
+running 1 test
+test tests::an_absent_default_config_is_the_only_state_that_allows_legacy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test a_write_without_yes_changes_nothing_and_with_yes_writes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+
+running 1 test
+test without_the_feature_faults_are_ignored ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/review_gate-1522528178370701)
+     Running unittests src/main.rs (target/debug/deps/review_gate-03818987497d41ff)
+     Running tests/admin_cli.rs (target/debug/deps/admin_cli-01d92144602a9224)
+     Running tests/halt_exit.rs (target/debug/deps/halt_exit-53d3416518587269)
+   Doc-tests review_gate
+[exit 0]
+
+--- cargo test -p review-gate, run 3/3 ---
+$ cargo test -p review-gate
+
+running 236 tests
+test attest::tests::key_is_created_once_with_private_permissions_and_reloaded ... ok
+test gate::tests::channel_names_and_strengths ... ok
+test attest::tests::sign_verify_and_tamper_detection ... ok
+test gate::tests::check_commit_refuses_same_family_and_unknown_family_external_records ... ok
+test gate::tests::another_principal_cannot_read_write_review_or_record_the_task ... ok
+test gate::tests::init_freezes_the_authenticated_principal_and_family ... ok
+test gate::tests::external_reviews_must_come_from_another_known_family ... ok
+test attest::tests::note_at_finds_fanned_out_notes ... ok
+test gate::tests::check_commit_needs_an_unused_approved_review_of_the_staged_tree ... ok
+test gate::tests::approval_checks_parent_and_tag_and_needs_both ... ok
+test gate::tests::approval_requires_the_reviewed_tree ... ok
+test gate::tests::init_validates_input ... ok
+test gate::tests::explicitly_lowered_threshold_accepts_a_subagent_review ... ok
+test gate::tests::records_are_single_use_and_bound_to_the_version ... ok
+test gate::tests::manual_is_admin_only_and_legacy_external_records_cannot_finalize ... ok
+test hook::tests::finds_git_commit_and_push_in_shell_commands ... ok
+test identity::tests::a_missing_file_is_an_error_the_caller_may_treat_as_legacy ... ok
+test identity::tests::families_are_canonical_and_protocols_are_not_vendors ... ok
+test gate::tests::tasks_without_a_principal_belong_only_to_legacy_claude ... ok
+test identity::tests::invalid_configurations_are_fail_closed ... ok
+test identity::tests::the_legacy_entry_maps_to_legacy_claude_and_never_falls_back ... ok
+test identity::tests::revocation_and_rotation_keep_the_principal ... ok
+test identity::tests::the_three_principals_authenticate_to_their_own_family ... ok
+test milestone::answer::tests::a_full_answer ... ok
+test milestone::answer::tests::conditions_outside_their_section_are_refused ... ok
+test milestone::answer::tests::invalid_carries_no_partial_result ... ok
+test milestone::answer::tests::section_rules ... ok
+test milestone::answer::tests::sections_are_optional_and_may_be_empty ... ok
+test milestone::answer::tests::the_format_shown_to_the_auditor_follows_this_grammar ... ok
+test milestone::answer::tests::verdict_rules ... ok
+test gate::tests::review_ids_number_attempts_per_version ... ok
+test milestone::derive::tests::a_condition_without_its_blocking_flag_is_malformed_not_non_blocking ... ok
+test gate::tests::weak_channel_pauses_without_counting_as_rejection ... ok
+test milestone::derive::tests::a_late_result_neither_resolves_nor_counts ... ok
+test milestone::derive::tests::a_rebaseline_ends_approvals_and_pending_requests_but_keeps_conditions_and_count ... ok
+test milestone::derive::tests::a_record_missing_a_field_is_never_read_as_empty_and_stops_release ... ok
+test milestone::derive::tests::a_request_on_an_old_baseline_or_without_independence_never_releases ... ok
+test milestone::derive::tests::a_reused_request_id_is_malformed_and_cannot_pick_up_an_old_result ... ok
+test milestone::derive::tests::a_superseding_phase_keeps_open_conditions_and_the_count ... ok
+test gate::tests::merge_commits_are_not_versions ... ok
+test milestone::derive::tests::a_terminal_state_is_never_rewritten ... ok
+test milestone::derive::tests::a_valid_audit_condition_with_a_boolean_blocking_flag_is_accepted ... ok
+test milestone::derive::tests::a_waiver_releases_only_once_archived ... ok
+test milestone::derive::tests::an_ancestor_s_own_reasons_are_not_carried_over ... ok
+test milestone::derive::tests::a_waiver_that_completes_a_release_also_ends_the_run ... ok
+test milestone::derive::tests::a_chain_too_deep_stops_release_instead_of_dropping_conditions ... ok
+test milestone::derive::tests::an_approval_of_a_revoked_request_does_not_end_the_run ... ok
+test milestone::derive::tests::an_approved_archived_request_releases ... ok
+test milestone::derive::tests::an_approval_that_is_not_archived_does_not_release ... ok
+test milestone::derive::tests::an_unarchived_new_request_ends_the_old_approval_at_once ... ok
+test milestone::derive::tests::an_unregistered_phase_never_releases ... ok
+test milestone::derive::tests::approve_cannot_skip_an_open_blocking_condition ... ok
+test milestone::derive::tests::inheritance_cutoff_holds_for_the_first_record_and_several_levels ... ok
+test milestone::derive::tests::an_unarchived_revoke_ends_the_approval_at_once ... ok
+test milestone::derive::tests::inherited_conditions_keep_their_lineage ... ok
+test milestone::derive::tests::invalid_audits_and_run_failures_do_not_count ... ok
+test attest::tests::verify_commit_at_reads_the_fixed_notes_commit ... ok
+test milestone::derive::tests::only_the_first_valid_audit_of_a_request_counts ... ok
+test milestone::derive::tests::inheritance_is_fixed_at_registration ... ok
+test milestone::derive::tests::unarchived_source_handling_cannot_release ... ok
+test milestone::derive::tests::three_rejections_pause_until_the_user_resumes ... ok
+test milestone::derive::tests::unknown_implementation_sources_stop_release_and_a_missing_flag_is_malformed ... ok
+test gate::tests::three_rejections_trip_the_breaker_and_approval_resets_the_streak ... ok
+test milestone::derive::tests::the_count_resets_on_release_not_on_an_approval_that_leaves_a_blocking_condition_open ... ok
+test milestone::derive::tests::superseding_must_name_an_earlier_phase_once ... ok
+test milestone::flow::tests::a_changed_manifest_is_never_sent ... ok
+test milestone::flow::tests::a_changed_snapshot_is_never_sent ... ok
+test milestone::flow::tests::a_committed_job_not_yet_sent_when_halted_is_not_sent ... ok
+test hook::tests::blocks_unreviewed_commits_and_unattested_pushes ... ok
+test milestone::flow::tests::a_halt_during_preparation_admits_no_new_job ... ok
+test mcp::tests::review_and_record_through_mcp_tools ... ok
+test milestone::flow::tests::a_halt_just_before_the_send_keeps_the_job_from_going_out ... ok
+test milestone::flow::tests::a_halt_during_the_request_commit_waits_and_the_job_is_not_sent ... ok
+test milestone::flow::tests::a_halt_while_the_line_is_written_waits_for_the_send ... ok
+test milestone::flow::tests::a_remote_lost_while_preparing_refuses_the_request ... ok
+test milestone::flow::tests::a_crash_inside_the_confirm_group_is_completed ... ok
+test milestone::flow::tests::a_request_without_independence_or_sources_is_refused_and_writes_nothing ... ok
+test milestone::flow::tests::a_failed_archive_before_status_withholds_release ... ok
+test milestone::flow::tests::a_real_write_failure_stops_a_request_prepared_meanwhile ... ok
+test milestone::flow::tests::a_resolution_without_its_audit_stops_recovery ... ok
+test milestone::flow::tests::a_second_request_while_one_is_pending_is_refused ... ok
+test milestone::flow::tests::a_result_that_cannot_be_written_halts_the_service ... ok
+test milestone::flow::tests::a_result_after_cancel_is_kept_as_late_without_effect ... ok
+test milestone::flow::tests::a_runner_that_is_not_the_expected_one_is_a_failed_job ... ok
+test milestone::flow::tests::a_request_runs_records_and_releases_once_archived ... ok
+test milestone::flow::tests::admin_cli::a_rebaseline_preview_shows_the_task_book_at_the_target_commit ... ok
+test milestone::flow::tests::admin_cli::yes_writes_and_shows_the_real_record ... ok
+test milestone::flow::tests::a_second_result_for_the_same_job_is_refused ... ok
+test milestone::flow::tests::an_unreachable_remote_stops_requests ... ok
+test milestone::flow::tests::a_crash_inside_the_result_group_is_completed_exactly ... ok
+test milestone::flow::tests::a_log_that_changed_while_preparing_is_prepared_again ... ok
+test milestone::flow::tests::admin_steps_check_their_preconditions ... ok
+test milestone::flow::tests::confirm_checks_the_task_book_again ... ok
+test milestone::flow::tests::archive_imports_a_longer_remote_and_stops_at_its_length ... ok
+test milestone::flow::tests::a_supersession_published_while_preparing_is_seen_before_committing ... ok
+test milestone::flow::tests::an_admin_process_never_closes_a_running_request ... ok
+test milestone::flow::tests::admin_cli::the_offline_status_never_releases_even_a_released_phase ... ok
+test milestone::flow::tests::admin_cli::dry_runs_and_the_offline_status_write_nothing ... ok
+test milestone::flow::tests::archive_never_goes_past_what_the_remote_holds ... ok
+test milestone::flow::tests::bad_results_are_recorded_as_failed_without_effect ... ok
+test milestone::flow::tests::faults::f2_a_result_after_cancel_is_late_and_without_effect ... ok
+test milestone::flow::tests::faults::f2_a_result_after_rebaseline_is_late_and_without_effect ... ok
+test milestone::flow::tests::faults::f5_a_result_not_yet_archived_releases_only_once_published_and_archived ... ok
+test milestone::flow::tests::faults::f1_an_unparsable_answer_is_a_failed_job_without_effect_and_release_comes_back ... ok
+test milestone::flow::tests::faults::f2_a_result_after_supersession_is_late_and_without_effect ... ok
+test milestone::flow::tests::faults_remote::f10_an_unreachable_remote_stops_release ... ok
+test milestone::flow::tests::faults::f6_a_stale_backup_does_not_release_once_the_remote_has_a_revoke ... ok
+test milestone::flow::tests::faults::f4_an_approval_that_leaves_a_blocking_condition_unresolved_does_not_release ... ok
+test milestone::flow::tests::head_only_moves_forward ... ok
+test milestone::flow::tests::faults_remote::f11_a_tampered_signature_in_the_imported_tail_is_never_imported ... ok
+test milestone::flow::tests::faults_remote::f7_a_truncated_remote_stops_release_and_a_restored_one_releases ... ok
+test milestone::flow::tests::faults::f6_a_stale_backup_does_not_release_once_the_remote_has_a_newer_request ... ok
+test milestone::flow::tests::only_one_service_and_a_restart_closes_jobless_pending_requests ... ok
+test milestone::flow::tests::request_ids_fit_the_runner ... ok
+test milestone::flow::tests::range_and_signature_rules_are_checked_before_anything_is_recorded ... ok
+test milestone::flow::tests::one_recovery_completes_a_confirm_group_and_a_job_group_together ... ok
+test milestone::flow::tests::records_that_are_not_what_the_job_calls_for_stop_recovery ... ok
+test milestone::flow::tests::routes::a_halted_service_answers_503_on_every_route ... ok
+test milestone::flow::tests::faults_remote::f8_a_legitimately_longer_remote_is_imported_without_stop ... ok
+test milestone::flow::tests::routes::publish_checks_the_pinned_key_before_writing_anything ... ok
+test milestone::flow::tests::routes::published_but_not_on_the_remote_is_a_partial_success ... ok
+test milestone::flow::tests::routes::a_halt_during_a_call_turns_its_answer_into_503 ... ok
+test milestone::flow::tests::confirm_refuses_a_chain_too_deep ... ok
+test milestone::flow::tests::routes::without_milestones_404_once_authenticated_and_401_before ... ok
+test milestone::flow::tests::the_state_directory_must_be_absolute ... ok
+test milestone::flow::tests::wait_halted_returns_once_halted_even_if_halted_before_waiting ... ok
+test milestone::flow::tests::faults::f3_a_replayed_earlier_reply_is_refused_and_does_not_restore_the_release ... ok
+test milestone::input::tests::child_assembly ... ignored, run by assemble_in_child only
+test milestone::input::tests::a_missing_baseline_task_book_is_refused ... ok
+test milestone::input::tests::assembles_every_section_deterministically ... ok
+test milestone::input::tests::committed_attributes_of_head_do_count ... ok
+test milestone::input::tests::evidence_that_cannot_be_shown_is_listed_not_converted ... ok
+test milestone::flow::tests::faults_remote::f9_a_forked_remote_record_stops_release ... ok
+test milestone::flow::tests::the_latch_is_visible_at_once_while_halt_waits_for_a_send ... ok
+test milestone::input::tests::sha256_repositories_work_and_formats_must_match ... ok
+test milestone::input::tests::objects_are_found_in_worktrees_and_bare_repos_and_ids_are_typed ... ok
+test milestone::input::tests::merge_commits_and_notes_are_listed ... ok
+test milestone::flow::tests::superseding_cancels_the_old_request_and_freezes_what_is_inherited ... ok
+test milestone::ledger::tests::a_checkpoint_ahead_of_a_rolled_back_log_stops_and_is_never_lowered ... ok
+test milestone::input::tests::task_book_rules ... ok
+test milestone::ledger::tests::a_checkpoint_hash_conflict_stops ... ok
+test milestone::ledger::tests::a_cut_off_line_is_an_error_and_is_not_truncated ... ok
+test milestone::ledger::tests::a_stopped_log_refuses_a_transaction ... ok
+test milestone::ledger::tests::a_tampered_log_is_an_error ... ok
+test milestone::ledger::tests::a_crash_inside_a_transaction_leaves_a_prefix_of_the_group ... ok
+test milestone::input::tests::the_work_tree_does_not_count ... ok
+test milestone::ledger::tests::a_transaction_checks_under_the_lock_and_writes_the_whole_group ... ok
+test milestone::ledger::tests::appends_chain_and_survive_a_reload ... ok
+test milestone::ledger::tests::an_archived_record_naming_a_position_off_the_chain_stops ... ok
+test milestone::ledger::tests::archiving_never_lowers_the_checkpoint ... ok
+test milestone::ledger::tests::archiving_writes_the_record_first_then_the_checkpoint ... ok
+test milestone::input::tests::the_evidence_directory_must_be_a_plain_relative_path ... ok
+test milestone::ledger::tests::crash_gap_temporary_checkpoint_not_renamed_is_ignored ... ok
+test milestone::ledger::tests::crash_gap_archived_written_checkpoint_not_yet_is_rebuilt_from_the_log ... ok
+test milestone::ledger::tests::import_classifies_again_under_the_lock_and_never_writes_otherwise ... ok
+test milestone::record::tests::a_cut_off_or_rewritten_log_line_is_an_error ... ok
+test milestone::record::tests::a_sealed_chain_verifies_and_round_trips_through_the_log ... ok
+test milestone::record::tests::canonical_json_sorts_keys_and_has_no_whitespace ... ok
+test milestone::ledger::tests::importing_a_longer_remote_copies_its_records_byte_for_byte ... ok
+test milestone::runner::tests::a_closed_connection_without_a_whole_line_is_an_error ... ok
+test milestone::ledger::tests::the_offline_view_writes_nothing_and_reports_what_it_could_not_check ... ok
+test milestone::record::tests::tampering_is_caught_record_by_record ... ok
+test milestone::runner::tests::a_reply_without_credentials_is_refused ... ok
+test milestone::runner::tests::a_reply_whose_control_data_does_not_fit_is_refused ... ok
+test milestone::runner::tests::a_reply_from_the_expected_sender_is_authenticated_across_pieces ... ok
+test milestone::runner::tests::passed_file_descriptors_alone ... ignored, run alone by passed_file_descriptors_are_closed_and_the_reply_refused
+test milestone::runner::tests::a_sender_that_is_gone_when_the_reply_is_in_is_not_authenticated ... ok
+test milestone::runner::tests::the_wrong_uid_or_cgroup_is_refused ... ok
+test milestone::serve::tests::a_config_with_a_relative_path_or_an_empty_field_is_refused ... ok
+test milestone::serve::tests::a_token_file_open_to_others_or_short_is_refused_without_showing_it ... ok
+test milestone::sources::tests::a_broken_link_of_a_superseded_phase_carries_over ... ok
+test milestone::sources::tests::a_clean_phase_is_known_and_independent ... ok
+test milestone::sources::tests::a_link_brings_its_ancestors_and_descendants ... ok
+test milestone::sources::tests::a_link_to_another_phase_matches_without_joining_this_one ... ok
+test milestone::sources::tests::a_linked_task_in_a_cycle_brings_the_cycle ... ok
+test milestone::sources::tests::a_linked_task_with_a_broken_chain_stays_a_member ... ok
+test milestone::sources::tests::an_unreadable_bridge_is_unknown_sources ... ok
+test milestone::sources::tests::bad_links_and_ignores_are_unknown_sources ... ok
+test milestone::sources::tests::broken_and_circular_chains_are_unknown_sources ... ok
+test milestone::sources::tests::descendants_of_a_prefix_task_with_a_broken_chain_count ... ok
+test milestone::sources::tests::first_table_maps_as_the_design_says ... ok
+test milestone::sources::tests::ignores_count_for_their_phase_and_its_successors_only ... ok
+test milestone::sources::tests::independence_is_checked_on_every_participant_and_the_auditor ... ok
+test milestone::sources::tests::independence_needs_attestations_and_mapped_participants ... ok
+test milestone::sources::tests::known_ancestors_and_descendants_of_a_broken_link_count ... ok
+test milestone::sources::tests::overlapping_rules_conflict_instead_of_first_match ... ok
+test milestone::runner::tests::passed_file_descriptors_are_closed_and_the_reply_refused ... ok
+test milestone::sources::tests::tasks_of_no_phase_are_unmatched_tasks_of_another_phase_are_not ... ok
+test milestone::sources::tests::the_window_spans_registration_and_every_commit ... ok
+test milestone::sources::tests::trailer_names ... ok
+test milestone::sync::tests::a_remote_growing_past_the_checkpoint_is_normal ... ok
+test milestone::sync::tests::an_unreachable_remote_is_never_read_as_empty ... ok
+test milestone::sources::tests::reads_a_real_bridge_through_the_observer_routes ... ok
+test milestone::sync::tests::equal_behind_and_ahead ... ok
+test milestone::input::tests::no_local_or_user_configuration_changes_the_bytes ... ok
+test milestone::sync::tests::publish_and_fetch_round_trip_byte_for_byte ... ok
+test relay::tests::appends_entries_in_relay_format_to_the_gate_file ... ok
+test milestone::sync::tests::publish_refuses_to_overwrite_a_newer_or_different_remote ... ok
+test milestone::sync::tests::stops_on_truncation_rewrite_divergence_tampering_and_no_reach ... ok
+test review::tests::chunks_pack_small_files_and_split_big_ones ... ok
+test milestone::flow::tests::the_request_line_must_fit_what_the_runner_reads ... ok
+test review::tests::a_fallback_to_a_weaker_channel_is_written_into_the_record ... ok
+test milestone::runner::tests::a_reply_written_by_two_processes_is_refused ... ok
+test review::tests::cached_same_family_answers_are_discarded_not_reused ... ok
+test review::tests::staged_from_is_read_only_and_checks_inputs ... ok
+test review::tests::the_record_takes_the_weakest_channel_of_its_chunks ... ok
+test review::tests::verdicts ... ok
+test review::tests::large_diff_is_chunked_and_any_rejection_rejects ... ok
+test milestone::flow::tests::routes::each_route_answers_on_a_real_flow ... ok
+test reviewer::tests::a_fallback_never_lands_on_the_implementer_family ... ok
+test review::tests::small_diff_is_one_prompt_from_the_template_bound_to_the_tree ... ok
+test reviewer::tests::curl_exe_is_found_without_the_interactive_path ... ok
+test reviewer::tests::an_overloaded_gemini_api_is_retried_before_anything_falls_back ... ok
+test review::tests::every_chunk_is_rechecked_not_only_the_weakest_summary ... ok
+test reviewer::tests::official_endpoints_are_recognized_by_https_host_not_by_substring ... ok
+test reviewer::tests::other_api_errors_are_not_retried ... ok
+test reviewer::tests::retries_are_bounded_and_say_how_many_were_made ... ok
+test reviewer::tests::same_family_providers_are_skipped_before_any_request ... ok
+test reviewer::tests::gives_up_after_the_attempt_budget ... ok
+test reviewer::tests::the_gemini_key_travels_in_a_header_and_never_in_a_url_or_an_error ... ok
+test service::tests::a_broken_identity_config_never_falls_back_to_the_legacy_token ... ok
+test reviewer::tests::a_refused_create_task_is_a_failed_attempt_retried_not_a_panic ... ok
+test milestone::ledger::tests::concurrent_appenders_keep_one_chain ... ok
+test service::tests::errors_map_to_status_codes ... ok
+test review::tests::rerun_reuses_answered_chunks ... ok
+test reviewer::tests::an_endpoint_without_a_configured_vendor_is_not_an_independent_reviewer ... ok
+test service::tests::health_is_open_everything_else_needs_the_token ... ok
+test store::tests::directories_are_private ... ok
+test store::tests::ids ... ok
+test service::tests::weak_channels_only_and_never_manual_over_http ... ok
+test service::tests::three_credentials_freeze_their_principal_and_family_and_isolate_tasks ... ok
+test service::tests::full_flow_over_http_external_review_then_record ... ok
+test reviewer::tests::web_gemini_retries_failed_sends_and_reports_channel ... ok
+test milestone::input::tests::the_limit_is_on_final_bytes ... ok
+test service::tests::unavailable_external_ai_is_reported_not_downgraded ... ok
+test reviewer::tests::nothing_configured_is_unavailable ... ok
+
+test result: ok. 234 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 30.89s
+
+
+running 1 test
+test tests::an_absent_default_config_is_the_only_state_that_allows_legacy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test a_write_without_yes_changes_nothing_and_with_yes_writes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+
+running 1 test
+test without_the_feature_faults_are_ignored ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src/lib.rs (target/debug/deps/review_gate-1522528178370701)
+     Running unittests src/main.rs (target/debug/deps/review_gate-03818987497d41ff)
+     Running tests/admin_cli.rs (target/debug/deps/admin_cli-01d92144602a9224)
+     Running tests/halt_exit.rs (target/debug/deps/halt_exit-53d3416518587269)
+   Doc-tests review_gate
+[exit 0]
+
+--- fault-injection build ---
+$ cargo fmt -p review-gate --check
+
+[exit 0]
+
+$ cargo clippy -p review-gate --all-targets -- -D warnings
+
+    Checking review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-ai-A/crates/review-gate)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.45s
+[exit 0]
+
+$ cargo clippy -p review-gate --all-targets --features fault-injection -- -D warnings
+
+    Checking review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-ai-A/crates/review-gate)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.64s
+[exit 0]
+
+$ cargo test -p review-gate --features fault-injection
+
+running 236 tests
+test attest::tests::key_is_created_once_with_private_permissions_and_reloaded ... ok
+test gate::tests::channel_names_and_strengths ... ok
+test attest::tests::sign_verify_and_tamper_detection ... ok
+test gate::tests::check_commit_refuses_same_family_and_unknown_family_external_records ... ok
+test gate::tests::another_principal_cannot_read_write_review_or_record_the_task ... ok
+test gate::tests::init_freezes_the_authenticated_principal_and_family ... ok
+test gate::tests::external_reviews_must_come_from_another_known_family ... ok
+test gate::tests::approval_checks_parent_and_tag_and_needs_both ... ok
+test gate::tests::explicitly_lowered_threshold_accepts_a_subagent_review ... ok
+test gate::tests::check_commit_needs_an_unused_approved_review_of_the_staged_tree ... ok
+test attest::tests::note_at_finds_fanned_out_notes ... ok
+test gate::tests::init_validates_input ... ok
+test gate::tests::approval_requires_the_reviewed_tree ... ok
+test gate::tests::manual_is_admin_only_and_legacy_external_records_cannot_finalize ... ok
+test gate::tests::records_are_single_use_and_bound_to_the_version ... ok
+test hook::tests::finds_git_commit_and_push_in_shell_commands ... ok
+test identity::tests::a_missing_file_is_an_error_the_caller_may_treat_as_legacy ... ok
+test identity::tests::families_are_canonical_and_protocols_are_not_vendors ... ok
+test identity::tests::invalid_configurations_are_fail_closed ... ok
+test identity::tests::revocation_and_rotation_keep_the_principal ... ok
+test identity::tests::the_legacy_entry_maps_to_legacy_claude_and_never_falls_back ... ok
+test identity::tests::the_three_principals_authenticate_to_their_own_family ... ok
+test gate::tests::tasks_without_a_principal_belong_only_to_legacy_claude ... ok
+test milestone::answer::tests::a_full_answer ... ok
+test milestone::answer::tests::conditions_outside_their_section_are_refused ... ok
+test milestone::answer::tests::invalid_carries_no_partial_result ... ok
+test milestone::answer::tests::section_rules ... ok
+test milestone::answer::tests::sections_are_optional_and_may_be_empty ... ok
+test milestone::answer::tests::the_format_shown_to_the_auditor_follows_this_grammar ... ok
+test milestone::answer::tests::verdict_rules ... ok
+test gate::tests::review_ids_number_attempts_per_version ... ok
+test milestone::derive::tests::a_condition_without_its_blocking_flag_is_malformed_not_non_blocking ... ok
+test milestone::derive::tests::a_late_result_neither_resolves_nor_counts ... ok
+test milestone::derive::tests::a_rebaseline_ends_approvals_and_pending_requests_but_keeps_conditions_and_count ... ok
+test gate::tests::weak_channel_pauses_without_counting_as_rejection ... ok
+test milestone::derive::tests::a_request_on_an_old_baseline_or_without_independence_never_releases ... ok
+test milestone::derive::tests::a_reused_request_id_is_malformed_and_cannot_pick_up_an_old_result ... ok
+test milestone::derive::tests::a_record_missing_a_field_is_never_read_as_empty_and_stops_release ... ok
+test milestone::derive::tests::a_terminal_state_is_never_rewritten ... ok
+test milestone::derive::tests::a_chain_too_deep_stops_release_instead_of_dropping_conditions ... ok
+test milestone::derive::tests::a_superseding_phase_keeps_open_conditions_and_the_count ... ok
+test gate::tests::merge_commits_are_not_versions ... ok
+test milestone::derive::tests::a_valid_audit_condition_with_a_boolean_blocking_flag_is_accepted ... ok
+test milestone::derive::tests::an_ancestor_s_own_reasons_are_not_carried_over ... ok
+test milestone::derive::tests::a_waiver_releases_only_once_archived ... ok
+test milestone::derive::tests::a_waiver_that_completes_a_release_also_ends_the_run ... ok
+test milestone::derive::tests::an_approval_that_is_not_archived_does_not_release ... ok
+test milestone::derive::tests::an_approved_archived_request_releases ... ok
+test milestone::derive::tests::an_approval_of_a_revoked_request_does_not_end_the_run ... ok
+test milestone::derive::tests::an_unarchived_revoke_ends_the_approval_at_once ... ok
+test milestone::derive::tests::an_unarchived_new_request_ends_the_old_approval_at_once ... ok
+test milestone::derive::tests::an_unregistered_phase_never_releases ... ok
+test milestone::derive::tests::approve_cannot_skip_an_open_blocking_condition ... ok
+test milestone::derive::tests::inheritance_cutoff_holds_for_the_first_record_and_several_levels ... ok
+test milestone::derive::tests::inherited_conditions_keep_their_lineage ... ok
+test milestone::derive::tests::inheritance_is_fixed_at_registration ... ok
+test attest::tests::verify_commit_at_reads_the_fixed_notes_commit ... ok
+test milestone::derive::tests::invalid_audits_and_run_failures_do_not_count ... ok
+test milestone::derive::tests::only_the_first_valid_audit_of_a_request_counts ... ok
+test gate::tests::three_rejections_trip_the_breaker_and_approval_resets_the_streak ... ok
+test milestone::derive::tests::unknown_implementation_sources_stop_release_and_a_missing_flag_is_malformed ... ok
+test milestone::derive::tests::superseding_must_name_an_earlier_phase_once ... ok
+test milestone::derive::tests::unarchived_source_handling_cannot_release ... ok
+test milestone::derive::tests::three_rejections_pause_until_the_user_resumes ... ok
+test milestone::derive::tests::the_count_resets_on_release_not_on_an_approval_that_leaves_a_blocking_condition_open ... ok
+test milestone::flow::tests::a_changed_snapshot_is_never_sent ... ok
+test milestone::flow::tests::a_changed_manifest_is_never_sent ... ok
+test milestone::flow::tests::a_committed_job_not_yet_sent_when_halted_is_not_sent ... ok
+test hook::tests::blocks_unreviewed_commits_and_unattested_pushes ... ok
+test mcp::tests::review_and_record_through_mcp_tools ... ok
+test milestone::flow::tests::a_halt_during_preparation_admits_no_new_job ... ok
+test milestone::flow::tests::a_halt_during_the_request_commit_waits_and_the_job_is_not_sent ... ok
+test milestone::flow::tests::a_halt_just_before_the_send_keeps_the_job_from_going_out ... ok
+test milestone::flow::tests::a_halt_while_the_line_is_written_waits_for_the_send ... ok
+test milestone::flow::tests::a_crash_inside_the_confirm_group_is_completed ... ok
+test milestone::flow::tests::a_remote_lost_while_preparing_refuses_the_request ... ok
+test milestone::flow::tests::a_request_without_independence_or_sources_is_refused_and_writes_nothing ... ok
+test milestone::flow::tests::a_failed_archive_before_status_withholds_release ... ok
+test milestone::flow::tests::a_real_write_failure_stops_a_request_prepared_meanwhile ... ok
+test milestone::flow::tests::a_resolution_without_its_audit_stops_recovery ... ok
+test milestone::flow::tests::a_result_after_cancel_is_kept_as_late_without_effect ... ok
+test milestone::flow::tests::a_second_request_while_one_is_pending_is_refused ... ok
+test milestone::flow::tests::a_result_that_cannot_be_written_halts_the_service ... ok
+test milestone::flow::tests::a_runner_that_is_not_the_expected_one_is_a_failed_job ... ok
+test milestone::flow::tests::a_request_runs_records_and_releases_once_archived ... ok
+test milestone::flow::tests::admin_cli::a_rebaseline_preview_shows_the_task_book_at_the_target_commit ... ok
+test milestone::flow::tests::admin_cli::yes_writes_and_shows_the_real_record ... ok
+test milestone::flow::tests::a_second_result_for_the_same_job_is_refused ... ok
+test milestone::flow::tests::an_unreachable_remote_stops_requests ... ok
+test milestone::flow::tests::a_crash_inside_the_result_group_is_completed_exactly ... ok
+test milestone::flow::tests::admin_steps_check_their_preconditions ... ok
+test milestone::flow::tests::a_log_that_changed_while_preparing_is_prepared_again ... ok
+test milestone::flow::tests::confirm_checks_the_task_book_again ... ok
+test milestone::flow::tests::a_supersession_published_while_preparing_is_seen_before_committing ... ok
+test milestone::flow::tests::archive_imports_a_longer_remote_and_stops_at_its_length ... ok
+test milestone::flow::tests::an_admin_process_never_closes_a_running_request ... ok
+test milestone::flow::tests::admin_cli::the_offline_status_never_releases_even_a_released_phase ... ok
+test milestone::flow::tests::admin_cli::dry_runs_and_the_offline_status_write_nothing ... ok
+test milestone::flow::tests::archive_never_goes_past_what_the_remote_holds ... ok
+test milestone::flow::tests::bad_results_are_recorded_as_failed_without_effect ... ok
+test milestone::flow::tests::faults::f2_a_result_after_cancel_is_late_and_without_effect ... ok
+test milestone::flow::tests::faults::f2_a_result_after_rebaseline_is_late_and_without_effect ... ok
+test milestone::flow::tests::faults::f5_a_result_not_yet_archived_releases_only_once_published_and_archived ... ok
+test milestone::flow::tests::faults::f1_an_unparsable_answer_is_a_failed_job_without_effect_and_release_comes_back ... ok
+test milestone::flow::tests::faults::f2_a_result_after_supersession_is_late_and_without_effect ... ok
+test milestone::flow::tests::faults::f4_an_approval_that_leaves_a_blocking_condition_unresolved_does_not_release ... ok
+test milestone::flow::tests::faults_remote::f10_an_unreachable_remote_stops_release ... ok
+test milestone::flow::tests::faults::f6_a_stale_backup_does_not_release_once_the_remote_has_a_revoke ... ok
+test milestone::flow::tests::head_only_moves_forward ... ok
+test milestone::flow::tests::faults::f6_a_stale_backup_does_not_release_once_the_remote_has_a_newer_request ... ok
+test milestone::flow::tests::faults_remote::f11_a_tampered_signature_in_the_imported_tail_is_never_imported ... ok
+test milestone::flow::tests::faults_remote::f7_a_truncated_remote_stops_release_and_a_restored_one_releases ... ok
+test milestone::flow::tests::range_and_signature_rules_are_checked_before_anything_is_recorded ... ok
+test milestone::flow::tests::only_one_service_and_a_restart_closes_jobless_pending_requests ... ok
+test milestone::flow::tests::request_ids_fit_the_runner ... ok
+test milestone::flow::tests::records_that_are_not_what_the_job_calls_for_stop_recovery ... ok
+test milestone::flow::tests::one_recovery_completes_a_confirm_group_and_a_job_group_together ... ok
+test milestone::flow::tests::faults_remote::f8_a_legitimately_longer_remote_is_imported_without_stop ... ok
+test milestone::flow::tests::routes::a_halted_service_answers_503_on_every_route ... ok
+test milestone::flow::tests::routes::publish_checks_the_pinned_key_before_writing_anything ... ok
+test milestone::flow::tests::confirm_refuses_a_chain_too_deep ... ok
+test milestone::flow::tests::faults::f3_a_replayed_earlier_reply_is_refused_and_does_not_restore_the_release ... ok
+test milestone::flow::tests::routes::published_but_not_on_the_remote_is_a_partial_success ... ok
+test milestone::flow::tests::the_state_directory_must_be_absolute ... ok
+test milestone::flow::tests::routes::without_milestones_404_once_authenticated_and_401_before ... ok
+test milestone::flow::tests::wait_halted_returns_once_halted_even_if_halted_before_waiting ... ok
+test milestone::input::tests::a_missing_baseline_task_book_is_refused ... ok
+test milestone::input::tests::child_assembly ... ignored, run by assemble_in_child only
+test milestone::flow::tests::routes::a_halt_during_a_call_turns_its_answer_into_503 ... ok
+test milestone::input::tests::assembles_every_section_deterministically ... ok
+test milestone::input::tests::committed_attributes_of_head_do_count ... ok
+test milestone::flow::tests::the_latch_is_visible_at_once_while_halt_waits_for_a_send ... ok
+test milestone::input::tests::evidence_that_cannot_be_shown_is_listed_not_converted ... ok
+test milestone::flow::tests::faults_remote::f9_a_forked_remote_record_stops_release ... ok
+test milestone::input::tests::sha256_repositories_work_and_formats_must_match ... ok
+test milestone::input::tests::objects_are_found_in_worktrees_and_bare_repos_and_ids_are_typed ... ok
+test milestone::input::tests::merge_commits_and_notes_are_listed ... ok
+test milestone::flow::tests::superseding_cancels_the_old_request_and_freezes_what_is_inherited ... ok
+test milestone::ledger::tests::a_checkpoint_ahead_of_a_rolled_back_log_stops_and_is_never_lowered ... ok
+test milestone::ledger::tests::a_checkpoint_hash_conflict_stops ... ok
+test milestone::ledger::tests::a_crash_inside_a_transaction_leaves_a_prefix_of_the_group ... ok
+test milestone::input::tests::the_work_tree_does_not_count ... ok
+test milestone::ledger::tests::a_cut_off_line_is_an_error_and_is_not_truncated ... ok
+test milestone::ledger::tests::a_tampered_log_is_an_error ... ok
+test milestone::ledger::tests::a_stopped_log_refuses_a_transaction ... ok
+test milestone::input::tests::task_book_rules ... ok
+test milestone::ledger::tests::appends_chain_and_survive_a_reload ... ok
+test milestone::ledger::tests::a_transaction_checks_under_the_lock_and_writes_the_whole_group ... ok
+test milestone::ledger::tests::an_archived_record_naming_a_position_off_the_chain_stops ... ok
+test milestone::ledger::tests::archiving_never_lowers_the_checkpoint ... ok
+test milestone::ledger::tests::archiving_writes_the_record_first_then_the_checkpoint ... ok
+test milestone::input::tests::the_evidence_directory_must_be_a_plain_relative_path ... ok
+test milestone::ledger::tests::crash_gap_temporary_checkpoint_not_renamed_is_ignored ... ok
+test milestone::ledger::tests::import_classifies_again_under_the_lock_and_never_writes_otherwise ... ok
+test milestone::ledger::tests::crash_gap_archived_written_checkpoint_not_yet_is_rebuilt_from_the_log ... ok
+test milestone::record::tests::a_cut_off_or_rewritten_log_line_is_an_error ... ok
+test milestone::record::tests::a_sealed_chain_verifies_and_round_trips_through_the_log ... ok
+test milestone::record::tests::canonical_json_sorts_keys_and_has_no_whitespace ... ok
+test milestone::ledger::tests::importing_a_longer_remote_copies_its_records_byte_for_byte ... ok
+test milestone::runner::tests::a_closed_connection_without_a_whole_line_is_an_error ... ok
+test milestone::ledger::tests::the_offline_view_writes_nothing_and_reports_what_it_could_not_check ... ok
+test milestone::runner::tests::a_reply_from_the_expected_sender_is_authenticated_across_pieces ... ok
+test milestone::runner::tests::a_reply_without_credentials_is_refused ... ok
+test milestone::record::tests::tampering_is_caught_record_by_record ... ok
+test milestone::runner::tests::a_reply_whose_control_data_does_not_fit_is_refused ... ok
+test milestone::runner::tests::passed_file_descriptors_alone ... ignored, run alone by passed_file_descriptors_are_closed_and_the_reply_refused
+test milestone::runner::tests::a_sender_that_is_gone_when_the_reply_is_in_is_not_authenticated ... ok
+test milestone::runner::tests::the_wrong_uid_or_cgroup_is_refused ... ok
+test milestone::serve::tests::a_config_with_a_relative_path_or_an_empty_field_is_refused ... ok
+test milestone::serve::tests::a_token_file_open_to_others_or_short_is_refused_without_showing_it ... ok
+test milestone::sources::tests::a_broken_link_of_a_superseded_phase_carries_over ... ok
+test milestone::sources::tests::a_clean_phase_is_known_and_independent ... ok
+test milestone::sources::tests::a_link_brings_its_ancestors_and_descendants ... ok
+test milestone::sources::tests::a_link_to_another_phase_matches_without_joining_this_one ... ok
+test milestone::sources::tests::a_linked_task_in_a_cycle_brings_the_cycle ... ok
+test milestone::sources::tests::a_linked_task_with_a_broken_chain_stays_a_member ... ok
+test milestone::sources::tests::an_unreadable_bridge_is_unknown_sources ... ok
+test milestone::sources::tests::bad_links_and_ignores_are_unknown_sources ... ok
+test milestone::sources::tests::broken_and_circular_chains_are_unknown_sources ... ok
+test milestone::sources::tests::descendants_of_a_prefix_task_with_a_broken_chain_count ... ok
+test milestone::sources::tests::first_table_maps_as_the_design_says ... ok
+test milestone::sources::tests::ignores_count_for_their_phase_and_its_successors_only ... ok
+test milestone::sources::tests::independence_is_checked_on_every_participant_and_the_auditor ... ok
+test milestone::sources::tests::independence_needs_attestations_and_mapped_participants ... ok
+test milestone::sources::tests::known_ancestors_and_descendants_of_a_broken_link_count ... ok
+test milestone::sources::tests::overlapping_rules_conflict_instead_of_first_match ... ok
+test milestone::runner::tests::passed_file_descriptors_are_closed_and_the_reply_refused ... ok
+test milestone::sources::tests::tasks_of_no_phase_are_unmatched_tasks_of_another_phase_are_not ... ok
+test milestone::sources::tests::the_window_spans_registration_and_every_commit ... ok
+test milestone::sources::tests::trailer_names ... ok
+test milestone::sync::tests::a_remote_growing_past_the_checkpoint_is_normal ... ok
+test milestone::sources::tests::reads_a_real_bridge_through_the_observer_routes ... ok
+test milestone::sync::tests::an_unreachable_remote_is_never_read_as_empty ... ok
+test milestone::sync::tests::equal_behind_and_ahead ... ok
+test milestone::input::tests::no_local_or_user_configuration_changes_the_bytes ... ok
+test milestone::sync::tests::stops_on_truncation_rewrite_divergence_tampering_and_no_reach ... ok
+test relay::tests::appends_entries_in_relay_format_to_the_gate_file ... ok
+test milestone::sync::tests::publish_and_fetch_round_trip_byte_for_byte ... ok
+test milestone::sync::tests::publish_refuses_to_overwrite_a_newer_or_different_remote ... ok
+test review::tests::chunks_pack_small_files_and_split_big_ones ... ok
+test milestone::flow::tests::the_request_line_must_fit_what_the_runner_reads ... ok
+test review::tests::a_fallback_to_a_weaker_channel_is_written_into_the_record ... ok
+test review::tests::cached_same_family_answers_are_discarded_not_reused ... ok
+test milestone::runner::tests::a_reply_written_by_two_processes_is_refused ... ok
+test review::tests::staged_from_is_read_only_and_checks_inputs ... ok
+test review::tests::the_record_takes_the_weakest_channel_of_its_chunks ... ok
+test review::tests::verdicts ... ok
+test milestone::flow::tests::routes::each_route_answers_on_a_real_flow ... ok
+test review::tests::large_diff_is_chunked_and_any_rejection_rejects ... ok
+test reviewer::tests::a_fallback_never_lands_on_the_implementer_family ... ok
+test review::tests::small_diff_is_one_prompt_from_the_template_bound_to_the_tree ... ok
+test reviewer::tests::curl_exe_is_found_without_the_interactive_path ... ok
+test reviewer::tests::an_overloaded_gemini_api_is_retried_before_anything_falls_back ... ok
+test review::tests::every_chunk_is_rechecked_not_only_the_weakest_summary ... ok
+test reviewer::tests::official_endpoints_are_recognized_by_https_host_not_by_substring ... ok
+test reviewer::tests::other_api_errors_are_not_retried ... ok
+test reviewer::tests::retries_are_bounded_and_say_how_many_were_made ... ok
+test reviewer::tests::same_family_providers_are_skipped_before_any_request ... ok
+test reviewer::tests::the_gemini_key_travels_in_a_header_and_never_in_a_url_or_an_error ... ok
+test reviewer::tests::gives_up_after_the_attempt_budget ... ok
+test service::tests::a_broken_identity_config_never_falls_back_to_the_legacy_token ... ok
+test review::tests::rerun_reuses_answered_chunks ... ok
+test service::tests::errors_map_to_status_codes ... ok
+test milestone::ledger::tests::concurrent_appenders_keep_one_chain ... ok
+test reviewer::tests::a_refused_create_task_is_a_failed_attempt_retried_not_a_panic ... ok
+test service::tests::health_is_open_everything_else_needs_the_token ... ok
+test service::tests::weak_channels_only_and_never_manual_over_http ... ok
+test store::tests::directories_are_private ... ok
+test store::tests::ids ... ok
+test reviewer::tests::web_gemini_retries_failed_sends_and_reports_channel ... ok
+test service::tests::three_credentials_freeze_their_principal_and_family_and_isolate_tasks ... ok
+test service::tests::full_flow_over_http_external_review_then_record ... ok
+test reviewer::tests::an_endpoint_without_a_configured_vendor_is_not_an_independent_reviewer ... ok
+test milestone::input::tests::the_limit_is_on_final_bytes ... ok
+test service::tests::unavailable_external_ai_is_reported_not_downgraded ... ok
+test reviewer::tests::nothing_configured_is_unavailable ... ok
+
+test result: ok. 234 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 35.40s
+
+
+running 1 test
+test tests::an_absent_default_config_is_the_only_state_that_allows_legacy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test a_write_without_yes_changes_nothing_and_with_yes_writes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+
+running 2 tests
+test a_halt_with_nothing_in_flight_exits_3_at_once ... ok
+test a_halt_with_a_stuck_call_a_silent_runner_and_a_blocked_stderr_exits_3_at_the_deadline ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.15s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Compiling review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-ai-A/crates/review-gate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 41.29s
+     Running unittests src/lib.rs (target/debug/deps/review_gate-f6ed015cc8eb98f5)
+     Running unittests src/main.rs (target/debug/deps/review_gate-32c9375fe68b62e8)
+     Running tests/admin_cli.rs (target/debug/deps/admin_cli-0c4292642eb61c6a)
+     Running tests/halt_exit.rs (target/debug/deps/halt_exit-967e43652a008b68)
+   Doc-tests review_gate
+[exit 0]
+
+--- final tree state ---
+$ git rev-parse HEAD HEAD^{tree}
+1a031b5f9af5d94f8ed38e929885bb92d88d87ea
+9e9d9078186b5b47703028e5a4063b73b0acbc18
+[exit 0]
+
+$ git status --porcelain --untracked-files=all
+?? plans/M2-evidence/mutation-ai-A.txt
+[exit 0]
+

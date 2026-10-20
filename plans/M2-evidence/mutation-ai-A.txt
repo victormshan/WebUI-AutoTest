@@ -1,0 +1,459 @@
+Mutation evidence: implementer-neutral step A rework
+worktree: /home/administrator/projects/Chrome-MCP-ai-A
+date: 2026-10-20T08:00:06.515240+00:00
+$ git rev-parse HEAD HEAD^{tree}
+1a031b5f9af5d94f8ed38e929885bb92d88d87ea
+9e9d9078186b5b47703028e5a4063b73b0acbc18
+[exit 0]
+baseline: git status --porcelain --untracked-files=all is empty; git diff HEAD is empty
+
+===== M1: remove the same-vendor comparison in external_family_ok (the one shared comparison) =====
+file: crates/review-gate/src/model.rs
+--- mutant diff ---
+diff --git a/crates/review-gate/src/model.rs b/crates/review-gate/src/model.rs
+index c5c009e..b22ed25 100644
+--- a/crates/review-gate/src/model.rs
++++ b/crates/review-gate/src/model.rs
+@@ -223,11 +223,6 @@ pub fn external_family_ok(
+             "unknown reviewer family {reviewer_family:?} is not a known model family; the administrator must configure the model vendor of this endpoint"
+         )
+     })?;
+-    if reviewer == implementer {
+-        return Err(format!(
+-            "reviewer family {reviewer} is the implementer's family; a review from the same vendor is not independent"
+-        ));
+-    }
+     Ok(reviewer)
+ }
+$ cargo test -p review-gate --lib gate::tests::external_reviews_must_come_from_another_known_family
+
+running 1 test
+test gate::tests::external_reviews_must_come_from_another_known_family ... FAILED
+
+failures:
+
+---- gate::tests::external_reviews_must_come_from_another_known_family stdout ----
+
+thread 'gate::tests::external_reviews_must_come_from_another_known_family' (471187) panicked at crates/review-gate/src/gate.rs:1136:18:
+called `Result::unwrap_err()` on an `Ok` value: ReviewRecord { id: "v1-1", task: "t", iteration: 1, attempt: 1, tree: "1bef487d18fe7a0e5896782d55649014e42e6dc1", base: "310e9f9f6d6f3bac34b1008cdc92f9458cf1cf1a", verdict: Approved, channel: ExternalApi, provider: "p", model: None, family: "deepseek", prompt_sha: "", text: "VERDICT: APPROVED", at: 2026-10-20T08:00:26.406994700Z }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    gate::tests::external_reviews_must_come_from_another_known_family
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 235 filtered out; finished in 0.08s
+
+   Compiling review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-ai-A/crates/review-gate)
+warning: unused variable: `implementer`
+   --> crates/review-gate/src/model.rs:216:9
+    |
+216 |     let implementer = canonical_family(implementer_family).ok_or_else(|| {
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_implementer`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `review-gate` (lib test) generated 1 warning (run `cargo fix --lib -p review-gate --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.71s
+     Running unittests src/lib.rs (target/debug/deps/review_gate-1522528178370701)
+error: test failed, to rerun pass `-p review-gate --lib`
+[exit 101]
+compiled: True; target test failed as required: True
+restore check: git diff HEAD is empty; git status --porcelain is empty
+
+===== M2: review_eligibility no longer calls the shared external rule =====
+file: crates/review-gate/src/model.rs
+--- mutant diff ---
+diff --git a/crates/review-gate/src/model.rs b/crates/review-gate/src/model.rs
+index c5c009e..604a948 100644
+--- a/crates/review-gate/src/model.rs
++++ b/crates/review-gate/src/model.rs
+@@ -200,10 +200,7 @@ pub fn review_eligibility(
+             }
+             Ok("human".into())
+         }
+-        Channel::ExternalApi | Channel::WebGemini => {
+-            // One rule: do not keep a second copy of the vendor comparison here.
+-            external_family_ok(implementer_family, reviewer_family).map(str::to_string)
+-        }
++        Channel::ExternalApi | Channel::WebGemini => Ok(reviewer_family.to_string()),
+         Channel::ClaudeSubagent | Channel::SelfReview => Ok(implementer.to_string()),
+     }
+ }
+$ cargo test -p review-gate --lib gate::tests::external_reviews_must_come_from_another_known_family
+
+running 1 test
+test gate::tests::external_reviews_must_come_from_another_known_family ... FAILED
+
+failures:
+
+---- gate::tests::external_reviews_must_come_from_another_known_family stdout ----
+
+thread 'gate::tests::external_reviews_must_come_from_another_known_family' (471611) panicked at crates/review-gate/src/gate.rs:1136:18:
+called `Result::unwrap_err()` on an `Ok` value: ReviewRecord { id: "v1-1", task: "t", iteration: 1, attempt: 1, tree: "1bef487d18fe7a0e5896782d55649014e42e6dc1", base: "53efeaa0181b8401e4cd1d5589c318096bdeee09", verdict: Approved, channel: ExternalApi, provider: "p", model: None, family: "deepseek", prompt_sha: "", text: "VERDICT: APPROVED", at: 2026-10-20T08:00:35.606566864Z }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    gate::tests::external_reviews_must_come_from_another_known_family
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 235 filtered out; finished in 0.03s
+
+   Compiling review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-ai-A/crates/review-gate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.99s
+     Running unittests src/lib.rs (target/debug/deps/review_gate-1522528178370701)
+error: test failed, to rerun pass `-p review-gate --lib`
+[exit 101]
+compiled: True; target test failed as required: True
+restore check: git diff HEAD is empty; git status --porcelain is empty
+
+===== M3: can_access always true =====
+file: crates/review-gate/src/gate.rs
+--- mutant diff ---
+diff --git a/crates/review-gate/src/gate.rs b/crates/review-gate/src/gate.rs
+index 7b8b355..30f4390 100644
+--- a/crates/review-gate/src/gate.rs
++++ b/crates/review-gate/src/gate.rs
+@@ -186,7 +186,8 @@ impl Gate {
+     /// Whether `who` may read or change this task. The administrator may access every task;
+     /// anybody else is confined to the principal frozen at creation.
+     pub fn can_access(&self, task: &Task, who: &Identity) -> bool {
+-        who.admin || task.owner_principal() == who.principal
++        let _ = (task, who);
++        true
+     }
+ 
+     pub fn ensure_owner(&self, task: &Task, who: &Identity) -> Result<(), GateError> {
+$ cargo test -p review-gate --lib gate::tests::another_principal_cannot_read_write_review_or_record_the_task
+
+running 1 test
+test gate::tests::another_principal_cannot_read_write_review_or_record_the_task ... FAILED
+
+failures:
+
+---- gate::tests::another_principal_cannot_read_write_review_or_record_the_task stdout ----
+
+thread 'gate::tests::another_principal_cannot_read_write_review_or_record_the_task' (471960) panicked at crates/review-gate/src/gate.rs:1027:9:
+assertion failed: matches!(e.gate.ensure_owner(&task, &other), Err(GateError::Forbidden(_)))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    gate::tests::another_principal_cannot_read_write_review_or_record_the_task
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 235 filtered out; finished in 0.02s
+
+   Compiling review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-ai-A/crates/review-gate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.46s
+     Running unittests src/lib.rs (target/debug/deps/review_gate-1522528178370701)
+error: test failed, to rerun pass `-p review-gate --lib`
+[exit 101]
+compiled: True; target test failed as required: True
+restore check: git diff HEAD is empty; git status --porcelain is empty
+
+===== M4: check_commit drops the eligibility condition =====
+file: crates/review-gate/src/gate.rs
+--- mutant diff ---
+diff --git a/crates/review-gate/src/gate.rs b/crates/review-gate/src/gate.rs
+index 7b8b355..737bc4e 100644
+--- a/crates/review-gate/src/gate.rs
++++ b/crates/review-gate/src/gate.rs
+@@ -334,9 +334,7 @@ impl Gate {
+             if r.verdict == Verdict::Approved
+                 && r.tree == tree
+                 && r.base == base
+-                && r.channel.strength() >= task.min_reviewer.strength()
+-                && eligible
+-            {
++                && r.channel.strength() >= task.min_reviewer.strength()            {
+                 return Ok(CommitCheck {
+                     allowed: true,
+                     reason: format!("covered by approved review {}", r.id),
+$ cargo test -p review-gate --lib gate::tests::check_commit_refuses_same_family_and_unknown_family_external_records
+
+running 1 test
+test gate::tests::check_commit_refuses_same_family_and_unknown_family_external_records ... FAILED
+
+failures:
+
+---- gate::tests::check_commit_refuses_same_family_and_unknown_family_external_records stdout ----
+
+thread 'gate::tests::check_commit_refuses_same_family_and_unknown_family_external_records' (472284) panicked at crates/review-gate/src/gate.rs:1193:13:
+deepseek must not authorize a commit: CommitCheck { allowed: true, task: Some("t"), review: Some("v1-1"), reason: "covered by approved review v1-1" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    gate::tests::check_commit_refuses_same_family_and_unknown_family_external_records
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 235 filtered out; finished in 0.03s
+
+   Compiling review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-ai-A/crates/review-gate)
+warning: unused variable: `eligible`
+   --> crates/review-gate/src/gate.rs:327:17
+    |
+327 |             let eligible = review_eligibility(
+    |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_eligible`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `review-gate` (lib test) generated 1 warning (run `cargo fix --lib -p review-gate --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.31s
+     Running unittests src/lib.rs (target/debug/deps/review_gate-1522528178370701)
+error: test failed, to rerun pass `-p review-gate --lib`
+[exit 101]
+compiled: True; target test failed as required: True
+restore check: git diff HEAD is empty; git status --porcelain is empty
+
+===== M5: record drops the review_eligibility call =====
+file: crates/review-gate/src/gate.rs
+--- mutant diff ---
+diff --git a/crates/review-gate/src/gate.rs b/crates/review-gate/src/gate.rs
+index 7b8b355..5003018 100644
+--- a/crates/review-gate/src/gate.rs
++++ b/crates/review-gate/src/gate.rs
+@@ -373,12 +373,6 @@ impl Gate {
+         let r = self.store.load_review(id, review_id)?;
+         // Legacy records are not grandfathered: an external record whose family is unknown or
+         // the implementer's own cannot finalize a version. Signed history still verifies.
+-        review_eligibility(&task.implementer_family, r.channel, &r.family, true).map_err(|e| {
+-            GateError::Mismatch(format!(
+-                "review {} cannot be finalized under implementer neutrality: {e}",
+-                r.id
+-            ))
+-        })?;
+         if r.iteration != task.current_iteration {
+             return Err(GateError::Mismatch(format!(
+                 "review {} is for version {}, task is at version {}",
+$ cargo test -p review-gate --lib gate::tests::manual_is_admin_only_and_legacy_external_records_cannot_finalize
+
+running 1 test
+test gate::tests::manual_is_admin_only_and_legacy_external_records_cannot_finalize ... FAILED
+
+failures:
+
+---- gate::tests::manual_is_admin_only_and_legacy_external_records_cannot_finalize stdout ----
+
+thread 'gate::tests::manual_is_admin_only_and_legacy_external_records_cannot_finalize' (472608) panicked at crates/review-gate/src/gate.rs:1241:13:
+invalid request: approved needs --commit and --tag
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    gate::tests::manual_is_admin_only_and_legacy_external_records_cannot_finalize
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 235 filtered out; finished in 0.03s
+
+   Compiling review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-ai-A/crates/review-gate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.70s
+     Running unittests src/lib.rs (target/debug/deps/review_gate-1522528178370701)
+error: test failed, to rerun pass `-p review-gate --lib`
+[exit 101]
+compiled: True; target test failed as required: True
+restore check: git diff HEAD is empty; git status --porcelain is empty
+
+===== M6: review::run trusts the cache without rechecking the family =====
+file: crates/review-gate/src/review.rs
+--- mutant diff ---
+diff --git a/crates/review-gate/src/review.rs b/crates/review-gate/src/review.rs
+index 5c1637c..5a746d0 100644
+--- a/crates/review-gate/src/review.rs
++++ b/crates/review-gate/src/review.rs
+@@ -258,7 +258,7 @@ pub async fn run(
+         };
+         let cached = gate.store().cache_get::<Reply>(&task.id, &key)?;
+         let cached = match cached {
+-            Some(c) if reply_eligible(&task, &c).is_ok() => Some(c),
++            Some(c) if reply_eligible(&task, &c).is_ok() || true => Some(c),
+             Some(c) => {
+                 // Old cache entries from before the family rule, or from a same-family endpoint,
+                 // are invalid: never silently reused, never treated as independent.
+$ cargo test -p review-gate --lib review::tests::cached_same_family_answers_are_discarded_not_reused
+
+running 1 test
+test review::tests::cached_same_family_answers_are_discarded_not_reused ... FAILED
+
+failures:
+
+---- review::tests::cached_same_family_answers_are_discarded_not_reused stdout ----
+
+thread 'review::tests::cached_same_family_answers_are_discarded_not_reused' (472954) panicked at crates/review-gate/src/review.rs:723:14:
+called `Result::unwrap()` on an `Err` value: Gate(Mismatch("review is not eligible: reviewer family claude is the implementer's family; a review from the same vendor is not independent"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    review::tests::cached_same_family_answers_are_discarded_not_reused
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 235 filtered out; finished in 0.33s
+
+   Compiling review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-ai-A/crates/review-gate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.52s
+     Running unittests src/lib.rs (target/debug/deps/review_gate-1522528178370701)
+error: test failed, to rerun pass `-p review-gate --lib`
+[exit 101]
+compiled: True; target test failed as required: True
+restore check: git diff HEAD is empty; git status --porcelain is empty
+
+===== M7: authenticate ignores the enabled flag =====
+file: crates/review-gate/src/identity.rs
+--- mutant diff ---
+diff --git a/crates/review-gate/src/identity.rs b/crates/review-gate/src/identity.rs
+index 7eac047..caba430 100644
+--- a/crates/review-gate/src/identity.rs
++++ b/crates/review-gate/src/identity.rs
+@@ -249,7 +249,7 @@ impl IdentityConfig {
+                 let given: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+                 let mut found: Option<&Credential> = None;
+                 for c in credentials {
+-                    if c.enabled && constant_time_eq(&c.hash, &given) {
++                    if constant_time_eq(&c.hash, &given) {
+                         found = Some(c);
+                     }
+                 }
+$ cargo test -p review-gate --lib identity::tests::revocation_and_rotation_keep_the_principal
+
+running 1 test
+test identity::tests::revocation_and_rotation_keep_the_principal ... FAILED
+
+failures:
+
+---- identity::tests::revocation_and_rotation_keep_the_principal stdout ----
+
+thread 'identity::tests::revocation_and_rotation_keep_the_principal' (473292) panicked at crates/review-gate/src/identity.rs:403:9:
+disabled mapping
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    identity::tests::revocation_and_rotation_keep_the_principal
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 235 filtered out; finished in 0.00s
+
+   Compiling review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-ai-A/crates/review-gate)
+warning: field `enabled` is never read
+  --> crates/review-gate/src/identity.rs:99:5
+   |
+94 | pub struct Credential {
+   |            ---------- field in this struct
+...
+99 |     enabled: bool,
+   |     ^^^^^^^
+   |
+   = note: `Credential` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `review-gate` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.41s
+     Running unittests src/lib.rs (target/debug/deps/review_gate-1522528178370701)
+error: test failed, to rerun pass `-p review-gate --lib`
+[exit 101]
+compiled: True; target test failed as required: True
+restore check: git diff HEAD is empty; git status --porcelain is empty
+
+===== M8: Gate::init ignores the claimed/authenticated family mismatch =====
+file: crates/review-gate/src/gate.rs
+--- mutant diff ---
+diff --git a/crates/review-gate/src/gate.rs b/crates/review-gate/src/gate.rs
+index 7b8b355..aa5337b 100644
+--- a/crates/review-gate/src/gate.rs
++++ b/crates/review-gate/src/gate.rs
+@@ -135,11 +135,6 @@ impl Gate {
+             let claim = canonical_family(claim).ok_or_else(|| {
+                 GateError::Mismatch(format!("unknown claimed implementer family {claim:?}"))
+             })?;
+-            if claim != implementer_family {
+-                return Err(GateError::Mismatch(format!(
+-                    "claimed implementer family {claim} does not match the authenticated family {implementer_family}"
+-                )));
+-            }
+         }
+         if !(1..=MAX_ITERATIONS).contains(&t.iterations) {
+             return Err(GateError::Invalid(format!(
+$ cargo test -p review-gate --lib gate::tests::init_freezes_the_authenticated_principal_and_family
+
+running 1 test
+test gate::tests::init_freezes_the_authenticated_principal_and_family ... FAILED
+
+failures:
+
+---- gate::tests::init_freezes_the_authenticated_principal_and_family stdout ----
+
+thread 'gate::tests::init_freezes_the_authenticated_principal_and_family' (473607) panicked at crates/review-gate/src/gate.rs:986:14:
+called `Result::unwrap_err()` on an `Ok` value: Task { id: "u", principal: "opencode", credential: "test", config_digest: None, expr_id: None, goal: "g", final_acceptance: "a", repo: "/tmp/.tmpb4nFF8/repo", iterations: 1, current_iteration: 1, reject_streak: 0, min_reviewer: WebGemini, review_provider: "auto", implementer_family: "deepseek", status: Running, stop_reason: None, created_at: 2026-10-20T08:01:19.649377218Z, updated_at: 2026-10-20T08:01:19.649377218Z, history: [] }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    gate::tests::init_freezes_the_authenticated_principal_and_family
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 235 filtered out; finished in 0.02s
+
+   Compiling review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-ai-A/crates/review-gate)
+warning: unused variable: `claim`
+   --> crates/review-gate/src/gate.rs:135:17
+    |
+135 |             let claim = canonical_family(claim).ok_or_else(|| {
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_claim`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `review-gate` (lib test) generated 1 warning (run `cargo fix --lib -p review-gate --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.42s
+     Running unittests src/lib.rs (target/debug/deps/review_gate-1522528178370701)
+error: test failed, to rerun pass `-p review-gate --lib`
+[exit 101]
+compiled: True; target test failed as required: True
+restore check: git diff HEAD is empty; git status --porcelain is empty
+
+===== M9: default config existence check reverts to Path::exists() =====
+file: crates/review-gate/src/main.rs
+--- mutant diff ---
+diff --git a/crates/review-gate/src/main.rs b/crates/review-gate/src/main.rs
+index d2044e2..efba15b 100644
+--- a/crates/review-gate/src/main.rs
++++ b/crates/review-gate/src/main.rs
+@@ -322,14 +322,7 @@ fn print(v: &impl serde::Serialize) {
+ /// `false` for permission or other metadata errors and silently fall back to the plaintext token,
+ /// so every other error refuses to start.
+ fn default_config_present(path: &Path) -> Result<bool> {
+-    match std::fs::symlink_metadata(path) {
+-        Ok(_) => Ok(true),
+-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+-        Err(e) => Err(anyhow::anyhow!(
+-            "cannot inspect identity configuration {}: {e}",
+-            path.display()
+-        )),
+-    }
++    Ok(path.exists())
+ }
+ 
+ async fn run(cli: Cli) -> Result<ExitCode> {
+$ cargo test -p review-gate --bin review-gate tests::an_absent_default_config_is_the_only_state_that_allows_legacy
+
+running 1 test
+test tests::an_absent_default_config_is_the_only_state_that_allows_legacy ... FAILED
+
+failures:
+
+---- tests::an_absent_default_config_is_the_only_state_that_allows_legacy stdout ----
+
+thread 'tests::an_absent_default_config_is_the_only_state_that_allows_legacy' (473969) panicked at crates/review-gate/src/main.rs:793:71:
+called `Result::unwrap_err()` on an `Ok` value: false
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::an_absent_default_config_is_the_only_state_that_allows_legacy
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling review-gate v0.1.0 (/home/administrator/projects/Chrome-MCP-ai-A/crates/review-gate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.05s
+     Running unittests src/main.rs (target/debug/deps/review_gate-03818987497d41ff)
+error: test failed, to rerun pass `-p review-gate --bin review-gate`
+[exit 101]
+compiled: True; target test failed as required: True
+restore check: git diff HEAD is empty; git status --porcelain is empty
+
+All 9 mutants compiled and were killed by the named tests; every restore left the tree clean.
