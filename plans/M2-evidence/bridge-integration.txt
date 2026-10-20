@@ -87,3 +87,60 @@ ok   403 agent refused the observe route
 ok   401 no token on the observe route
 ok   401 wrong token on the observe route
 ALL OK
+
+==========================================================================================
+Version 2 (Codex m2-step8-bridge-impl-review-20261020 n19: rework of 4951e92)
+
+Correction. The "Tests on the integrated tree" block above was run on the candidate e27f050
+(tree 43f867b6), not on 4951e92, and shows the failing route-list test that 4951e92 fixed; the
+"After the fix" line was only a summary. The observer e2e binary (a2dbd4d4…) above has no
+recorded source revision. Neither is evidence for 4951e92. A full re-run on 4951e92 (clean
+tree, fresh target dir, --locked release build, sha256 d9ab3e50…) was sent to Codex (n15–n18):
+everything passed except the Python worker suite, 69 run, 1 error:
+ReworkTest.test_interrupt_during_launch_cleans_up_owned_group, FileNotFoundError child2.pid.
+
+Cause. The test's monitor raised KeyboardInterrupt on the first probe (about 0.05–0.1 s), with no
+readiness check. If that lands while the CLI stand-in is still starting (before it ignores
+SIGTERM and forks), the group stop kills it before any child exists, and the test then reads a
+pid file that is never written. The test file is unchanged from the live line (blob a1f9ad01);
+the race was intermittent there too (1 of 40 single runs here).
+
+Fix (test only; no worker code changed). The stand-in now starts slowly on purpose (0.3 s before
+ignoring SIGTERM and forking) and the child publishes its pid atomically (write + rename). The
+monitor raises KeyboardInterrupt only once a complete numeric pid is there; until then it reports
+"not cancelled". The wait is bounded (10 s): not ready in time raises NotReady, a BaseException
+so launch() does not swallow it (it swallows Exception from a monitor), and the test fails
+clearly. The KeyboardInterrupt propagation and the "descendant dead" assertion are kept.
+
+Repeat: the fixed test alone, 30 runs: pass=30 fail=0.
+
+Mutation (m2-tools/mut-bridge-test.py; every file restored and `git diff HEAD` compared with the
+baseline after each mutant), raw tail of each run:
+======================================================================
+MA old test: interrupt without readiness handshake (the stand-in still starts slowly)
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/tmpy5ph3jcj/child2.pid'
+Ran 1 test in 0.134s
+FAILED (errors=1)
+[exit 1] after 0.3s -> CAUGHT
+restored: git diff HEAD equals the baseline
+======================================================================
+MB launch: an interrupt does not stop the owned process group
+AssertionError: False is not true : interrupt left the owned group alive
+Ran 1 test in 8.540s
+FAILED (failures=1)
+[exit 1] after 8.8s -> CAUGHT
+restored: git diff HEAD equals the baseline
+======================================================================
+MC child never publishes its pid: bounded, clear failure
+ReworkTest.test_interrupt_during_launch_cleans_up_owned_group.<locals>.NotReady: the forked child never wrote its pid
+Ran 1 test in 14.131s
+FAILED (errors=1)
+[exit 1] after 14.4s -> CAUGHT
+restored: git diff HEAD equals the baseline
+======================================================================
+3/3 caught
+unmutated after restore: OK [exit 0]
+Note: a first version of the fix delayed only the child's pid write; MA (the old test without the
+handshake) SURVIVED against it (the stand-in ignores SIGTERM, so the child outlives the grace
+period and writes its pid). That showed the real window is the stand-in's start, so the delay was
+moved there; MA now reproduces the original FileNotFoundError every time.

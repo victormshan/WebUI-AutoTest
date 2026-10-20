@@ -874,13 +874,20 @@ class ReworkTest(Harness):
     def test_interrupt_during_launch_cleans_up_owned_group(self):
         pid_file=self.root/'child2.pid';survived=self.root/'child2.survived'
         script=self.root/'fork-cli2'
+        # The CLI stand-in starts slowly (before it ignores SIGTERM and forks) and the child
+        # publishes its pid atomically (rename).  Without the readiness handshake below, the
+        # interrupt always lands during that start: the stand-in dies before it forks and no pid
+        # is ever written (the intermittent failure this test used to have).
         script.write_text(
             '#!/usr/bin/env python3\n'
             'import os,signal,json,sys,time\n'
+            'time.sleep(0.3)\n'
             'signal.signal(signal.SIGTERM,signal.SIG_IGN)\n'
             'pid=os.fork()\n'
             'if pid==0:\n'
-            '    open(os.environ["CHILD_PID"],"w").write(str(os.getpid()))\n'
+            '    tmp=os.environ["CHILD_PID"]+".tmp"\n'
+            '    open(tmp,"w").write(str(os.getpid()))\n'
+            '    os.replace(tmp,os.environ["CHILD_PID"])\n'
             '    time.sleep(30)\n'
             '    open(os.environ["CHILD_SURVIVED"],"w").write("x")\n'
             '    os._exit(0)\n'
@@ -890,13 +897,26 @@ class ReworkTest(Harness):
         os.environ['CHILD_PID']=str(pid_file);os.environ['CHILD_SURVIVED']=str(survived)
         self.addCleanup(lambda:(os.environ.pop('CHILD_PID',None),os.environ.pop('CHILD_SURVIVED',None)))
         args=self.args('codex');args.client_bin=str(script);args.timeout=30
+
+        class NotReady(BaseException):
+            """Not an Exception: launch() swallows those from a monitor probe."""
+
+        ready_by=time.monotonic()+10
         def boom():
-            raise KeyboardInterrupt
+            # Readiness handshake: interrupt only once the forked child has published its pid,
+            # so the group stop is known to cover a live descendant.  Bounded: never ready in
+            # time is a clear failure, not a skipped check.
+            try:
+                text=pid_file.read_text()
+            except FileNotFoundError:
+                text=''
+            if text.strip().isdigit():
+                raise KeyboardInterrupt
+            if time.monotonic()>ready_by:
+                raise NotReady('the forked child never wrote its pid')
+            return False
         with self.assertRaises(KeyboardInterrupt):
             client.launch(args,'prompt',None,monitor=boom,interval=.05)
-        for _ in range(150):
-            if pid_file.exists():break
-            time.sleep(.02)
         pid=int(pid_file.read_text())
         for _ in range(200):
             if _pid_dead(pid):break
