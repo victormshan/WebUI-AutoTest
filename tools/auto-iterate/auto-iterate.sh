@@ -15,6 +15,7 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --tag-prefix P     tag prefix (default auto-iterate)
   --log FILE         append one timestamped line per round to FILE
   --agent-timeout S  kill the agent command after S seconds (0 = off, default 0)
+  --report FILE      write a Markdown run report to FILE
 
 The agent command sees:
   AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_FEEDBACK
@@ -25,7 +26,7 @@ Exit: 0 done/finalized, 3 no external AI, 4 paused by the gate, 1 error.
 TXT
 }
 
-TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0
+TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -36,6 +37,7 @@ while [ $# -gt 0 ]; do
         --tag-prefix) TAG_PREFIX=$2; shift 2 ;;
         --log) LOG=$2; shift 2 ;;
         --agent-timeout) AGENT_TIMEOUT=$2; shift 2 ;;
+        --report) REPORT=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -54,10 +56,26 @@ fi
 if [ -n "$LOG" ]; then
     : >>"$LOG" 2>/dev/null || { echo "cannot write log: $LOG" >&2; exit 1; }
 fi
+if [ -n "$REPORT" ]; then
+    : >"$REPORT" 2>/dev/null || { echo "cannot write report: $REPORT" >&2; exit 1; }
+fi
 
 log() {
     [ -n "$LOG" ] || return 0
     printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG"
+}
+
+report_header() {
+    [ -n "$REPORT" ] && [ "$report_init" -eq 0 ] || return 0
+    {
+        printf '# auto-iterate report\n\n'
+        printf '%s\n' "- task: \`$TASK\`"
+        printf '%s\n' "- repo: \`$repo\`"
+        printf '%s\n' "- started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '\n| version | review | verdict | action | commit | tag |\n'
+        printf '|---|---|---|---|---|---|\n'
+    } >"$REPORT"
+    report_init=1
 }
 
 jget() { python3 -c 'import json,sys
@@ -67,7 +85,18 @@ for k in sys.argv[1:]:
 print(d if not isinstance(d, str) else d)' "$@" 2>/dev/null || true; }
 
 feedback=$(mktemp "${TMPDIR:-/tmp}/auto-iterate-feedback.XXXXXX")
-trap 'rm -f "$feedback"' EXIT
+finish() {
+    rc=$?
+    rm -f "$feedback"
+    if [ -n "$REPORT" ]; then
+        {
+            printf '\n'
+            printf '%s\n' "- finished: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf '%s\n' "- exit: $rc"
+        } >>"$REPORT" 2>/dev/null || true
+    fi
+}
+trap finish EXIT
 : > "$feedback"
 round=0
 log "start task=$TASK max=$MAX"
@@ -79,7 +108,10 @@ while :; do
     iteration=$(printf '%s' "$show" | jget current_iteration)
     repo=$(printf '%s' "$show" | jget repo)
     [ -n "$repo" ] || { echo "task $TASK has no repo" >&2; exit 1; }
+    report_header
 
+    commit=-
+    tag=-
     round=$((round + 1))
     if [ "$round" -gt "$MAX" ]; then
         log "stop max-rounds"
@@ -158,6 +190,10 @@ while :; do
 
     action=$(printf '%s' "$out" | jget action)
     log "record action=$action"
+    if [ "$report_init" -eq 1 ]; then
+        printf '| %s | %s | %s | %s | %s | %s |\n' \
+            "$iteration" "$rid" "$verdict" "$action" "${commit:--}" "${tag:--}" >>"$REPORT"
+    fi
     case "$action" in
         start_round|retry_same_round) continue ;;
         finalize) log "finalized"; echo "finalized: $TASK"; exit 0 ;;

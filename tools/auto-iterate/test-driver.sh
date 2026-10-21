@@ -49,7 +49,7 @@ chmod +x "$tmp/agent.sh"
 
 STUB_REPO=$repo STUB_STATE=$state PATH="$bin:$PATH" \
     "$here/auto-iterate.sh" --task demo --agent-cmd "$tmp/agent.sh" \
-    --message demo --max 3 --log "$tmp/run.log" >"$tmp/out" 2>&1 \
+    --message demo --max 3 --log "$tmp/run.log" --report "$tmp/report.md" >"$tmp/out" 2>&1 \
     || fail "driver exited $?"
 
 grep -q "finalized: demo" "$tmp/out" || fail "driver did not finalize"
@@ -60,6 +60,11 @@ grep -q "round=1 " "$tmp/run.log" || fail "log misses round 1"
 grep -q "round=2 " "$tmp/run.log" || fail "log misses round 2"
 grep -q "verdict=approved" "$tmp/run.log" || fail "log misses approved verdict"
 grep -q "action=finalize" "$tmp/run.log" || fail "log misses finalize"
+[ -s "$tmp/report.md" ] || fail "report is empty"
+grep -q "^# auto-iterate report" "$tmp/report.md" || fail "report header missing"
+grep -q "| 1 | v1-1 | approved | start_round |" "$tmp/report.md" || fail "report row 1 missing"
+grep -q "| 2 | v2-1 | approved | finalize |" "$tmp/report.md" || fail "report row 2 missing"
+grep -q "^- finished: " "$tmp/report.md" || fail "report footer missing"
 
 repo2=$tmp/repo2
 state2=$tmp/state2

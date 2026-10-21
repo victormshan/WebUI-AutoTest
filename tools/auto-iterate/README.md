@@ -42,6 +42,10 @@ The agent sees `AUTO_ITERATE_REPO`, `AUTO_ITERATE_ITERATION` and
 `--agent-timeout S` bounds a hung agent command (0 disables it); the driver exits 1
 and leaves the task running so the round can be retried.
 
+`--report FILE` writes a Markdown summary incrementally: task, repo, one row per
+reviewed round (version, review, verdict, action, commit, tag), finish time and exit
+code. A crash still leaves a usable file.
+
 `--log FILE` appends one tab-separated line per event (`start`, `round`, `review`,
 `approved`, `record`, `stop`). `test-driver.sh` runs the driver against a stub
 `review-gate` in a temporary repo; it needs only `git`, `python3` and `sh`:
