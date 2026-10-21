@@ -130,4 +130,20 @@ elapsed=$(( $(date +%s) - start ))
 grep -q "review timed out after 1s" "$tmp/out3" || fail "no review timeout message"
 [ "$(git -C "$repo3" rev-list --count HEAD)" -eq 1 ] || fail "review timeout committed"
 
+repo4=$tmp/repo4
+state4=$tmp/state4
+mkdir -p "$repo4"
+git -C "$repo4" init -q
+git -C "$repo4" config user.email test@example.com
+git -C "$repo4" config user.name test
+echo base > "$repo4/f"
+git -C "$repo4" add f
+git -C "$repo4" commit -qm base
+echo 0 > "$state4"
+
+out=$(STUB_REPO=$repo4 STUB_STATE=$state4 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --check --task check 2>&1) || fail "check mode failed"
+printf '%s' "$out" | grep -q "check ok: task=check" || fail "no check output"
+[ "$(git -C "$repo4" rev-list --count HEAD)" -eq 1 ] || fail "check mode changed the repo"
+
 echo "test-driver: ok"

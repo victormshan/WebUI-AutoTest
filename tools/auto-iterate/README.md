@@ -53,6 +53,10 @@ for machine consumption: start, round, review, approved, rejected, record, stop.
 driver exits 3 and leaves the task and staged tree intact; the service may still
 finish the review in the background.
 
+`--check` validates the token/task/repo and the log/report/events paths, prints one
+`check ok:` line and exits without running the agent or changing the repository. It
+does not require `--agent-cmd` and does not truncate existing output files.
+
 `--log FILE` appends one tab-separated line per event (`start`, `round`, `review`,
 `approved`, `record`, `stop`). `test-driver.sh` runs the driver against a stub
 `review-gate` in a temporary repo; it needs only `git`, `python3` and `sh`:

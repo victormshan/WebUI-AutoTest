@@ -18,6 +18,7 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --report FILE      write a Markdown run report to FILE
   --events FILE      append one JSON object per line to FILE
   --review-timeout S kill the external review client after S seconds (0 = off, default 0)
+  --check            validate prerequisites and exit without changing anything
 
 The agent command sees:
   AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_FEEDBACK
@@ -28,7 +29,7 @@ Exit: 0 done/finalized, 3 no external AI, 4 paused by the gate, 1 error.
 TXT
 }
 
-TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0
+TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -42,11 +43,16 @@ while [ $# -gt 0 ]; do
         --report) REPORT=$2; shift 2 ;;
         --events) EVENTS=$2; shift 2 ;;
         --review-timeout) REVIEW_TIMEOUT=$2; shift 2 ;;
+        --check) CHECK=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
-[ -n "$TASK" ] && [ -n "$AGENT" ] || { usage >&2; exit 2; }
+[ -n "$TASK" ] || { usage >&2; exit 2; }
+if [ "$CHECK" -eq 0 ] && [ -z "$AGENT" ]; then
+    usage >&2
+    exit 2
+fi
 
 for c in review-gate git python3; do
     command -v "$c" >/dev/null 2>&1 || { echo "missing required command: $c" >&2; exit 1; }
@@ -57,6 +63,37 @@ case "$AGENT_TIMEOUT" in ''|*[!0-9]*) echo "--agent-timeout must be an integer" 
 case "$REVIEW_TIMEOUT" in ''|*[!0-9]*) echo "--review-timeout must be an integer" >&2; exit 2 ;; esac
 if [ "$AGENT_TIMEOUT" -gt 0 ] || [ "$REVIEW_TIMEOUT" -gt 0 ]; then
     command -v timeout >/dev/null 2>&1 || { echo "missing required command: timeout" >&2; exit 1; }
+fi
+
+jget() { python3 -c 'import json,sys
+d=json.load(sys.stdin)
+for k in sys.argv[1:]:
+    d = d[k]
+print(d if not isinstance(d, str) else d)' "$@" 2>/dev/null || true; }
+
+if [ "$CHECK" -eq 1 ]; then
+    for f in "$LOG" "$REPORT" "$EVENTS"; do
+        [ -n "$f" ] || continue
+        if [ -e "$f" ]; then
+            [ -w "$f" ] || { echo "check: $f is not writable" >&2; exit 1; }
+        else
+            d=$(dirname "$f")
+            { [ -d "$d" ] && [ -w "$d" ]; } || { echo "check: cannot create $f" >&2; exit 1; }
+        fi
+    done
+    show=$(review-gate task show --id "$TASK")
+    status=$(printf '%s' "$show" | jget status)
+    repo=$(printf '%s' "$show" | jget repo)
+    iteration=$(printf '%s' "$show" | jget current_iteration)
+    [ "$status" = running ] || { echo "check: task $TASK is ${status:-unknown}" >&2; exit 1; }
+    [ -n "$repo" ] || { echo "check: task $TASK has no repo" >&2; exit 1; }
+    [ -d "$repo" ] || { echo "check: repo $repo does not exist" >&2; exit 1; }
+    git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+        echo "check: $repo is not a git work tree" >&2
+        exit 1
+    }
+    echo "check ok: task=$TASK status=$status iteration=$iteration repo=$repo"
+    exit 0
 fi
 if [ -n "$LOG" ]; then
     : >>"$LOG" 2>/dev/null || { echo "cannot write log: $LOG" >&2; exit 1; }
@@ -96,11 +133,6 @@ report_header() {
     report_init=1
 }
 
-jget() { python3 -c 'import json,sys
-d=json.load(sys.stdin)
-for k in sys.argv[1:]:
-    d = d[k]
-print(d if not isinstance(d, str) else d)' "$@" 2>/dev/null || true; }
 
 feedback=$(mktemp "${TMPDIR:-/tmp}/auto-iterate-feedback.XXXXXX")
 finish() {
