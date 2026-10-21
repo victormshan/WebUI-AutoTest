@@ -30,7 +30,10 @@ n=$(cat "$state" 2>/dev/null || echo 0)
 case "$1" in
     task) printf '{"status":"running","current_iteration":%s,"repo":"%s","stop_reason":null}\n' "$((n+1))" "$STUB_REPO" ;;
     stage) git -C "$STUB_REPO" add -A; printf '{"tree":"t","base":"b"}\n' ;;
-    review) printf '{"record":{"id":"v%s-1","verdict":"approved","text":"ok"}}\n' "$((n+1))" ;;
+    review)
+        if [ "${STUB_SLOW_REVIEW:-0}" = 1 ]; then sleep 5; fi
+        printf '{"record":{"id":"v%s-1","verdict":"approved","text":"ok"}}\n' "$((n+1))"
+        ;;
     record)
         if [ "$n" -eq 0 ]; then printf '{"action":"start_round"}\n'; else printf '{"action":"finalize"}\n'; fi
         echo $((n+1)) > "$state"
@@ -103,5 +106,28 @@ elapsed=$(( $(date +%s) - start ))
 [ "$elapsed" -le 3 ] || fail "timeout case took ${elapsed}s"
 grep -q "agent timed out after 1s" "$tmp/out2" || fail "no timeout message"
 
+repo3=$tmp/repo3
+state3=$tmp/state3
+mkdir -p "$repo3"
+git -C "$repo3" init -q
+git -C "$repo3" config user.email test@example.com
+git -C "$repo3" config user.name test
+echo base > "$repo3/f"
+git -C "$repo3" add f
+git -C "$repo3" commit -qm base
+echo 0 > "$state3"
+
+start=$(date +%s)
+set +e
+STUB_REPO=$repo3 STUB_STATE=$state3 STUB_SLOW_REVIEW=1 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task slow --agent-cmd "$tmp/agent.sh" \
+    --review-timeout 1 --max 1 >"$tmp/out3" 2>&1
+rc=$?
+set -e
+elapsed=$(( $(date +%s) - start ))
+[ "$rc" -eq 3 ] || fail "review timeout case exited $rc"
+[ "$elapsed" -le 3 ] || fail "review timeout case took ${elapsed}s"
+grep -q "review timed out after 1s" "$tmp/out3" || fail "no review timeout message"
+[ "$(git -C "$repo3" rev-list --count HEAD)" -eq 1 ] || fail "review timeout committed"
 
 echo "test-driver: ok"

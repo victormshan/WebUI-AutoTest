@@ -49,6 +49,10 @@ code. A crash still leaves a usable file.
 `--events FILE` appends one JSON object per line (`ts`, `event`, plus event fields)
 for machine consumption: start, round, review, approved, rejected, record, stop.
 
+`--review-timeout S` bounds the `review run` client (0 disables it). On timeout the
+driver exits 3 and leaves the task and staged tree intact; the service may still
+finish the review in the background.
+
 `--log FILE` appends one tab-separated line per event (`start`, `round`, `review`,
 `approved`, `record`, `stop`). `test-driver.sh` runs the driver against a stub
 `review-gate` in a temporary repo; it needs only `git`, `python3` and `sh`:

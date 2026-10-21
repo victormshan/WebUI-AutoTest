@@ -17,6 +17,7 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --agent-timeout S  kill the agent command after S seconds (0 = off, default 0)
   --report FILE      write a Markdown run report to FILE
   --events FILE      append one JSON object per line to FILE
+  --review-timeout S kill the external review client after S seconds (0 = off, default 0)
 
 The agent command sees:
   AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_FEEDBACK
@@ -27,7 +28,7 @@ Exit: 0 done/finalized, 3 no external AI, 4 paused by the gate, 1 error.
 TXT
 }
 
-TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=
+TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -40,6 +41,7 @@ while [ $# -gt 0 ]; do
         --agent-timeout) AGENT_TIMEOUT=$2; shift 2 ;;
         --report) REPORT=$2; shift 2 ;;
         --events) EVENTS=$2; shift 2 ;;
+        --review-timeout) REVIEW_TIMEOUT=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -52,7 +54,8 @@ done
 case "$MAX" in ''|*[!0-9]*) echo "--max must be an integer" >&2; exit 2 ;; esac
 [ "$MAX" -ge 1 ] || { echo "--max must be >= 1" >&2; exit 2; }
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*) echo "--agent-timeout must be an integer" >&2; exit 2 ;; esac
-if [ "$AGENT_TIMEOUT" -gt 0 ]; then
+case "$REVIEW_TIMEOUT" in ''|*[!0-9]*) echo "--review-timeout must be an integer" >&2; exit 2 ;; esac
+if [ "$AGENT_TIMEOUT" -gt 0 ] || [ "$REVIEW_TIMEOUT" -gt 0 ]; then
     command -v timeout >/dev/null 2>&1 || { echo "missing required command: timeout" >&2; exit 1; }
 fi
 if [ -n "$LOG" ]; then
@@ -165,13 +168,27 @@ while :; do
     review-gate stage --id "$TASK" >/dev/null
 
     set +e
-    if [ -n "$EVIDENCE" ]; then
-        job=$(review-gate review run --id "$TASK" --evidence "$EVIDENCE")
+    if [ "$REVIEW_TIMEOUT" -gt 0 ]; then
+        if [ -n "$EVIDENCE" ]; then
+            job=$(timeout "$REVIEW_TIMEOUT" review-gate review run --id "$TASK" --evidence "$EVIDENCE")
+        else
+            job=$(timeout "$REVIEW_TIMEOUT" review-gate review run --id "$TASK")
+        fi
     else
-        job=$(review-gate review run --id "$TASK")
+        if [ -n "$EVIDENCE" ]; then
+            job=$(review-gate review run --id "$TASK" --evidence "$EVIDENCE")
+        else
+            job=$(review-gate review run --id "$TASK")
+        fi
     fi
     rc=$?
     set -e
+    if [ "$rc" -eq 124 ] && [ "$REVIEW_TIMEOUT" -gt 0 ]; then
+        log "stop review-timeout seconds=$REVIEW_TIMEOUT"
+        emit stop reason="review-timeout"
+        echo "review timed out after ${REVIEW_TIMEOUT}s; the task may have a pending review" >&2
+        exit 3
+    fi
     case "$rc" in
         0) ;;
         3) log "stop no-external-ai"; emit stop reason="no-external-ai"; echo "no external AI available; stopping (staged tree kept)" >&2; exit 3 ;;
