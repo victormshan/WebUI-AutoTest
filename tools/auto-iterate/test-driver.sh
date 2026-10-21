@@ -32,7 +32,8 @@ case "$1" in
     stage) git -C "$STUB_REPO" add -A; printf '{"tree":"t","base":"b"}\n' ;;
     review)
         if [ "${STUB_SLOW_REVIEW:-0}" = 1 ]; then sleep 5; fi
-        printf '{"record":{"id":"v%s-1","verdict":"approved","text":"ok"}}\n' "$((n+1))"
+        if [ -n "${STUB_ARGS:-}" ]; then printf '%s\n' "$*" > "$STUB_ARGS"; fi
+        printf '{"record":{"id":"v%s-1","verdict":"approved","text":"ok","channel":"stub","provider":"stub-provider","model":"stub-model"}}\n' "$((n+1))"
         ;;
     record)
         if [ "$n" -eq 0 ]; then printf '{"action":"start_round"}\n'; else printf '{"action":"finalize"}\n'; fi
@@ -50,10 +51,10 @@ echo "v$AUTO_ITERATE_ITERATION" > "$AUTO_ITERATE_REPO/out.txt"
 AG
 chmod +x "$tmp/agent.sh"
 
-STUB_REPO=$repo STUB_STATE=$state PATH="$bin:$PATH" \
+STUB_REPO=$repo STUB_STATE=$state STUB_ARGS=$tmp/args PATH="$bin:$PATH" \
     "$here/auto-iterate.sh" --task demo --agent-cmd "$tmp/agent.sh" \
     --message demo --max 3 --log "$tmp/run.log" --report "$tmp/report.md" \
-    --events "$tmp/events.jsonl" >"$tmp/out" 2>&1 \
+    --events "$tmp/events.jsonl" --provider fake >"$tmp/out" 2>&1 \
     || fail "driver exited $?"
 
 grep -q "finalized: demo" "$tmp/out" || fail "driver did not finalize"
@@ -63,6 +64,9 @@ grep -q "finalized: demo" "$tmp/out" || fail "driver did not finalize"
 grep -q "round=1 " "$tmp/run.log" || fail "log misses round 1"
 grep -q "round=2 " "$tmp/run.log" || fail "log misses round 2"
 grep -q "verdict=approved" "$tmp/run.log" || fail "log misses approved verdict"
+grep -q "channel=stub" "$tmp/run.log" || fail "log misses the reviewer channel"
+grep -q -- "--provider fake" "$tmp/args" || fail "provider was not forwarded"
+grep -q "| stub |" "$tmp/report.md" || fail "report misses the reviewer channel"
 grep -q "action=finalize" "$tmp/run.log" || fail "log misses finalize"
 [ -s "$tmp/report.md" ] || fail "report is empty"
 grep -q "^# auto-iterate report" "$tmp/report.md" || fail "report header missing"
@@ -75,6 +79,9 @@ ev = [json.loads(line) for line in open(sys.argv[1])]
 kinds = [e["event"] for e in ev]
 for kind in ("start", "round", "review", "approved", "record", "finalized"):
     assert kind in kinds, (kind, kinds)
+review = next(e for e in ev if e["event"] == "review")
+assert review["channel"] == "stub", review
+assert review["provider"] == "stub-provider", review
 PY
 
 repo2=$tmp/repo2

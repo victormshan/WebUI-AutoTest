@@ -43,7 +43,8 @@ The agent sees `AUTO_ITERATE_REPO`, `AUTO_ITERATE_ITERATION` and
 and leaves the task running so the round can be retried.
 
 `--report FILE` writes a Markdown summary incrementally: task, repo, one row per
-reviewed round (version, review, verdict, action, commit, tag), finish time and exit
+reviewed round (version, review, verdict, action, commit, tag, reviewer channel),
+finish time and exit
 code. A crash still leaves a usable file.
 
 `--events FILE` appends one JSON object per line (`ts`, `event`, plus event fields)
@@ -52,6 +53,10 @@ for machine consumption: start, round, review, approved, rejected, record, stop.
 `--review-timeout S` bounds the `review run` client (0 disables it). On timeout the
 driver exits 3 and leaves the task and staged tree intact; the service may still
 finish the review in the background.
+
+`--provider NAME` is forwarded to `review run`, selecting the reviewer provider.
+The verdict log line and the `review` event also carry the channel and provider the
+service used, so the report records which reviewer decided each version.
 
 `--check` validates the token/task/repo and the log/report/events paths, prints one
 `check ok:` line and exits without running the agent or changing the repository. It

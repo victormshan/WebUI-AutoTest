@@ -19,6 +19,7 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --events FILE      append one JSON object per line to FILE
   --review-timeout S kill the external review client after S seconds (0 = off, default 0)
   --check            validate prerequisites and exit without changing anything
+  --provider NAME    reviewer provider passed to `review run` (default: gate auto)
 
 The agent command sees:
   AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_FEEDBACK
@@ -29,7 +30,7 @@ Exit: 0 done/finalized, 3 no external AI, 4 paused by the gate, 1 error.
 TXT
 }
 
-TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0
+TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -44,6 +45,7 @@ while [ $# -gt 0 ]; do
         --events) EVENTS=$2; shift 2 ;;
         --review-timeout) REVIEW_TIMEOUT=$2; shift 2 ;;
         --check) CHECK=1; shift ;;
+        --provider) PROVIDER=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -127,8 +129,8 @@ report_header() {
         printf '%s\n' "- task: \`$TASK\`"
         printf '%s\n' "- repo: \`$repo\`"
         printf '%s\n' "- started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf '\n| version | review | verdict | action | commit | tag |\n'
-        printf '|---|---|---|---|---|---|\n'
+        printf '\n| version | review | verdict | action | commit | tag | channel |\n'
+        printf '|---|---|---|---|---|---|---|\n'
     } >"$REPORT"
     report_init=1
 }
@@ -163,6 +165,7 @@ while :; do
 
     commit=-
     tag=-
+    channel=-
     round=$((round + 1))
     if [ "$round" -gt "$MAX" ]; then
         log "stop max-rounds"
@@ -200,18 +203,13 @@ while :; do
     review-gate stage --id "$TASK" >/dev/null
 
     set +e
+    set -- review-gate review run --id "$TASK"
+    if [ -n "$EVIDENCE" ]; then set -- "$@" --evidence "$EVIDENCE"; fi
+    if [ -n "$PROVIDER" ]; then set -- "$@" --provider "$PROVIDER"; fi
     if [ "$REVIEW_TIMEOUT" -gt 0 ]; then
-        if [ -n "$EVIDENCE" ]; then
-            job=$(timeout "$REVIEW_TIMEOUT" review-gate review run --id "$TASK" --evidence "$EVIDENCE")
-        else
-            job=$(timeout "$REVIEW_TIMEOUT" review-gate review run --id "$TASK")
-        fi
+        job=$(timeout "$REVIEW_TIMEOUT" "$@")
     else
-        if [ -n "$EVIDENCE" ]; then
-            job=$(review-gate review run --id "$TASK" --evidence "$EVIDENCE")
-        else
-            job=$(review-gate review run --id "$TASK")
-        fi
+        job=$("$@")
     fi
     rc=$?
     set -e
@@ -230,9 +228,11 @@ while :; do
     rid=$(printf '%s' "$job" | jget record id)
     verdict=$(printf '%s' "$job" | jget record verdict)
     text=$(printf '%s' "$job" | jget record text)
+    channel=$(printf '%s' "$job" | jget record channel)
+    rprovider=$(printf '%s' "$job" | jget record provider)
     [ -n "$rid" ] || { log "error no-review-id"; echo "review job returned no record id" >&2; exit 1; }
-    log "review id=$rid verdict=$verdict"
-    emit review id="$rid" verdict="$verdict"
+    log "review id=$rid verdict=$verdict channel=${channel:-unknown} provider=${rprovider:-unknown}"
+    emit review id="$rid" verdict="$verdict" channel="${channel:-unknown}" provider="${rprovider:-unknown}"
 
     case "$verdict" in
         approved) echo "review $rid: approved" ;;
@@ -264,8 +264,8 @@ while :; do
     log "record action=$action"
     emit record action="$action"
     if [ "$report_init" -eq 1 ]; then
-        printf '| %s | %s | %s | %s | %s | %s |\n' \
-            "$iteration" "$rid" "$verdict" "$action" "${commit:--}" "${tag:--}" >>"$REPORT"
+        printf '| %s | %s | %s | %s | %s | %s | %s |\n' \
+            "$iteration" "$rid" "$verdict" "$action" "${commit:--}" "${tag:--}" "${channel:--}" >>"$REPORT"
     fi
     case "$action" in
         start_round|retry_same_round) continue ;;
