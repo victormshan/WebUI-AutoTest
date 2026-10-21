@@ -89,6 +89,15 @@ while :; do
     text=$(printf '%s' "$job" | jget record text)
     [ -n "$rid" ] || { echo "review job returned no record id" >&2; exit 1; }
 
+    case "$verdict" in
+        approved) echo "review $rid: approved" ;;
+        rejected)
+            echo "review $rid: rejected" >&2
+            printf '%s\n' "$text" | sed 's/^/  /' >&2
+            ;;
+        *) echo "review $rid: ${verdict:-unknown}" >&2 ;;
+    esac
+
     if [ "$verdict" = approved ]; then
         msg=${MESSAGE:-"auto-iterate: version $iteration"}
         git -C "$repo" commit -q -m "$msg"
