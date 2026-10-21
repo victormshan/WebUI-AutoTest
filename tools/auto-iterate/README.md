@@ -37,7 +37,10 @@ The agent sees `AUTO_ITERATE_REPO`, `AUTO_ITERATE_ITERATION` and
 `AUTO_ITERATE_FEEDBACK` (previous review text, empty on round 1). Exit codes:
 `0` done/finalized, `3` no external AI, `4` paused by the gate, `1` error.
 
-## Run log and tests
+## Run log, timeout and tests
+
+`--agent-timeout S` bounds a hung agent command (0 disables it); the driver exits 1
+and leaves the task running so the round can be retried.
 
 `--log FILE` appends one tab-separated line per event (`start`, `round`, `review`,
 `approved`, `record`, `stop`). `test-driver.sh` runs the driver against a stub

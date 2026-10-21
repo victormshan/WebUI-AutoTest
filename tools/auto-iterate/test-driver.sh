@@ -61,4 +61,33 @@ grep -q "round=2 " "$tmp/run.log" || fail "log misses round 2"
 grep -q "verdict=approved" "$tmp/run.log" || fail "log misses approved verdict"
 grep -q "action=finalize" "$tmp/run.log" || fail "log misses finalize"
 
+repo2=$tmp/repo2
+state2=$tmp/state2
+mkdir -p "$repo2"
+git -C "$repo2" init -q
+git -C "$repo2" config user.email test@example.com
+git -C "$repo2" config user.name test
+echo base > "$repo2/f"
+git -C "$repo2" add f
+git -C "$repo2" commit -qm base
+echo 0 > "$state2"
+
+cat > "$tmp/hang.sh" <<'AG'
+#!/bin/sh
+sleep 5
+AG
+chmod +x "$tmp/hang.sh"
+
+start=$(date +%s)
+set +e
+STUB_REPO=$repo2 STUB_STATE=$state2 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task hang --agent-cmd "$tmp/hang.sh" \
+    --agent-timeout 1 --max 1 >"$tmp/out2" 2>&1
+rc=$?
+set -e
+elapsed=$(( $(date +%s) - start ))
+[ "$rc" -eq 1 ] || fail "timeout case exited $rc"
+[ "$elapsed" -le 3 ] || fail "timeout case took ${elapsed}s"
+grep -q "agent timed out after 1s" "$tmp/out2" || fail "no timeout message"
+
 echo "test-driver: ok"

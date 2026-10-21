@@ -14,6 +14,7 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --max N            safety limit on rounds (default 10)
   --tag-prefix P     tag prefix (default auto-iterate)
   --log FILE         append one timestamped line per round to FILE
+  --agent-timeout S  kill the agent command after S seconds (0 = off, default 0)
 
 The agent command sees:
   AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_FEEDBACK
@@ -24,7 +25,7 @@ Exit: 0 done/finalized, 3 no external AI, 4 paused by the gate, 1 error.
 TXT
 }
 
-TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=
+TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -34,6 +35,7 @@ while [ $# -gt 0 ]; do
         --max) MAX=$2; shift 2 ;;
         --tag-prefix) TAG_PREFIX=$2; shift 2 ;;
         --log) LOG=$2; shift 2 ;;
+        --agent-timeout) AGENT_TIMEOUT=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -45,6 +47,10 @@ for c in review-gate git python3; do
 done
 case "$MAX" in ''|*[!0-9]*) echo "--max must be an integer" >&2; exit 2 ;; esac
 [ "$MAX" -ge 1 ] || { echo "--max must be >= 1" >&2; exit 2; }
+case "$AGENT_TIMEOUT" in ''|*[!0-9]*) echo "--agent-timeout must be an integer" >&2; exit 2 ;; esac
+if [ "$AGENT_TIMEOUT" -gt 0 ]; then
+    command -v timeout >/dev/null 2>&1 || { echo "missing required command: timeout" >&2; exit 1; }
+fi
 if [ -n "$LOG" ]; then
     : >>"$LOG" 2>/dev/null || { echo "cannot write log: $LOG" >&2; exit 1; }
 fi
@@ -85,7 +91,24 @@ while :; do
 
     export AUTO_ITERATE_REPO="$repo" AUTO_ITERATE_ITERATION="$iteration" \
         AUTO_ITERATE_FEEDBACK="$feedback"
-    ( cd "$repo" && sh -c "$AGENT" )
+    set +e
+    if [ "$AGENT_TIMEOUT" -gt 0 ]; then
+        ( cd "$repo" && timeout "$AGENT_TIMEOUT" sh -c "$AGENT" )
+    else
+        ( cd "$repo" && sh -c "$AGENT" )
+    fi
+    arc=$?
+    set -e
+    if [ "$arc" -ne 0 ]; then
+        if [ "$arc" -eq 124 ]; then
+            log "stop agent-timeout seconds=$AGENT_TIMEOUT"
+            echo "agent timed out after ${AGENT_TIMEOUT}s" >&2
+        else
+            log "stop agent-failed rc=$arc"
+            echo "agent failed (exit $arc)" >&2
+        fi
+        exit 1
+    fi
 
     review-gate stage --id "$TASK" >/dev/null
 
