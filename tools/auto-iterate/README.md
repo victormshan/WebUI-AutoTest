@@ -46,6 +46,9 @@ and leaves the task running so the round can be retried.
 reviewed round (version, review, verdict, action, commit, tag), finish time and exit
 code. A crash still leaves a usable file.
 
+`--events FILE` appends one JSON object per line (`ts`, `event`, plus event fields)
+for machine consumption: start, round, review, approved, rejected, record, stop.
+
 `--log FILE` appends one tab-separated line per event (`start`, `round`, `review`,
 `approved`, `record`, `stop`). `test-driver.sh` runs the driver against a stub
 `review-gate` in a temporary repo; it needs only `git`, `python3` and `sh`:

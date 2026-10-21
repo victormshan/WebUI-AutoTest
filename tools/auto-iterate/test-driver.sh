@@ -49,7 +49,8 @@ chmod +x "$tmp/agent.sh"
 
 STUB_REPO=$repo STUB_STATE=$state PATH="$bin:$PATH" \
     "$here/auto-iterate.sh" --task demo --agent-cmd "$tmp/agent.sh" \
-    --message demo --max 3 --log "$tmp/run.log" --report "$tmp/report.md" >"$tmp/out" 2>&1 \
+    --message demo --max 3 --log "$tmp/run.log" --report "$tmp/report.md" \
+    --events "$tmp/events.jsonl" >"$tmp/out" 2>&1 \
     || fail "driver exited $?"
 
 grep -q "finalized: demo" "$tmp/out" || fail "driver did not finalize"
@@ -65,6 +66,13 @@ grep -q "^# auto-iterate report" "$tmp/report.md" || fail "report header missing
 grep -q "| 1 | v1-1 | approved | start_round |" "$tmp/report.md" || fail "report row 1 missing"
 grep -q "| 2 | v2-1 | approved | finalize |" "$tmp/report.md" || fail "report row 2 missing"
 grep -q "^- finished: " "$tmp/report.md" || fail "report footer missing"
+python3 - "$tmp/events.jsonl" <<'PY' || fail "events are incomplete"
+import json, sys
+ev = [json.loads(line) for line in open(sys.argv[1])]
+kinds = [e["event"] for e in ev]
+for kind in ("start", "round", "review", "approved", "record", "finalized"):
+    assert kind in kinds, (kind, kinds)
+PY
 
 repo2=$tmp/repo2
 state2=$tmp/state2
@@ -94,5 +102,6 @@ elapsed=$(( $(date +%s) - start ))
 [ "$rc" -eq 1 ] || fail "timeout case exited $rc"
 [ "$elapsed" -le 3 ] || fail "timeout case took ${elapsed}s"
 grep -q "agent timed out after 1s" "$tmp/out2" || fail "no timeout message"
+
 
 echo "test-driver: ok"

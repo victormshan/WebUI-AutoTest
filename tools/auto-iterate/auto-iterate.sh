@@ -16,6 +16,7 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --log FILE         append one timestamped line per round to FILE
   --agent-timeout S  kill the agent command after S seconds (0 = off, default 0)
   --report FILE      write a Markdown run report to FILE
+  --events FILE      append one JSON object per line to FILE
 
 The agent command sees:
   AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_FEEDBACK
@@ -26,7 +27,7 @@ Exit: 0 done/finalized, 3 no external AI, 4 paused by the gate, 1 error.
 TXT
 }
 
-TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0
+TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -38,6 +39,7 @@ while [ $# -gt 0 ]; do
         --log) LOG=$2; shift 2 ;;
         --agent-timeout) AGENT_TIMEOUT=$2; shift 2 ;;
         --report) REPORT=$2; shift 2 ;;
+        --events) EVENTS=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -59,10 +61,23 @@ fi
 if [ -n "$REPORT" ]; then
     : >"$REPORT" 2>/dev/null || { echo "cannot write report: $REPORT" >&2; exit 1; }
 fi
+if [ -n "$EVENTS" ]; then
+    : >"$EVENTS" 2>/dev/null || { echo "cannot write events: $EVENTS" >&2; exit 1; }
+fi
 
 log() {
     [ -n "$LOG" ] || return 0
     printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG"
+}
+
+emit() {
+    [ -n "$EVENTS" ] || return 0
+    python3 -c 'import datetime,json,sys
+d={"ts":datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),"event":sys.argv[1]}
+for a in sys.argv[2:]:
+    k,v=a.split("=",1)
+    d[k]=v
+print(json.dumps(d,separators=(",",":")))' "$@" >>"$EVENTS"
 }
 
 report_header() {
@@ -100,11 +115,12 @@ trap finish EXIT
 : > "$feedback"
 round=0
 log "start task=$TASK max=$MAX"
+emit start task="$TASK" max="$MAX"
 
 while :; do
     show=$(review-gate task show --id "$TASK")
     status=$(printf '%s' "$show" | jget status)
-    [ "$status" = running ] || { log "stop status=${status:-unknown}"; echo "task $TASK is ${status:-unknown}; stopping"; exit 0; }
+    [ "$status" = running ] || { log "stop status=${status:-unknown}"; emit stop reason="status" status="${status:-unknown}"; echo "task $TASK is ${status:-unknown}; stopping"; exit 0; }
     iteration=$(printf '%s' "$show" | jget current_iteration)
     repo=$(printf '%s' "$show" | jget repo)
     [ -n "$repo" ] || { echo "task $TASK has no repo" >&2; exit 1; }
@@ -115,11 +131,13 @@ while :; do
     round=$((round + 1))
     if [ "$round" -gt "$MAX" ]; then
         log "stop max-rounds"
+        emit stop reason="max-rounds"
         echo "reached --max $MAX; stopping with the task still running" >&2
         exit 0
     fi
     echo "== round $round (version $iteration) =="
     log "round=$round iteration=$iteration repo=$repo"
+    emit round round="$round" iteration="$iteration"
 
     export AUTO_ITERATE_REPO="$repo" AUTO_ITERATE_ITERATION="$iteration" \
         AUTO_ITERATE_FEEDBACK="$feedback"
@@ -134,9 +152,11 @@ while :; do
     if [ "$arc" -ne 0 ]; then
         if [ "$arc" -eq 124 ]; then
             log "stop agent-timeout seconds=$AGENT_TIMEOUT"
+            emit stop reason="agent-timeout"
             echo "agent timed out after ${AGENT_TIMEOUT}s" >&2
         else
             log "stop agent-failed rc=$arc"
+            emit stop reason="agent-failed"
             echo "agent failed (exit $arc)" >&2
         fi
         exit 1
@@ -154,8 +174,8 @@ while :; do
     set -e
     case "$rc" in
         0) ;;
-        3) log "stop no-external-ai"; echo "no external AI available; stopping (staged tree kept)" >&2; exit 3 ;;
-        *) log "stop review-failed rc=$rc"; echo "review failed (exit $rc)" >&2; exit 1 ;;
+        3) log "stop no-external-ai"; emit stop reason="no-external-ai"; echo "no external AI available; stopping (staged tree kept)" >&2; exit 3 ;;
+        *) log "stop review-failed rc=$rc"; emit stop reason="review-failed"; echo "review failed (exit $rc)" >&2; exit 1 ;;
     esac
 
     rid=$(printf '%s' "$job" | jget record id)
@@ -163,6 +183,7 @@ while :; do
     text=$(printf '%s' "$job" | jget record text)
     [ -n "$rid" ] || { log "error no-review-id"; echo "review job returned no record id" >&2; exit 1; }
     log "review id=$rid verdict=$verdict"
+    emit review id="$rid" verdict="$verdict"
 
     case "$verdict" in
         approved) echo "review $rid: approved" ;;
@@ -180,23 +201,26 @@ while :; do
         git -C "$repo" tag "$tag"
         commit=$(git -C "$repo" rev-parse --short HEAD)
         log "approved review=$rid commit=$commit tag=$tag"
+        emit approved review="$rid" commit="$commit" tag="$tag"
         out=$(review-gate record --id "$TASK" --review "$rid" --commit HEAD --tag "$tag")
     else
         printf '%s\n' "$text" > "$feedback"
         log "rejected review=$rid"
+        emit rejected review="$rid"
         out=$(review-gate record --id "$TASK" --review "$rid")
         git -C "$repo" reset -q
     fi
 
     action=$(printf '%s' "$out" | jget action)
     log "record action=$action"
+    emit record action="$action"
     if [ "$report_init" -eq 1 ]; then
         printf '| %s | %s | %s | %s | %s | %s |\n' \
             "$iteration" "$rid" "$verdict" "$action" "${commit:--}" "${tag:--}" >>"$REPORT"
     fi
     case "$action" in
         start_round|retry_same_round) continue ;;
-        finalize) log "finalized"; echo "finalized: $TASK"; exit 0 ;;
+        finalize) log "finalized"; emit finalized; echo "finalized: $TASK"; exit 0 ;;
         pause)
             reason=$(review-gate task show --id "$TASK" | jget stop_reason)
             log "paused reason=${reason:-none}"
