@@ -58,6 +58,9 @@ finish the review in the background.
 The verdict log line and the `review` event also carry the channel and provider the
 service used, so the report records which reviewer decided each version.
 
+`--stop-on-reject` stops as soon as a review is not approved (exit 5), leaving the
+task running so a human can inspect the feedback instead of burning more rounds.
+
 `--check` validates the token/task/repo and the log/report/events paths, prints one
 `check ok:` line and exits without running the agent or changing the repository. It
 does not require `--agent-cmd` and does not truncate existing output files.

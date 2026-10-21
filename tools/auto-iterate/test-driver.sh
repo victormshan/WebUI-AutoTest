@@ -33,7 +33,8 @@ case "$1" in
     review)
         if [ "${STUB_SLOW_REVIEW:-0}" = 1 ]; then sleep 5; fi
         if [ -n "${STUB_ARGS:-}" ]; then printf '%s\n' "$*" > "$STUB_ARGS"; fi
-        printf '{"record":{"id":"v%s-1","verdict":"approved","text":"ok","channel":"stub","provider":"stub-provider","model":"stub-model"}}\n' "$((n+1))"
+        if [ "${STUB_REJECT:-0}" = 1 ]; then v=rejected; t=no; else v=approved; t=ok; fi
+        printf '{"record":{"id":"v%s-1","verdict":"%s","text":"%s","channel":"stub","provider":"stub-provider","model":"stub-model"}}\n' "$((n+1))" "$v" "$t"
         ;;
     record)
         if [ "$n" -eq 0 ]; then printf '{"action":"start_round"}\n'; else printf '{"action":"finalize"}\n'; fi
@@ -112,6 +113,28 @@ elapsed=$(( $(date +%s) - start ))
 [ "$rc" -eq 1 ] || fail "timeout case exited $rc"
 [ "$elapsed" -le 3 ] || fail "timeout case took ${elapsed}s"
 grep -q "agent timed out after 1s" "$tmp/out2" || fail "no timeout message"
+
+repo5=$tmp/repo5
+state5=$tmp/state5
+mkdir -p "$repo5"
+git -C "$repo5" init -q
+git -C "$repo5" config user.email test@example.com
+git -C "$repo5" config user.name test
+echo base > "$repo5/f"
+git -C "$repo5" add f
+git -C "$repo5" commit -qm base
+echo 0 > "$state5"
+
+set +e
+STUB_REPO=$repo5 STUB_STATE=$state5 STUB_REJECT=1 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task stop --agent-cmd "$tmp/agent.sh" \
+    --stop-on-reject --max 2 >"$tmp/out5" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 5 ] || fail "stop-on-reject exited $rc"
+grep -q "stopped after rejected review" "$tmp/out5" || fail "no stop-on-reject message"
+[ "$(git -C "$repo5" rev-list --count HEAD)" -eq 1 ] || fail "stop-on-reject committed"
+[ "$(git -C "$repo5" tag | wc -l)" -eq 0 ] || fail "stop-on-reject tagged"
 
 repo3=$tmp/repo3
 state3=$tmp/state3

@@ -20,17 +20,19 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --review-timeout S kill the external review client after S seconds (0 = off, default 0)
   --check            validate prerequisites and exit without changing anything
   --provider NAME    reviewer provider passed to `review run` (default: gate auto)
+  --stop-on-reject   stop after a rejected review instead of retrying (exit 5)
 
 The agent command sees:
   AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_FEEDBACK
 where AUTO_ITERATE_FEEDBACK is a file containing the previous review text
 (empty on the first round).
 
-Exit: 0 done/finalized, 3 no external AI, 4 paused by the gate, 1 error.
+Exit: 0 done/finalized, 3 no external AI, 4 paused by the gate,
+      5 stopped on a rejection, 1 error.
 TXT
 }
 
-TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=
+TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -46,6 +48,7 @@ while [ $# -gt 0 ]; do
         --review-timeout) REVIEW_TIMEOUT=$2; shift 2 ;;
         --check) CHECK=1; shift ;;
         --provider) PROVIDER=$2; shift 2 ;;
+        --stop-on-reject) STOP_ON_REJECT=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -266,6 +269,16 @@ while :; do
     if [ "$report_init" -eq 1 ]; then
         printf '| %s | %s | %s | %s | %s | %s | %s |\n' \
             "$iteration" "$rid" "$verdict" "$action" "${commit:--}" "${tag:--}" "${channel:--}" >>"$REPORT"
+    fi
+    if [ "$STOP_ON_REJECT" -eq 1 ] && [ "$verdict" != approved ]; then
+        case "$action" in
+            start_round|retry_same_round)
+                log "stop on-reject verdict=$verdict"
+                emit stop reason="stop-on-reject"
+                echo "stopped after rejected review $rid; the task is still running" >&2
+                exit 5
+                ;;
+        esac
     fi
     case "$action" in
         start_round|retry_same_round) continue ;;
