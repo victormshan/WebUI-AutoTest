@@ -25,6 +25,9 @@ pub struct NewTask {
     pub iterations: u32,
     pub min_reviewer: Channel,
     pub review_provider: String,
+    /// Model family of the implementing agent (`claude`, `opencode`, `codex`, …).
+    /// Defaults to `claude` for tasks created before the field existed.
+    pub implementer_family: Option<String>,
 }
 
 /// A review to store: the staged tree it covers and what the reviewer said.
@@ -134,7 +137,11 @@ impl Gate {
             reject_streak: 0,
             min_reviewer: t.min_reviewer,
             review_provider: t.review_provider,
-            implementer_family: "claude".into(),
+            implementer_family: t
+                .implementer_family
+                .map(|f| f.trim().to_string())
+                .filter(|f| !f.is_empty())
+                .unwrap_or_else(|| "claude".into()),
             status: Status::Running,
             stop_reason: None,
             created_at: now,
@@ -482,6 +489,7 @@ mod tests {
                 iterations: n,
                 min_reviewer: min,
                 review_provider: "auto".into(),
+                implementer_family: None,
             })
             .unwrap()
     }
@@ -719,6 +727,7 @@ mod tests {
             iterations: n,
             min_reviewer: Channel::WebGemini,
             review_provider: "auto".into(),
+            implementer_family: None,
         };
         assert!(matches!(
             e.gate.init(base("../evil", 1)),
@@ -742,6 +751,41 @@ mod tests {
         assert!(
             e.gate.init(not_repo).is_err(),
             "must be a git repository with a HEAD"
+        );
+    }
+
+    #[test]
+    fn init_keeps_the_implementer_family() {
+        let e = env();
+        let task = |id: &str, family: Option<&str>| NewTask {
+            id: id.into(),
+            goal: "g".into(),
+            final_acceptance: "a".into(),
+            repo: e.repo.to_string_lossy().into(),
+            iterations: 1,
+            min_reviewer: Channel::WebGemini,
+            review_provider: "auto".into(),
+            implementer_family: family.map(str::to_string),
+        };
+        assert_eq!(
+            e.gate.init(task("a", None)).unwrap().implementer_family,
+            "claude",
+            "the historical default is kept"
+        );
+        assert_eq!(
+            e.gate
+                .init(task("b", Some("opencode")))
+                .unwrap()
+                .implementer_family,
+            "opencode"
+        );
+        assert_eq!(
+            e.gate
+                .init(task("c", Some("   ")))
+                .unwrap()
+                .implementer_family,
+            "claude",
+            "a blank family falls back to the default"
         );
     }
 

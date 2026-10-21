@@ -1,7 +1,8 @@
 //! review-gate command line.
 //!
 //! Service side (runs as the `reviewgate` system user): `serve`, `admin manual`.
-//! Implementer side (talks to the service over HTTP): `task`, `stage`, `review`, `record`, `mcp`.
+//! Implementer side (talks to the service over HTTP): `task`, `stage`, `review`, `record`, `mcp`,
+//! `guard` (agent-neutral git pre-commit check).
 //! Standalone: `ask` (one question to an external AI), `verify`/`verify-range` (attestations, for CI).
 
 use std::io::Read;
@@ -46,12 +47,27 @@ enum Cmd {
         /// File with the bearer token clients must present
         #[arg(long, default_value = "/etc/review-gate/client.token")]
         token_file: PathBuf,
+        /// Admin-owned JSON map `{ "token": "family", … }`; the gate derives `implementer_family`
+        /// from the caller's token. Tokens not listed fall back to `token_file` as `claude`.
+        #[arg(long)]
+        agents_file: Option<PathBuf>,
         /// claude-step-relay data dir: the gate writes `traces/<exprId>.gate.md` there
         #[arg(long)]
         relay_dir: Option<PathBuf>,
     },
     /// Claude Code PreToolUse hook (Bash): blocks unreviewed `git commit` and unattested `git push`
     Hook,
+    /// Agent-neutral git pre-commit guard: block a commit the gate has not approved
+    Guard {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Install a `pre-commit` hook that runs this guard
+        #[arg(long)]
+        install: bool,
+        /// Overwrite an existing pre-commit hook
+        #[arg(long)]
+        force: bool,
+    },
     /// Print the gate's attestation public key (pin it in CI)
     Pubkey,
     /// Verify the attestation note on one commit (no service needed)
@@ -141,6 +157,10 @@ enum TaskCmd {
         min_reviewer: String,
         #[arg(long, default_value = "auto")]
         review_provider: String,
+        /// Optional consistency check: the gate derives the family from your token; if given,
+        /// this must match it (claude | opencode | codex | …)
+        #[arg(long)]
+        implementer_family: Option<String>,
     },
     Show {
         #[arg(long)]
@@ -222,6 +242,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             state,
             listen,
             token_file,
+            agents_file,
             relay_dir,
         } => {
             let token = std::fs::read_to_string(&token_file)
@@ -238,7 +259,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             if let Some(dir) = relay_dir {
                 gate = gate.with_relay(RelayTrace::new(dir));
             }
-            let app = Arc::new(AppState::new(gate, ReviewerConfig::from_env(), token));
+            let mut app = AppState::new(gate, ReviewerConfig::from_env(), token);
+            if let Some(path) = agents_file {
+                app = app.with_agents(service::read_agents(&path)?);
+            }
+            let app = Arc::new(app);
             let listener = tokio::net::TcpListener::bind(&listen)
                 .await
                 .with_context(|| format!("binding {listen}"))?;
@@ -260,13 +285,15 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     repo,
                     min_reviewer,
                     review_provider,
+                    implementer_family,
                 } => {
                     let repo = std::fs::canonicalize(&repo)
                         .with_context(|| format!("repo {}", repo.display()))?;
                     c.post(
                         "/tasks",
                         json!({ "id": id, "goal": goal, "acceptance": acceptance, "iterations": iterations,
-                                "repo": repo, "min_reviewer": min_reviewer, "review_provider": review_provider }),
+                                "repo": repo, "min_reviewer": min_reviewer, "review_provider": review_provider,
+                                "implementer_family": implementer_family }),
                     )
                     .await?
                 }
@@ -366,6 +393,27 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     ExitCode::from(2)
                 }
             })
+        }
+        Cmd::Guard {
+            repo,
+            install,
+            force,
+        } => {
+            let repo =
+                std::fs::canonicalize(&repo).with_context(|| format!("repo {}", repo.display()))?;
+            if install {
+                let path = hook::install_guard(&repo, force)?;
+                println!("{}", path.display());
+                return Ok(ExitCode::SUCCESS);
+            }
+            let client = Client::from_env()?;
+            match hook::guard(&client, &repo).await? {
+                None => Ok(ExitCode::SUCCESS),
+                Some(reason) => {
+                    eprintln!("{reason}");
+                    Ok(ExitCode::from(1))
+                }
+            }
         }
         Cmd::Pubkey => {
             let v: Value = Client::from_env()?.get("/pubkey").await?;

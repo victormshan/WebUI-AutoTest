@@ -1,8 +1,12 @@
 # review-gate
 
 The independent review gate for **auto-iterate**, aligned with the dsh-web-relay three-party
-protocol: Claude implements, a model from **another vendor** reviews every version, and the user
-gives final acceptance. The gate, not the implementer, decides whether a version may be committed.
+protocol: an implementing agent (Claude Code, opencode, Codex, …) implements, a model from
+**another vendor** reviews every version, and the user gives final acceptance. The gate, not the
+implementer, decides whether a version may be committed. The implementer family is derived from the caller's bearer token (an
+admin-maintained token → family map), never self-reported, so a task cannot claim to be implemented
+by another vendor to dodge the reviewer-family rule. The gate's checks and the attestation do not
+depend on which agent implemented.
 
 ```
  Claude Code (implementer, user account)            reviewgate (system user)
@@ -51,6 +55,23 @@ the client token `/etc/review-gate/client.token` (gate + implementer may read it
 write it), the reviewer env file (gate only) and the systemd unit `review-gate.service`.
 The gate reads the implementer's repositories, so they must be world-readable (`chmod -R o+rX`).
 
+### Implementer identity
+
+`implementer_family` is a property of the authenticated caller, not of the request. Give each agent
+its own token and map it to its **model vendor** (`claude`, `deepseek`, `openai`, …) in an
+admin-owned JSON file, then start the service with `--agents-file`:
+
+```bash
+sudo install -m 0640 -g reviewgate /dev/null /etc/review-gate/agents.json
+sudoedit /etc/review-gate/agents.json   # {"<token>": "opencode", "<token>": "deepseek"}
+sudo systemctl edit review-gate         # add --agents-file /etc/review-gate/agents.json
+```
+
+The file is read at startup (0600/0640, never world-readable). Tokens not listed in the map fall
+back to `--token-file` and are treated as `claude`, which keeps existing single-agent installs
+working. `task init --implementer-family` / the HTTP field is only a consistency check: a value that
+contradicts the token identity is rejected with 400.
+
 ## Using it
 
 CLI (implementer side; token from `REVIEW_GATE_TOKEN[_FILE]`, `/etc/review-gate/client.token`
@@ -58,13 +79,25 @@ or `~/.config/review-gate/token`):
 
 ```bash
 review-gate task init --id my-task --goal "…" --acceptance "…" --iterations 3 --repo .
-review-gate task link --id my-task --expr-id <claude-step-relay exprId>
+# optional consistency check, must match the family your token maps to:
+#   --implementer-family opencode
+review-gate task link --id my-task --expr-id <claude-step-relay exprId>   # optional, Claude only
 # per version:
 review-gate review run --id my-task --evidence test-output.txt   # 0 reviewed · 3 no external AI · 1 failed
 git commit -m "…" && git tag auto-iterate/my-task/v1             # only when approved
 review-gate record --id my-task --review v1-1 --commit HEAD --tag auto-iterate/my-task/v1
 git push origin HEAD refs/notes/review-gate
 ```
+
+Agent-neutral commit guard (works for any agent that runs `git commit`; install once per repo):
+
+```bash
+review-gate guard --install --repo .     # writes .git/hooks/pre-commit
+review-gate guard --repo .               # the hook's check: exit 1 with the reason when blocked
+```
+
+The Claude Code `PreToolUse` hook below is an additional, earlier guard for Claude; `guard` is the
+portable one.
 
 MCP (Claude Code), `.mcp.json`:
 
@@ -110,7 +143,7 @@ All routes except `/health` and `/pubkey` need `Authorization: Bearer <client to
 | `GET /health` | | `{ok, service, version}` |
 | `GET /pubkey` | | `{algorithm: "ed25519", key}` |
 | `GET /tasks` · `GET /tasks/{id}` | | tasks / task |
-| `POST /tasks` | `{id, goal, acceptance, iterations, repo, min_reviewer?, review_provider?}` | task |
+| `POST /tasks` | `{id, goal, acceptance, iterations, repo, min_reviewer?, review_provider?, implementer_family?}` | task (`implementer_family` is an optional consistency check) |
 | `POST /tasks/{id}/link` | `{expr_id}` | task |
 | `POST /tasks/{id}/reviews` | `{tree, base, evidence?, provider?}` | job `{id, status: running}` |
 | `GET /jobs/{job}` | | `{status: running\|done\|failed, record?, error?, unavailable}` |

@@ -470,6 +470,7 @@ mod tests {
             iterations: 1,
             min_reviewer: Channel::WebGemini,
             review_provider: "auto".into(),
+            implementer_family: None,
         })
         .unwrap();
         (gate, repo)

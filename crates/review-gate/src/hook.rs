@@ -231,6 +231,42 @@ async fn check_push(client: &Client, repo: &Path) -> Result<Option<String>> {
     }))
 }
 
+/// Agent-neutral pre-commit guard: `None` lets `git commit` run, `Some(reason)` blocks it.
+/// Unlike the Claude Code hook this never inspects a shell command: it checks the very index
+/// the commit is about to write, so Claude, opencode and Codex all get the same rule.
+pub async fn guard(client: &Client, repo: &Path) -> Result<Option<String>> {
+    check_commit(client, repo, false).await
+}
+
+/// Writes `.git/hooks/pre-commit` to run [`guard`], so every `git commit` in `repo` is checked
+/// regardless of which agent runs it. Refuses to replace an existing hook unless `force`.
+pub fn install_guard(repo: &Path, force: bool) -> Result<PathBuf> {
+    let hooks = git::git(repo, &["rev-parse", "--git-path", "hooks"])?;
+    let hooks = repo.join(hooks.trim());
+    std::fs::create_dir_all(&hooks)?;
+    let path = hooks.join("pre-commit");
+    if path.exists() && !force {
+        anyhow::bail!(
+            "{} already exists; pass --force to replace it",
+            path.display()
+        );
+    }
+    let mut script = std::fs::File::create(&path)?;
+    use std::io::Write;
+    writeln!(script, "#!/bin/sh")?;
+    writeln!(
+        script,
+        "exec review-gate guard --repo \"$(git rev-parse --show-toplevel)\""
+    )?;
+    drop(script);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +411,40 @@ mod tests {
             )
             .await,
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_checks_the_index_for_every_agent() {
+        let (bridge, _) = mock_bridge(vec![Ok("VERDICT: APPROVED\n\n无")]).await;
+        let e = start(&bridge).await;
+        let c = &e.client;
+        fs::write(e.repo.join("a.txt"), "v1\n").unwrap();
+        let (tree, base) = git::stage_all(&e.repo).unwrap();
+        let blocked = guard(c, &e.repo).await.unwrap();
+        assert!(
+            blocked
+                .as_deref()
+                .unwrap_or_default()
+                .contains("commit blocked"),
+            "{blocked:?}"
+        );
+        c.review(
+            "t",
+            &tree,
+            &base,
+            "",
+            None,
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+        assert_eq!(guard(c, &e.repo).await.unwrap(), None, "approved tree");
+        fs::write(e.repo.join("a.txt"), "v1 + more\n").unwrap();
+        git::git(&e.repo, &["add", "-A"]).unwrap();
+        assert!(
+            guard(c, &e.repo).await.unwrap().is_some(),
+            "changed after the review"
         );
     }
 }

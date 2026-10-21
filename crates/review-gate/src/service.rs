@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{Extension, Path, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -27,6 +27,9 @@ use crate::reviewer::{AskError, ReviewerConfig};
 pub struct AppState {
     pub gate: Gate,
     pub reviewers: ReviewerConfig,
+    /// Bearer token -> implementer family, maintained by the user (admin), not by the caller.
+    agents: HashMap<String, String>,
+    /// Legacy single token (`--token-file`); it identifies a `claude` implementer.
     token: String,
     jobs: Mutex<HashMap<String, Job>>,
     next_job: AtomicU64,
@@ -39,12 +42,36 @@ impl AppState {
         Self {
             gate,
             reviewers,
+            agents: HashMap::new(),
             token,
             jobs: Mutex::new(HashMap::new()),
             next_job: AtomicU64::new(1),
             write: Mutex::new(()),
         }
     }
+
+    /// Installs the token -> implementer-family map the client identity comes from.
+    pub fn with_agents(mut self, agents: HashMap<String, String>) -> Self {
+        self.agents = agents;
+        self
+    }
+
+    /// The implementer family behind a bearer token: the admin map first, then the legacy token.
+    fn family_for(&self, given: &str) -> Option<&str> {
+        if let Some(family) = self.agents.get(given) {
+            return Some(family);
+        }
+        const_eq(&self.token, given).then_some("claude")
+    }
+}
+
+/// Reads the admin-owned `{ "token": "family", … }` map (JSON).
+pub fn read_agents(path: &std::path::Path) -> Result<HashMap<String, String>, GateError> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        GateError::Io(anyhow::Error::new(e).context(format!("reading {}", path.display())))
+    })?;
+    serde_json::from_str(&text)
+        .map_err(|e| GateError::Invalid(format!("agents file {}: {e}", path.display())))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,11 +132,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// Constant-time comparison of the bearer token.
-fn token_ok(expected: &str, header_value: Option<&str>) -> bool {
-    let Some(given) = header_value.and_then(|h| h.strip_prefix("Bearer ")) else {
-        return false;
-    };
+/// Constant-time comparison of secrets.
+fn const_eq(expected: &str, given: &str) -> bool {
     let (a, b) = (expected.as_bytes(), given.as_bytes());
     if a.is_empty() || a.len() != b.len() {
         return false;
@@ -117,19 +141,35 @@ fn token_ok(expected: &str, header_value: Option<&str>) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-async fn auth(State(s): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+#[cfg(test)]
+fn token_ok(expected: &str, header_value: Option<&str>) -> bool {
+    header_value
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .is_some_and(|given| const_eq(expected, given))
+}
+
+/// The implementer family is a property of the authenticated identity, never of the request body.
+#[derive(Clone)]
+struct Family(String);
+
+async fn auth(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
     let header = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    if !token_ok(&s.token, header) {
-        return ApiError(
-            StatusCode::UNAUTHORIZED,
-            "missing or wrong bearer token".into(),
-        )
-        .into_response();
+    let family = header
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .and_then(|given| s.family_for(given))
+        .map(str::to_string);
+    if let Some(family) = family {
+        req.extensions_mut().insert(Family(family));
+        return next.run(req).await;
     }
-    next.run(req).await
+    ApiError(
+        StatusCode::UNAUTHORIZED,
+        "missing or wrong bearer token".into(),
+    )
+    .into_response()
 }
 
 async fn health() -> Json<Value> {
@@ -147,9 +187,30 @@ struct InitBody {
     min_reviewer: Option<String>,
     #[serde(default)]
     review_provider: Option<String>,
+    /// Optional consistency check: when present it must equal the family implied by the token.
+    #[serde(default)]
+    implementer_family: Option<String>,
 }
 
-async fn init_task(State(s): State<Arc<AppState>>, Json(b): Json<InitBody>) -> ApiResult<Value> {
+async fn init_task(
+    State(s): State<Arc<AppState>>,
+    Extension(Family(family)): Extension<Family>,
+    Json(b): Json<InitBody>,
+) -> ApiResult<Value> {
+    if let Some(claimed) = b
+        .implementer_family
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        && claimed != family
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "implementer_family {claimed:?} does not match this token's identity {family:?}"
+            ),
+        ));
+    }
     let min = match b.min_reviewer.as_deref() {
         None => Channel::WebGemini,
         Some(c) => Channel::parse(c)
@@ -164,6 +225,7 @@ async fn init_task(State(s): State<Arc<AppState>>, Json(b): Json<InitBody>) -> A
         iterations: b.iterations,
         min_reviewer: min,
         review_provider: b.review_provider.unwrap_or_else(|| "auto".into()),
+        implementer_family: Some(family),
     })?;
     Ok(Json(json!(task)))
 }
@@ -372,6 +434,10 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn start(bridge: &str) -> Env {
+        start_with(bridge, &[]).await
+    }
+
+    pub(crate) async fn start_with(bridge: &str, agents: &[(&str, &str)]) -> Env {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir(&repo).unwrap();
@@ -388,7 +454,16 @@ pub(crate) mod tests {
         let gate = Gate::new(Store::open(dir.path().join("state")).unwrap())
             .with_signer(crate::attest::Keypair::load_or_create(&dir.path().join("state")).unwrap())
             .with_relay(crate::relay::RelayTrace::new(dir.path().join("relay")));
-        let state = Arc::new(AppState::new(gate, cfg(bridge), TOKEN.into()));
+        let mut state = AppState::new(gate, cfg(bridge), TOKEN.into());
+        if !agents.is_empty() {
+            state = state.with_agents(
+                agents
+                    .iter()
+                    .map(|(t, f)| ((*t).to_string(), (*f).to_string()))
+                    .collect(),
+            );
+        }
+        let state = Arc::new(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(serve(state, listener));
@@ -424,6 +499,45 @@ pub(crate) mod tests {
                 .to_string()
                 .contains("401")
         );
+    }
+
+    #[tokio::test]
+    async fn the_implementer_family_comes_from_the_token_not_the_request() {
+        let oc_token = "opencode-token-0123456789abcdef0123456789abcdef";
+        let e = start_with("http://127.0.0.1:9", &[(oc_token, "opencode")]).await;
+        let t = e.client.get::<Value>("/tasks/t").await.unwrap();
+        assert_eq!(t["implementer_family"], "claude", "legacy token");
+
+        let oc = Client::new(&e.url, oc_token);
+        let posted = oc
+            .post::<Value>(
+                "/tasks",
+                json!({ "id": "u", "goal": "g", "acceptance": "a", "iterations": 1, "repo": e.repo }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(posted["implementer_family"], "opencode");
+
+        let err = e
+            .client
+            .post::<Value>(
+                "/tasks",
+                json!({ "id": "v", "goal": "g", "acceptance": "a", "iterations": 1,
+                        "repo": e.repo, "implementer_family": "opencode" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+
+        let matching = oc
+            .post::<Value>(
+                "/tasks",
+                json!({ "id": "w", "goal": "g", "acceptance": "a", "iterations": 1,
+                        "repo": e.repo, "implementer_family": "opencode" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(matching["implementer_family"], "opencode");
     }
 
     #[tokio::test]
@@ -589,6 +703,18 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(job.status, "failed");
         assert!(job.unavailable, "{:?}", job.error);
+    }
+
+    #[test]
+    fn agents_file_is_a_token_to_family_map() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("agents.json");
+        fs::write(&p, r#"{ "tok-1": "opencode", "tok-2": "deepseek" }"#).unwrap();
+        let m = super::read_agents(&p).unwrap();
+        assert_eq!(m.get("tok-1").map(String::as_str), Some("opencode"));
+        assert_eq!(m.get("tok-2").map(String::as_str), Some("deepseek"));
+        fs::write(&p, "not json").unwrap();
+        assert!(super::read_agents(&p).is_err());
     }
 
     #[test]
