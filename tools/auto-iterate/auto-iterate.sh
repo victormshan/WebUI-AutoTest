@@ -13,6 +13,7 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --evidence FILE    optional evidence file passed to `review run`
   --max N            safety limit on rounds (default 10)
   --tag-prefix P     tag prefix (default auto-iterate)
+  --log FILE         append one timestamped line per round to FILE
 
 The agent command sees:
   AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_FEEDBACK
@@ -23,7 +24,7 @@ Exit: 0 done/finalized, 3 no external AI, 4 paused by the gate, 1 error.
 TXT
 }
 
-TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate
+TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -32,11 +33,26 @@ while [ $# -gt 0 ]; do
         --evidence) EVIDENCE=$2; shift 2 ;;
         --max) MAX=$2; shift 2 ;;
         --tag-prefix) TAG_PREFIX=$2; shift 2 ;;
+        --log) LOG=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
 [ -n "$TASK" ] && [ -n "$AGENT" ] || { usage >&2; exit 2; }
+
+for c in review-gate git python3; do
+    command -v "$c" >/dev/null 2>&1 || { echo "missing required command: $c" >&2; exit 1; }
+done
+case "$MAX" in ''|*[!0-9]*) echo "--max must be an integer" >&2; exit 2 ;; esac
+[ "$MAX" -ge 1 ] || { echo "--max must be >= 1" >&2; exit 2; }
+if [ -n "$LOG" ]; then
+    : >>"$LOG" 2>/dev/null || { echo "cannot write log: $LOG" >&2; exit 1; }
+fi
+
+log() {
+    [ -n "$LOG" ] || return 0
+    printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG"
+}
 
 jget() { python3 -c 'import json,sys
 d=json.load(sys.stdin)
@@ -48,21 +64,24 @@ feedback=$(mktemp "${TMPDIR:-/tmp}/auto-iterate-feedback.XXXXXX")
 trap 'rm -f "$feedback"' EXIT
 : > "$feedback"
 round=0
+log "start task=$TASK max=$MAX"
 
 while :; do
     show=$(review-gate task show --id "$TASK")
     status=$(printf '%s' "$show" | jget status)
-    [ "$status" = running ] || { echo "task $TASK is ${status:-unknown}; stopping"; exit 0; }
+    [ "$status" = running ] || { log "stop status=${status:-unknown}"; echo "task $TASK is ${status:-unknown}; stopping"; exit 0; }
     iteration=$(printf '%s' "$show" | jget current_iteration)
     repo=$(printf '%s' "$show" | jget repo)
     [ -n "$repo" ] || { echo "task $TASK has no repo" >&2; exit 1; }
 
     round=$((round + 1))
     if [ "$round" -gt "$MAX" ]; then
+        log "stop max-rounds"
         echo "reached --max $MAX; stopping with the task still running" >&2
         exit 0
     fi
     echo "== round $round (version $iteration) =="
+    log "round=$round iteration=$iteration repo=$repo"
 
     export AUTO_ITERATE_REPO="$repo" AUTO_ITERATE_ITERATION="$iteration" \
         AUTO_ITERATE_FEEDBACK="$feedback"
@@ -80,14 +99,15 @@ while :; do
     set -e
     case "$rc" in
         0) ;;
-        3) echo "no external AI available; stopping (staged tree kept)" >&2; exit 3 ;;
-        *) echo "review failed (exit $rc)" >&2; exit 1 ;;
+        3) log "stop no-external-ai"; echo "no external AI available; stopping (staged tree kept)" >&2; exit 3 ;;
+        *) log "stop review-failed rc=$rc"; echo "review failed (exit $rc)" >&2; exit 1 ;;
     esac
 
     rid=$(printf '%s' "$job" | jget record id)
     verdict=$(printf '%s' "$job" | jget record verdict)
     text=$(printf '%s' "$job" | jget record text)
-    [ -n "$rid" ] || { echo "review job returned no record id" >&2; exit 1; }
+    [ -n "$rid" ] || { log "error no-review-id"; echo "review job returned no record id" >&2; exit 1; }
+    log "review id=$rid verdict=$verdict"
 
     case "$verdict" in
         approved) echo "review $rid: approved" ;;
@@ -103,22 +123,27 @@ while :; do
         git -C "$repo" commit -q -m "$msg"
         tag="$TAG_PREFIX/$TASK/v$iteration"
         git -C "$repo" tag "$tag"
+        commit=$(git -C "$repo" rev-parse --short HEAD)
+        log "approved review=$rid commit=$commit tag=$tag"
         out=$(review-gate record --id "$TASK" --review "$rid" --commit HEAD --tag "$tag")
     else
         printf '%s\n' "$text" > "$feedback"
+        log "rejected review=$rid"
         out=$(review-gate record --id "$TASK" --review "$rid")
         git -C "$repo" reset -q
     fi
 
     action=$(printf '%s' "$out" | jget action)
+    log "record action=$action"
     case "$action" in
         start_round|retry_same_round) continue ;;
-        finalize) echo "finalized: $TASK"; exit 0 ;;
+        finalize) log "finalized"; echo "finalized: $TASK"; exit 0 ;;
         pause)
             reason=$(review-gate task show --id "$TASK" | jget stop_reason)
+            log "paused reason=${reason:-none}"
             echo "paused by the gate: ${reason:-no reason}" >&2
             exit 4
             ;;
-        *) echo "unexpected record action: ${action:-none}" >&2; exit 1 ;;
+        *) log "stop unexpected-action=${action:-none}"; echo "unexpected record action: ${action:-none}" >&2; exit 1 ;;
     esac
 done

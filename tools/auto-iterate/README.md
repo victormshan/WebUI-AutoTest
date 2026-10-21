@@ -37,6 +37,16 @@ The agent sees `AUTO_ITERATE_REPO`, `AUTO_ITERATE_ITERATION` and
 `AUTO_ITERATE_FEEDBACK` (previous review text, empty on round 1). Exit codes:
 `0` done/finalized, `3` no external AI, `4` paused by the gate, `1` error.
 
+## Run log and tests
+
+`--log FILE` appends one tab-separated line per event (`start`, `round`, `review`,
+`approved`, `record`, `stop`). `test-driver.sh` runs the driver against a stub
+`review-gate` in a temporary repo; it needs only `git`, `python3` and `sh`:
+
+```bash
+tools/auto-iterate/test-driver.sh
+```
+
 ## Notes
 
 - Identity comes from the gate token, never from `--implementer-family`; see
