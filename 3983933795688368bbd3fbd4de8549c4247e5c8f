@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: self-upgrade-3v2-1792611856
+version: 1/3
+commit: 3983933795688368bbd3fbd4de8549c4247e5c8f
+tree: 19a35e96146c6d1ba8aaf39d4eecb38af9b356b1
+parent: 0e2bb1070729e6b2fef1a07f31d40ca56cd1c09c
+review: v1-1
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-21T19:51:25Z
+signature: /f2n5We+OQdig6Wkz9Z9homXWMxdxdSaj1GcieYe+E6fxT5rL3N447Q0LiNHtULjB0eCSpsXKKdNasYbJ6r0BA==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
