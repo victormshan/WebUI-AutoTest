@@ -44,7 +44,7 @@ and leaves the task running so the round can be retried.
 
 `--report FILE` writes a Markdown summary incrementally: task, repo, one row per
 reviewed round (version, review, verdict, action, commit, tag, reviewer channel),
-finish time and exit
+duration of each round, finish time and exit
 code. A crash still leaves a usable file.
 
 `--events FILE` appends one JSON object per line (`ts`, `event`, plus event fields)
@@ -53,6 +53,9 @@ for machine consumption: start, round, review, approved, rejected, record, stop.
 `--review-timeout S` bounds the `review run` client (0 disables it). On timeout the
 driver exits 3 and leaves the task and staged tree intact; the service may still
 finish the review in the background.
+
+Each round's elapsed seconds are logged, emitted as `round_done` and added to the
+report row.
 
 `--provider NAME` is forwarded to `review run`, selecting the reviewer provider.
 The verdict log line and the `review` event also carry the channel and provider the

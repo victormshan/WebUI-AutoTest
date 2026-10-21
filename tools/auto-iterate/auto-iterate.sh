@@ -132,8 +132,8 @@ report_header() {
         printf '%s\n' "- task: \`$TASK\`"
         printf '%s\n' "- repo: \`$repo\`"
         printf '%s\n' "- started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf '\n| version | review | verdict | action | commit | tag | channel |\n'
-        printf '|---|---|---|---|---|---|---|\n'
+        printf '\n| version | review | verdict | action | commit | tag | channel | duration |\n'
+        printf '|---|---|---|---|---|---|---|---|\n'
     } >"$REPORT"
     report_init=1
 }
@@ -179,6 +179,7 @@ while :; do
     echo "== round $round (version $iteration) =="
     log "round=$round iteration=$iteration repo=$repo"
     emit round round="$round" iteration="$iteration"
+    round_start=$(date +%s)
 
     export AUTO_ITERATE_REPO="$repo" AUTO_ITERATE_ITERATION="$iteration" \
         AUTO_ITERATE_FEEDBACK="$feedback"
@@ -266,9 +267,12 @@ while :; do
     action=$(printf '%s' "$out" | jget action)
     log "record action=$action"
     emit record action="$action"
+    duration=$(( $(date +%s) - round_start ))
+    log "round-done duration=${duration}s"
+    emit round_done duration="$duration"
     if [ "$report_init" -eq 1 ]; then
-        printf '| %s | %s | %s | %s | %s | %s | %s |\n' \
-            "$iteration" "$rid" "$verdict" "$action" "${commit:--}" "${tag:--}" "${channel:--}" >>"$REPORT"
+        printf '| %s | %s | %s | %s | %s | %s | %s | %ss |\n' \
+            "$iteration" "$rid" "$verdict" "$action" "${commit:--}" "${tag:--}" "${channel:--}" "$duration" >>"$REPORT"
     fi
     if [ "$STOP_ON_REJECT" -eq 1 ] && [ "$verdict" != approved ]; then
         case "$action" in

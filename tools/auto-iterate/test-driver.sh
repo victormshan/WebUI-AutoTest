@@ -74,6 +74,8 @@ grep -q "^# auto-iterate report" "$tmp/report.md" || fail "report header missing
 grep -q "| 1 | v1-1 | approved | start_round |" "$tmp/report.md" || fail "report row 1 missing"
 grep -q "| 2 | v2-1 | approved | finalize |" "$tmp/report.md" || fail "report row 2 missing"
 grep -q "^- finished: " "$tmp/report.md" || fail "report footer missing"
+grep -q "duration" "$tmp/report.md" || fail "report misses the duration column"
+grep -Eq '\| [0-9]+s \|$' "$tmp/report.md" || fail "report row misses the duration"
 python3 - "$tmp/events.jsonl" <<'PY' || fail "events are incomplete"
 import json, sys
 ev = [json.loads(line) for line in open(sys.argv[1])]
@@ -83,6 +85,8 @@ for kind in ("start", "round", "review", "approved", "record", "finalized"):
 review = next(e for e in ev if e["event"] == "review")
 assert review["channel"] == "stub", review
 assert review["provider"] == "stub-provider", review
+done = next(e for e in ev if e["event"] == "round_done")
+assert done["duration"].isdigit(), done
 PY
 
 repo2=$tmp/repo2
