@@ -273,25 +273,40 @@ pub fn install_guard(repo: &Path, force: bool) -> Result<PathBuf> {
         );
     }
     let path = hooks.join("pre-commit");
-    if path.exists() && !force {
-        anyhow::bail!(
-            "{} already exists; pass --force to replace it",
-            path.display()
-        );
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) => {
+            if !force {
+                anyhow::bail!(
+                    "{} already exists; pass --force to replace it",
+                    path.display()
+                );
+            }
+            if meta.file_type().is_dir() {
+                anyhow::bail!("{} is a directory", path.display());
+            }
+            // Remove the leaf (a symlink is removed, not followed) and create a fresh file.
+            std::fs::remove_file(&path)?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
-    let mut script = std::fs::File::create(&path)?;
+    // create_new never follows a symlink that raced into place.
+    let mut script = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
     use std::io::Write;
     writeln!(script, "#!/bin/sh")?;
     writeln!(
         script,
         "exec review-gate guard --repo \"$(git rev-parse --show-toplevel)\""
     )?;
-    drop(script);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+        script.set_permissions(std::fs::Permissions::from_mode(0o755))?;
     }
+    drop(script);
     Ok(path)
 }
 
@@ -474,6 +489,26 @@ mod tests {
         }
         assert!(install_guard(&repo, false).is_err(), "must not overwrite");
         install_guard(&repo, true).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_guard_does_not_follow_a_symlinked_pre_commit() {
+        use std::os::unix::fs::symlink;
+        let (d, repo) = guarded_repo();
+        let outside = d.path().join("outside-target");
+        fs::write(&outside, "keep\n").unwrap();
+        let hook = repo.join(".git/hooks/pre-commit");
+        symlink(&outside, &hook).unwrap();
+        assert!(install_guard(&repo, false).is_err());
+        install_guard(&repo, true).unwrap();
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep\n");
+        assert!(
+            !fs::symlink_metadata(&hook)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]

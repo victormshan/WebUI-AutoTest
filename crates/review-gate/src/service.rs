@@ -106,6 +106,12 @@ pub fn read_agents(path: &std::path::Path) -> Result<HashMap<String, String>, Ga
     })?;
     let agents: HashMap<String, String> = serde_json::from_str(&text)
         .map_err(|e| GateError::Invalid(format!("agents file {}: {e}", path.display())))?;
+    if agents.is_empty() {
+        return Err(GateError::Invalid(format!(
+            "agents file {} is empty; list at least one token",
+            path.display()
+        )));
+    }
     validate_agents(agents)
         .map_err(|e| GateError::Invalid(format!("agents file {}: {e}", path.display())))
 }
@@ -121,7 +127,10 @@ fn validate_agents(agents: HashMap<String, String>) -> Result<HashMap<String, St
             ));
         }
         let family = family.trim().to_ascii_lowercase();
-        if family.is_empty()
+        if !family
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
             || !family
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -263,14 +272,16 @@ async fn init_task(
         .as_deref()
         .map(str::trim)
         .filter(|c| !c.is_empty())
-        && claimed != family
     {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "implementer_family {claimed:?} does not match this token's identity {family:?}"
-            ),
-        ));
+        let claimed = claimed.to_ascii_lowercase();
+        if claimed != family {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "implementer_family {claimed:?} does not match this token's identity {family:?}"
+                ),
+            ));
+        }
     }
     let min = match b.min_reviewer.as_deref() {
         None => Channel::WebGemini,
@@ -580,6 +591,15 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(posted["implementer_family"], "opencode");
+        let posted = oc
+            .post::<Value>(
+                "/tasks",
+                json!({ "id": "u2", "goal": "g", "acceptance": "a", "iterations": 1,
+                        "repo": e.repo, "implementer_family": "OpenCode" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(posted["implementer_family"], "opencode");
 
         let err = e
             .client
@@ -826,6 +846,13 @@ pub(crate) mod tests {
             assert!(err.to_string().contains("accessible by others"), "{err}");
             assert!(check(&format!(r#"{{ "{t}": "opencode" }}"#), 0o640).is_ok());
         }
+        let err = check(&format!(r#"{{ "{t}": "-" }}"#), 0o600).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid implementer family"),
+            "{err}"
+        );
+        let err = check("{}", 0o600).unwrap_err();
+        assert!(err.to_string().contains("is empty"), "{err}");
         assert!(super::read_agents(&d.path().join("missing.json")).is_err());
     }
 
