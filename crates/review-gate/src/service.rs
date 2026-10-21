@@ -51,27 +51,88 @@ impl AppState {
     }
 
     /// Installs the token -> implementer-family map the client identity comes from.
-    pub fn with_agents(mut self, agents: HashMap<String, String>) -> Self {
-        self.agents = agents;
-        self
+    ///
+    /// The map is validated here (not only in [`read_agents`]) so no caller can install a blank
+    /// family that would later be normalized to `claude`, or a trivially short token.
+    pub fn with_agents(mut self, agents: HashMap<String, String>) -> Result<Self, GateError> {
+        self.agents = validate_agents(agents)?;
+        Ok(self)
     }
 
     /// The implementer family behind a bearer token: the admin map first, then the legacy token.
+    ///
+    /// Every entry is compared (no early return) so the map lookup does not reveal a matching
+    /// prefix position through timing.
     fn family_for(&self, given: &str) -> Option<&str> {
-        if let Some(family) = self.agents.get(given) {
-            return Some(family);
+        let mut mapped = None;
+        for (token, family) in &self.agents {
+            if const_eq(token, given) {
+                mapped = Some(family.as_str());
+            }
         }
-        const_eq(&self.token, given).then_some("claude")
+        let legacy = const_eq(&self.token, given);
+        if mapped.is_some() {
+            mapped
+        } else if legacy {
+            Some("claude")
+        } else {
+            None
+        }
     }
 }
 
 /// Reads the admin-owned `{ "token": "family", … }` map (JSON).
+///
+/// The file is expected to be readable only by the service account and its group (0600/0640):
+/// every value is a raw bearer token.
 pub fn read_agents(path: &std::path::Path) -> Result<HashMap<String, String>, GateError> {
+    let meta = std::fs::metadata(path).map_err(|e| {
+        GateError::Io(anyhow::Error::new(e).context(format!("reading {}", path.display())))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        if mode & 0o007 != 0 {
+            return Err(GateError::Invalid(format!(
+                "agents file {} is accessible by others (mode {:o}); use 0600 or 0640",
+                path.display(),
+                mode & 0o777
+            )));
+        }
+    }
     let text = std::fs::read_to_string(path).map_err(|e| {
         GateError::Io(anyhow::Error::new(e).context(format!("reading {}", path.display())))
     })?;
-    serde_json::from_str(&text)
+    let agents: HashMap<String, String> = serde_json::from_str(&text)
+        .map_err(|e| GateError::Invalid(format!("agents file {}: {e}", path.display())))?;
+    validate_agents(agents)
         .map_err(|e| GateError::Invalid(format!("agents file {}: {e}", path.display())))
+}
+
+/// Validates and normalizes a token -> family map. Families are trimmed and lowercased so the
+/// value stored on the task is exactly the value compared against the token's identity.
+fn validate_agents(agents: HashMap<String, String>) -> Result<HashMap<String, String>, GateError> {
+    let mut out = HashMap::with_capacity(agents.len());
+    for (token, family) in agents {
+        if token.len() < 32 || !token.chars().all(|c| c.is_ascii_graphic()) {
+            return Err(GateError::Invalid(
+                "each token must be at least 32 printable, non-whitespace characters".into(),
+            ));
+        }
+        let family = family.trim().to_ascii_lowercase();
+        if family.is_empty()
+            || !family
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(GateError::Invalid(format!(
+                "invalid implementer family {family:?}; use [a-z0-9_-]+"
+            )));
+        }
+        out.insert(token, family);
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,12 +517,14 @@ pub(crate) mod tests {
             .with_relay(crate::relay::RelayTrace::new(dir.path().join("relay")));
         let mut state = AppState::new(gate, cfg(bridge), TOKEN.into());
         if !agents.is_empty() {
-            state = state.with_agents(
-                agents
-                    .iter()
-                    .map(|(t, f)| ((*t).to_string(), (*f).to_string()))
-                    .collect(),
-            );
+            state = state
+                .with_agents(
+                    agents
+                        .iter()
+                        .map(|(t, f)| ((*t).to_string(), (*f).to_string()))
+                        .collect(),
+                )
+                .unwrap();
         }
         let state = Arc::new(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -528,6 +591,7 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("does not match"), "{err}");
+        assert!(err.to_string().contains("400"), "{err}");
 
         let matching = oc
             .post::<Value>(
@@ -705,16 +769,64 @@ pub(crate) mod tests {
         assert!(job.unavailable, "{:?}", job.error);
     }
 
+    #[cfg(unix)]
+    fn mode(p: &std::path::Path, bits: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(p, fs::Permissions::from_mode(bits)).unwrap();
+    }
+
     #[test]
     fn agents_file_is_a_token_to_family_map() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("agents.json");
-        fs::write(&p, r#"{ "tok-1": "opencode", "tok-2": "deepseek" }"#).unwrap();
+        let t1 = "token-1-0123456789abcdef0123456789abcdef";
+        let t2 = "token-2-0123456789abcdef0123456789abcdef";
+        fs::write(
+            &p,
+            format!(r#"{{ "{t1}": " OpenCode ", "{t2}": "deepseek" }}"#),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        mode(&p, 0o600);
         let m = super::read_agents(&p).unwrap();
-        assert_eq!(m.get("tok-1").map(String::as_str), Some("opencode"));
-        assert_eq!(m.get("tok-2").map(String::as_str), Some("deepseek"));
+        assert_eq!(m.get(t1).map(String::as_str), Some("opencode"));
+        assert_eq!(m.get(t2).map(String::as_str), Some("deepseek"));
         fs::write(&p, "not json").unwrap();
         assert!(super::read_agents(&p).is_err());
+    }
+
+    #[test]
+    fn agents_file_rejects_blank_families_short_tokens_and_open_permissions() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("agents.json");
+        let t = "token-1-0123456789abcdef0123456789abcdef";
+        let check = |body: &str, bits: u32| {
+            fs::write(&p, body).unwrap();
+            #[cfg(unix)]
+            mode(&p, bits);
+            super::read_agents(&p)
+        };
+        let err = check(&format!(r#"{{ "{t}": "  " }}"#), 0o600).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid implementer family"),
+            "{err}"
+        );
+        let err = check(r#"{ "short": "opencode" }"#, 0o600).unwrap_err();
+        assert!(err.to_string().contains("at least 32"), "{err}");
+        let err = check(&format!(r#"{{ " {t}": "opencode" }}"#), 0o600).unwrap_err();
+        assert!(err.to_string().contains("at least 32"), "{err}");
+        let err = check(&format!(r#"{{ "{t}": "bad family" }}"#), 0o600).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid implementer family"),
+            "{err}"
+        );
+        #[cfg(unix)]
+        {
+            let err = check(&format!(r#"{{ "{t}": "opencode" }}"#), 0o644).unwrap_err();
+            assert!(err.to_string().contains("accessible by others"), "{err}");
+            assert!(check(&format!(r#"{{ "{t}": "opencode" }}"#), 0o640).is_ok());
+        }
+        assert!(super::read_agents(&d.path().join("missing.json")).is_err());
     }
 
     #[test]

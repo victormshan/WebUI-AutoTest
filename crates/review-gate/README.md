@@ -67,9 +67,12 @@ sudoedit /etc/review-gate/agents.json   # {"<token>": "opencode", "<token>": "de
 sudo systemctl edit review-gate         # add --agents-file /etc/review-gate/agents.json
 ```
 
-The file is read at startup (0600/0640, never world-readable). Tokens not listed in the map fall
-back to `--token-file` and are treated as `claude`, which keeps existing single-agent installs
-working. `task init --implementer-family` / the HTTP field is only a consistency check: a value that
+The file is read at startup (0600/0640; the service refuses a world-accessible file). Each token
+must be at least 32 printable, non-whitespace characters and each family is trimmed and lowercased
+and must match `[a-z0-9_-]+`; otherwise the service refuses to start. Tokens not listed in the map
+fall back to `--token-file` and are treated as `claude`, which keeps existing single-agent installs
+working (that fallback is one shared secret, so use per-agent tokens for real separation).
+`task init --implementer-family` / the HTTP field is only a consistency check: a value that
 contradicts the token identity is rejected with 400.
 
 ## Using it
@@ -96,6 +99,9 @@ review-gate guard --install --repo .     # writes .git/hooks/pre-commit
 review-gate guard --repo .               # the hook's check: exit 1 with the reason when blocked
 ```
 
+The installer writes only inside the repository or its git dir and refuses a `core.hooksPath`
+outside them. The hook invokes `review-gate` from `PATH` and covers `pre-commit` only;
+`git commit --no-verify` bypasses it, so the gate's record/CI verification remains the real check.
 The Claude Code `PreToolUse` hook below is an additional, earlier guard for Claude; `guard` is the
 portable one.
 

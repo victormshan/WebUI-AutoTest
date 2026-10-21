@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::client::Client;
@@ -241,9 +241,37 @@ pub async fn guard(client: &Client, repo: &Path) -> Result<Option<String>> {
 /// Writes `.git/hooks/pre-commit` to run [`guard`], so every `git commit` in `repo` is checked
 /// regardless of which agent runs it. Refuses to replace an existing hook unless `force`.
 pub fn install_guard(repo: &Path, force: bool) -> Result<PathBuf> {
-    let hooks = git::git(repo, &["rev-parse", "--git-path", "hooks"])?;
-    let hooks = repo.join(hooks.trim());
-    std::fs::create_dir_all(&hooks)?;
+    let repo =
+        std::fs::canonicalize(repo).with_context(|| format!("repository {}", repo.display()))?;
+    let raw = git::git(&repo, &["rev-parse", "--git-path", "hooks"])?;
+    let raw = raw.trim();
+    let hooks = if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        repo.join(raw)
+    };
+    if !hooks.is_dir() {
+        anyhow::bail!(
+            "{} is not an existing directory; refusing to install a hook there",
+            hooks.display()
+        );
+    }
+    let hooks = std::fs::canonicalize(&hooks)?;
+    let git_dir =
+        std::fs::canonicalize(git::git(&repo, &["rev-parse", "--absolute-git-dir"])?.trim())?;
+    let common_raw = git::git(&repo, &["rev-parse", "--git-common-dir"])?;
+    let common = if Path::new(common_raw.trim()).is_absolute() {
+        PathBuf::from(common_raw.trim())
+    } else {
+        repo.join(common_raw.trim())
+    };
+    let common = std::fs::canonicalize(&common)?;
+    if !(hooks.starts_with(&git_dir) || hooks.starts_with(&common) || hooks.starts_with(&repo)) {
+        anyhow::bail!(
+            "hooks dir {} is outside the repository; refusing to install (check core.hooksPath)",
+            hooks.display()
+        );
+    }
     let path = hooks.join("pre-commit");
     if path.exists() && !force {
         anyhow::bail!(
@@ -412,6 +440,55 @@ mod tests {
             .await,
             None
         );
+    }
+
+    fn guarded_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let repo = d.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        git::git(&repo, &["init", "-q"]).unwrap();
+        fs::create_dir_all(repo.join(".git/hooks")).unwrap();
+        (d, repo)
+    }
+
+    #[test]
+    fn install_guard_writes_a_pre_commit_hook_and_requires_force() {
+        let (_d, repo) = guarded_repo();
+        let p = install_guard(&repo, false).unwrap();
+        assert_eq!(
+            p,
+            std::fs::canonicalize(&repo)
+                .unwrap()
+                .join(".git/hooks/pre-commit")
+        );
+        let body = fs::read_to_string(&p).unwrap();
+        assert!(body.starts_with("#!/bin/sh\n"));
+        assert!(body.contains("review-gate guard --repo"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        assert!(install_guard(&repo, false).is_err(), "must not overwrite");
+        install_guard(&repo, true).unwrap();
+    }
+
+    #[test]
+    fn install_guard_refuses_a_hooks_dir_outside_the_repo() {
+        let (d, repo) = guarded_repo();
+        let outside = d.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        git::git(
+            &repo,
+            &["config", "core.hooksPath", outside.to_str().unwrap()],
+        )
+        .unwrap();
+        let err = install_guard(&repo, true).unwrap_err().to_string();
+        assert!(err.contains("outside the repository"), "{err}");
+        assert!(!outside.join("pre-commit").exists());
     }
 
     #[tokio::test]

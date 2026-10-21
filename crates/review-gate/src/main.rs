@@ -261,7 +261,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
             let mut app = AppState::new(gate, ReviewerConfig::from_env(), token);
             if let Some(path) = agents_file {
-                app = app.with_agents(service::read_agents(&path)?);
+                app = app.with_agents(service::read_agents(&path)?)?;
             }
             let app = Arc::new(app);
             let listener = tokio::net::TcpListener::bind(&listen)
