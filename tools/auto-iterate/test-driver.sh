@@ -46,6 +46,7 @@ case "$1" in
     pubkey) printf 'stub-pub\n' ;;
     verify-range)
         [ -z "${STUB_VERIFY_RANGE_ARGS:-}" ] || printf '%s\n' "$*" > "$STUB_VERIFY_RANGE_ARGS"
+        [ "${STUB_SLOW_VERIFY_RANGE:-0}" != 1 ] || exec sleep 5
         [ "${STUB_FAIL_VERIFY_RANGE:-0}" != 1 ] || exit 1
         printf 'verified\n'
         ;;
@@ -2339,5 +2340,55 @@ grep -q "verify-range failed" "$tmp/out72" || fail "no verify-range failure mess
 [ "$(git -C "$repo72" tag | wc -l)" -eq 1 ] || fail "verify-range failure lost the tag"
 grep -q '^event=failed$' "$tmp/notify72.out" || fail "failed run did not notify failure"
 grep -q '^exit_code=1$' "$tmp/notify72.out" || fail "failure notification has the wrong exit code"
+
+# Notification timeout is bounded and cannot change a successful exit status.
+repo73=$tmp/repo73
+state73=$tmp/state73
+mkdir -p "$repo73"
+git -C "$repo73" init -q
+git -C "$repo73" config user.email test@example.com
+git -C "$repo73" config user.name test
+echo base > "$repo73/f"
+git -C "$repo73" add f
+git -C "$repo73" commit -qm base
+echo 0 > "$state73"
+cat > "$tmp/slow-notify.sh" <<'AG'
+#!/bin/sh
+sleep 5
+AG
+chmod +x "$tmp/slow-notify.sh"
+start=$(date +%s)
+STUB_REPO=$repo73 STUB_STATE=$state73 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task notify73 --agent-cmd "$tmp/agent.sh" \
+    --notify-cmd "$tmp/slow-notify.sh" --notify-timeout 1 --max 1 >"$tmp/out73" 2>&1 \
+    || fail "notification timeout changed the driver exit status"
+elapsed=$(( $(date +%s) - start ))
+[ "$elapsed" -le 4 ] || fail "notification timeout took ${elapsed}s"
+grep -q "notify command timed out after 1s" "$tmp/out73" || fail "no notify timeout message"
+[ "$(git -C "$repo73" rev-list --count HEAD)" -eq 2 ] || fail "notify timeout lost the commit"
+
+# verify-range timeout is bounded and leaves the approved commit in place.
+repo74=$tmp/repo74
+state74=$tmp/state74
+mkdir -p "$repo74"
+git -C "$repo74" init -q
+git -C "$repo74" config user.email test@example.com
+git -C "$repo74" config user.name test
+echo base > "$repo74/f"
+git -C "$repo74" add f
+git -C "$repo74" commit -qm base
+echo 0 > "$state74"
+start=$(date +%s)
+set +e
+STUB_REPO=$repo74 STUB_STATE=$state74 STUB_ITERATIONS=1 STUB_SLOW_VERIFY_RANGE=1 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task vr74 --agent-cmd "$tmp/agent.sh" \
+    --verify-range --verify-range-timeout 1 --max 1 >"$tmp/out74" 2>&1
+rc=$?
+set -e
+elapsed=$(( $(date +%s) - start ))
+[ "$rc" -eq 1 ] || fail "verify-range timeout exited $rc"
+[ "$elapsed" -le 4 ] || fail "verify-range timeout took ${elapsed}s"
+grep -q "verify-range timed out after 1s" "$tmp/out74" || fail "no verify-range timeout message"
+[ "$(git -C "$repo74" rev-list --count HEAD)" -eq 2 ] || fail "verify-range timeout lost the commit"
 
 echo "test-driver: ok"

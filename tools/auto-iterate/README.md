@@ -142,10 +142,12 @@ stored in the round state/retry metadata and restored by `--resume`; a different
 (`finalized`, `paused`, `failed`, `stopped`, `done` or `blocked`), the exit code,
 reason, task, repo, iteration, commit, tag, review, verdict, channel and message.
 It is best-effort: a notification failure is reported but does not change the
-driver's exit status. `--verify-range` runs `review-gate verify-range` after a
-finalize record, using the gate pubkey and the range starting at the first approved
-task commit (or the repository root when task history is empty). A failed range
-verification exits 1 after the approved commit/tag are already recorded.
+driver's exit status. `--notify-timeout S` bounds the notification command; exit 124
+is reported as a notification timeout. `--verify-range` runs
+`review-gate verify-range` after a finalize record, using the gate pubkey and the
+range starting at the first approved task commit (or the repository root when task
+history is empty). `--verify-range-timeout S` bounds that call. A failed or timed-out
+range verification exits 1 after the approved commit/tag are already recorded.
 
 The agent also receives `AUTO_ITERATE_GOAL`, `AUTO_ITERATE_ACCEPTANCE` and
 `AUTO_ITERATE_TASK`. The driver refuses to start on a dirty worktree unless

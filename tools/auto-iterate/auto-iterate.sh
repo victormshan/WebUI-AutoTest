@@ -32,6 +32,8 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --notify-cmd CMD   run CMD once when the driver exits (notification hook)
   --verify-range     after finalize, verify every task commit with review-gate
   --manifest FILE    approved-version manifest (default <gitdir>/auto-iterate/versions.ndjson)
+  --notify-timeout S kill --notify-cmd after S seconds (0 = off, default 0)
+  --verify-range-timeout S kill verify-range after S seconds (0 = off, default 0)
 
 The notify command sees AUTO_ITERATE_EVENT (finalized/paused/failed/stopped/
 done/blocked), AUTO_ITERATE_EXIT_CODE, AUTO_ITERATE_REASON, AUTO_ITERATE_TASK,
@@ -61,7 +63,7 @@ TXT
 
 TASK=; AGENT=; MESSAGE=; EVIDENCE=; EVIDENCE_SET=0; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; FALLBACK=; FALLBACK_CHANNEL=claude-subagent; state=
 LOCK_TIMEOUT=0; lockfile=; lock_owner=; VERIFY_CMD=; VERIFY_TIMEOUT=0; VERIFY_CMD_SET=0; VERIFY_TIMEOUT_SET=0; VERSION_PLAN=; resume_review=0; resume_allow_dirty=0; keep_state=0; started_clean=0; durable_feedback=
-NOTIFY=; VERIFY_RANGE=0; notify_event=; notify_reason=; manifest=; MANIFEST=; MANIFEST_SET=0; commit=; tag=; rid=; verdict=; channel=; msg=; full=
+NOTIFY=; VERIFY_RANGE=0; NOTIFY_TIMEOUT=0; VERIFY_RANGE_TIMEOUT=0; notify_event=; notify_reason=; manifest=; MANIFEST=; MANIFEST_SET=0; commit=; tag=; rid=; verdict=; channel=; msg=; full=
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -89,6 +91,8 @@ while [ $# -gt 0 ]; do
         --notify-cmd) NOTIFY=$2; shift 2 ;;
         --verify-range) VERIFY_RANGE=1; shift ;;
         --manifest) MANIFEST=$2; MANIFEST_SET=1; shift 2 ;;
+        --notify-timeout) NOTIFY_TIMEOUT=$2; shift 2 ;;
+        --verify-range-timeout) VERIFY_RANGE_TIMEOUT=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -108,8 +112,10 @@ case "$AGENT_TIMEOUT" in ''|*[!0-9]*) echo "--agent-timeout must be an integer" 
 case "$REVIEW_TIMEOUT" in ''|*[!0-9]*) echo "--review-timeout must be an integer" >&2; exit 2 ;; esac
 case "$LOCK_TIMEOUT" in ''|*[!0-9]*) echo "--lock-timeout must be an integer" >&2; exit 2 ;; esac
 case "$VERIFY_TIMEOUT" in ''|*[!0-9]*) echo "--verify-timeout must be an integer" >&2; exit 2 ;; esac
+case "$NOTIFY_TIMEOUT" in ''|*[!0-9]*) echo "--notify-timeout must be an integer" >&2; exit 2 ;; esac
+case "$VERIFY_RANGE_TIMEOUT" in ''|*[!0-9]*) echo "--verify-range-timeout must be an integer" >&2; exit 2 ;; esac
 case "$FALLBACK_CHANNEL" in claude-subagent|self-review) ;; *) echo "--fallback-channel must be claude-subagent or self-review" >&2; exit 2 ;; esac
-if [ "$AGENT_TIMEOUT" -gt 0 ] || [ "$REVIEW_TIMEOUT" -gt 0 ] || [ "$VERIFY_TIMEOUT" -gt 0 ]; then
+if [ "$AGENT_TIMEOUT" -gt 0 ] || [ "$REVIEW_TIMEOUT" -gt 0 ] || [ "$VERIFY_TIMEOUT" -gt 0 ] || [ "$NOTIFY_TIMEOUT" -gt 0 ] || [ "$VERIFY_RANGE_TIMEOUT" -gt 0 ]; then
     command -v timeout >/dev/null 2>&1 || { echo "missing required command: timeout" >&2; exit 1; }
 fi
 if [ -n "$VERSION_PLAN" ]; then
@@ -224,22 +230,29 @@ notify_exit() {
     fi
     _nr=${notify_reason:-exit-$_nrc}
     _ndir=${repo:-$(pwd)}
-    if ! (
+    _nrc2=0
+    (
         cd "$_ndir" 2>/dev/null || cd /
-        AUTO_ITERATE_EVENT="$_ne" \
-        AUTO_ITERATE_EXIT_CODE="$_nrc" \
-        AUTO_ITERATE_REASON="$_nr" \
-        AUTO_ITERATE_TASK="$TASK" \
-        AUTO_ITERATE_REPO="${repo:-}" \
-        AUTO_ITERATE_ITERATION="${iteration:-}" \
-        AUTO_ITERATE_COMMIT="${full:-${commit:-}}" \
-        AUTO_ITERATE_TAG="${tag:-}" \
-        AUTO_ITERATE_REVIEW="${rid:-}" \
-        AUTO_ITERATE_VERDICT="${verdict:-}" \
-        AUTO_ITERATE_CHANNEL="${channel:-}" \
-        AUTO_ITERATE_MESSAGE="${msg:-}" \
-        sh -c "$NOTIFY"
-    ) 9>&- 8>&-; then
+        export AUTO_ITERATE_EVENT="$_ne"
+        export AUTO_ITERATE_EXIT_CODE="$_nrc"
+        export AUTO_ITERATE_REASON="$_nr"
+        export AUTO_ITERATE_TASK="$TASK"
+        export AUTO_ITERATE_REPO="${repo:-}"
+        export AUTO_ITERATE_ITERATION="${iteration:-}"
+        export AUTO_ITERATE_COMMIT="${full:-${commit:-}}"
+        export AUTO_ITERATE_TAG="${tag:-}"
+        export AUTO_ITERATE_REVIEW="${rid:-}"
+        export AUTO_ITERATE_VERDICT="${verdict:-}"
+        export AUTO_ITERATE_CHANNEL="${channel:-}"
+        export AUTO_ITERATE_MESSAGE="${msg:-}"
+        if [ "$NOTIFY_TIMEOUT" -gt 0 ]; then
+            exec timeout "$NOTIFY_TIMEOUT" sh -c "$NOTIFY"
+        fi
+        exec sh -c "$NOTIFY"
+    ) 9>&- 8>&- || _nrc2=$?
+    if [ "$_nrc2" -eq 124 ] && [ "$NOTIFY_TIMEOUT" -gt 0 ]; then
+        echo "notify command timed out after ${NOTIFY_TIMEOUT}s" >&2
+    elif [ "$_nrc2" -ne 0 ]; then
         echo "notify command failed" >&2
     fi
     return 0
@@ -510,7 +523,17 @@ verify_range() {
     _range=$(task_range) || { echo "verify-range: cannot determine task range" >&2; return 1; }
     _pub=$(review-gate pubkey 2>/dev/null | tr -d '\r\n') || { echo "verify-range: cannot read gate pubkey" >&2; return 1; }
     [ -n "$_pub" ] || { echo "verify-range: empty gate pubkey" >&2; return 1; }
-    if ! review-gate verify-range --repo "$repo" --pubkey "$_pub" "$_range"; then
+    _vrc=0
+    if [ "$VERIFY_RANGE_TIMEOUT" -gt 0 ]; then
+        timeout "$VERIFY_RANGE_TIMEOUT" review-gate verify-range --repo "$repo" --pubkey "$_pub" "$_range" || _vrc=$?
+    else
+        review-gate verify-range --repo "$repo" --pubkey "$_pub" "$_range" || _vrc=$?
+    fi
+    if [ "$_vrc" -eq 124 ] && [ "$VERIFY_RANGE_TIMEOUT" -gt 0 ]; then
+        echo "verify-range timed out after ${VERIFY_RANGE_TIMEOUT}s for $_range" >&2
+        return 1
+    fi
+    if [ "$_vrc" -ne 0 ]; then
         echo "verify-range failed for $_range" >&2
         return 1
     fi
