@@ -330,7 +330,7 @@ echo 0 > "$state7"
 set +e
 STUB_REPO=$repo7 STUB_STATE=$state7 STUB_FAIL_RECORD=1 STUB_FAIL_MARKER=$tmp/marker \
     PATH="$bin:$PATH" "$here/auto-iterate.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
-    --message "resume v1" --max 1 >"$tmp/out7" 2>&1
+    --message "resume v1" --manifest "$tmp/manifest7.ndjson" --max 1 >"$tmp/out7" 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "failed record exited $rc"
@@ -345,6 +345,7 @@ d = json.load(open(sys.argv[1]))
 assert d["phase"] == "committed", d
 assert d["iteration"] == 1, d
 assert d["review"] == "v1-1", d
+assert d["manifest"].endswith("/manifest7.ndjson"), d
 PY
 set +e
 STUB_REPO=$repo7 STUB_STATE=$state7 PATH="$bin:$PATH" \
@@ -354,12 +355,21 @@ rc=$?
 set -e
 [ "$rc" -eq 2 ] || fail "pending state without --resume exited $rc"
 grep -q "pending state" "$tmp/out7b" || fail "no pending state message"
+set +e
+STUB_REPO=$repo7 STUB_STATE=$state7 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
+    --resume --manifest "$tmp/other7.ndjson" --max 1 >"$tmp/out7conflict" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "conflicting manifest resume exited $rc"
+grep -q "manifest path differs" "$tmp/out7conflict" || fail "no manifest conflict message"
+[ ! -e "$tmp/other7.ndjson" ] || fail "conflicting manifest was created"
 STUB_REPO=$repo7 STUB_STATE=$state7 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
     "$here/auto-iterate.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out7c" 2>&1 || fail "resume committed failed"
 grep -q "task resume7 is done" "$tmp/out7c" || fail "resume did not observe done"
 [ ! -f "$state7file" ] || fail "state not cleared after resume"
-manifest7=$gitdir7/auto-iterate/versions.ndjson
+manifest7=$tmp/manifest7.ndjson
 python3 - "$manifest7" <<'PY' || fail "resume did not append versions.ndjson"
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
@@ -450,6 +460,11 @@ out=$(STUB_REPO=$repo4 STUB_STATE=$state4 PATH="$bin:$PATH" \
     "$here/auto-iterate.sh" --check --task check 2>&1) || fail "check mode failed"
 printf '%s' "$out" | grep -q "check ok: task=check" || fail "no check output"
 [ "$(git -C "$repo4" rev-list --count HEAD)" -eq 1 ] || fail "check mode changed the repo"
+out=$(STUB_REPO=$repo4 STUB_STATE=$state4 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --check --task check --manifest "$tmp/check-manifest.ndjson" 2>&1) \
+    || fail "custom manifest check failed"
+printf '%s' "$out" | grep -q "check ok: task=check" || fail "custom manifest check output"
+[ ! -e "$tmp/check-manifest.ndjson" ] || fail "check created the manifest"
 
 # --- v13: repo flock lease ---
 repo11=$tmp/repo11

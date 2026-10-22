@@ -130,10 +130,13 @@ The verdict log line and the `review` event also carry the channel and provider 
 service used, so the report records which reviewer decided each version.
 
 Every approved version is appended to `auto-iterate/versions.ndjson` in the worktree's
-git dir. The file is rewritten atomically and is idempotent by task and iteration, so
-a crash after `record` can be resumed without duplicating an entry. Each line records
-the task, version, review id, commit, tag, channel, provider, message, tree,
-per-version acceptance and verify command. Rejected versions are not added.
+git dir by default; `--manifest FILE` selects another absolute or relative path.
+The file is rewritten atomically and is idempotent by task and iteration, so a crash
+after `record` can be resumed without duplicating an entry. Each line records the
+task, version, review id, commit, tag, channel, provider, message, tree, per-version
+acceptance and verify command. Rejected versions are not added. The selected path is
+stored in the round state/retry metadata and restored by `--resume`; a different
+`--manifest` on resume is rejected before commit or record.
 
 `--notify-cmd CMD` runs once when the driver exits, with `AUTO_ITERATE_EVENT`
 (`finalized`, `paused`, `failed`, `stopped`, `done` or `blocked`), the exit code,

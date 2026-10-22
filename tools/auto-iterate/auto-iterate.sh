@@ -31,6 +31,7 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --version-plan F   JSON object mapping version number to acceptance text
   --notify-cmd CMD   run CMD once when the driver exits (notification hook)
   --verify-range     after finalize, verify every task commit with review-gate
+  --manifest FILE    approved-version manifest (default <gitdir>/auto-iterate/versions.ndjson)
 
 The notify command sees AUTO_ITERATE_EVENT (finalized/paused/failed/stopped/
 done/blocked), AUTO_ITERATE_EXIT_CODE, AUTO_ITERATE_REASON, AUTO_ITERATE_TASK,
@@ -60,7 +61,7 @@ TXT
 
 TASK=; AGENT=; MESSAGE=; EVIDENCE=; EVIDENCE_SET=0; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; FALLBACK=; FALLBACK_CHANNEL=claude-subagent; state=
 LOCK_TIMEOUT=0; lockfile=; lock_owner=; VERIFY_CMD=; VERIFY_TIMEOUT=0; VERIFY_CMD_SET=0; VERIFY_TIMEOUT_SET=0; VERSION_PLAN=; resume_review=0; resume_allow_dirty=0; keep_state=0; started_clean=0; durable_feedback=
-NOTIFY=; VERIFY_RANGE=0; notify_event=; notify_reason=; manifest=; commit=; tag=; rid=; verdict=; channel=; msg=; full=
+NOTIFY=; VERIFY_RANGE=0; notify_event=; notify_reason=; manifest=; MANIFEST=; MANIFEST_SET=0; commit=; tag=; rid=; verdict=; channel=; msg=; full=
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -87,6 +88,7 @@ while [ $# -gt 0 ]; do
         --version-plan) VERSION_PLAN=$2; shift 2 ;;
         --notify-cmd) NOTIFY=$2; shift 2 ;;
         --verify-range) VERIFY_RANGE=1; shift ;;
+        --manifest) MANIFEST=$2; MANIFEST_SET=1; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -131,6 +133,12 @@ if [ -n "$VERSION_PLAN" ]; then
         *) VERSION_PLAN=$(pwd)/$VERSION_PLAN ;;
     esac
 fi
+if [ -n "$MANIFEST" ]; then
+    case "$MANIFEST" in
+        /*) ;;
+        *) MANIFEST=$(pwd)/$MANIFEST ;;
+    esac
+fi
 
 jget() { python3 -c 'import json,sys
 d=json.load(sys.stdin)
@@ -162,6 +170,17 @@ if [ "$CHECK" -eq 1 ]; then
     if [ "$ALLOW_DIRTY" -eq 0 ]; then
         dirty=$(git -C "$repo" status --porcelain)
         [ -z "$dirty" ] || { printf 'check: %s has uncommitted changes:\n%s\n' "$repo" "$dirty" >&2; exit 1; }
+    fi
+    _check_manifest=${MANIFEST:-"$(git -C "$repo" rev-parse --absolute-git-dir)/auto-iterate/versions.ndjson"}
+    if [ -e "$_check_manifest" ]; then
+        [ -w "$_check_manifest" ] || { echo "check: manifest $_check_manifest is not writable" >&2; exit 1; }
+    else
+        _check_manifest_dir=$(dirname "$_check_manifest")
+        if [ ! -d "$_check_manifest_dir" ]; then
+            _check_manifest_dir=$(dirname "$_check_manifest_dir")
+        fi
+        { [ -d "$_check_manifest_dir" ] && [ -w "$_check_manifest_dir" ]; } || {
+            echo "check: cannot create manifest $_check_manifest" >&2; exit 1; }
     fi
     echo "check ok: task=$TASK status=$status iteration=$iteration repo=$repo"
     exit 0
@@ -240,11 +259,11 @@ write_state() {
     _phase=$1; _it=$2; _rid=$3; _commit=$4; _tag=$5; _msg=$6; _chan=$7
     _head=${8:-}; _clean=${9:-0}; _fb=${10:-}; _tree=${11:-}; _untracked=${12-$preserve_untracked}
     _vcmd=${VERIFY_CMD:-}; _vtimeout=${VERIFY_TIMEOUT:-0}
-    _vplan=${VERSION_PLAN:-}; _vacc=${version_acceptance:-}; _ev=${EVIDENCE:-}
+    _vplan=${VERSION_PLAN:-}; _vacc=${version_acceptance:-}; _ev=${EVIDENCE:-}; _man=${manifest:-}
     mkdir -p "$(dirname "$state")"
-    python3 - "$state" "$_phase" "$_it" "$_rid" "$_commit" "$_tag" "$_msg" "$_chan" "$_head" "$_clean" "$_fb" "$_tree" "$_untracked" "$_vcmd" "$_vtimeout" "$_vplan" "$_vacc" "$_ev" <<'PY'
+    python3 - "$state" "$_phase" "$_it" "$_rid" "$_commit" "$_tag" "$_msg" "$_chan" "$_head" "$_clean" "$_fb" "$_tree" "$_untracked" "$_vcmd" "$_vtimeout" "$_vplan" "$_vacc" "$_ev" "$_man" <<'PY'
 import json, os, sys
-p, phase, iteration, review, commit, tag, message, channel, head, clean, feedback, tree, untracked, vcmd, vtimeout, vplan, vacc, evidence = sys.argv[1:19]
+p, phase, iteration, review, commit, tag, message, channel, head, clean, feedback, tree, untracked, vcmd, vtimeout, vplan, vacc, evidence, manifest = sys.argv[1:20]
 tmp = f"{p}.tmp.{os.getpid()}"
 with open(tmp, "w") as f:
     json.dump({"phase": phase, "iteration": int(iteration), "review": review,
@@ -253,7 +272,7 @@ with open(tmp, "w") as f:
                "feedback": feedback, "tree": tree, "untracked": untracked,
                "verify_cmd": vcmd, "verify_timeout": int(vtimeout or 0),
                "version_plan": vplan, "version_acceptance": vacc,
-               "evidence": evidence}, f)
+               "evidence": evidence, "manifest": manifest}, f)
     f.write("\n")
     f.flush()
     os.fsync(f.fileno())
@@ -265,16 +284,16 @@ write_retry_meta() {
     [ -n "$retry_meta" ] || return 0
     python3 - "$retry_meta" "$iteration" "$1" "$started_clean" "${2:-}" \
         "${VERIFY_CMD:-}" "${VERIFY_TIMEOUT:-0}" "${VERSION_PLAN:-}" \
-        "${version_acceptance:-}" "${EVIDENCE:-}" <<'PY'
+        "${version_acceptance:-}" "${EVIDENCE:-}" "${manifest:-}" <<'PY'
 import json, os, sys
-p, iteration, head, clean, untracked, vcmd, vtimeout, vplan, vacc, evidence = sys.argv[1:11]
+p, iteration, head, clean, untracked, vcmd, vtimeout, vplan, vacc, evidence, manifest = sys.argv[1:12]
 tmp = f"{p}.tmp.{os.getpid()}"
 with open(tmp, "w") as f:
     json.dump({"iteration": int(iteration), "head": head,
                "clean": int(clean or 0), "untracked": untracked,
                "verify_cmd": vcmd, "verify_timeout": int(vtimeout or 0),
                "version_plan": vplan, "version_acceptance": vacc,
-               "evidence": evidence}, f)
+               "evidence": evidence, "manifest": manifest}, f)
     f.write("\n")
 os.replace(tmp, p)
 PY
@@ -301,7 +320,7 @@ PY
 }
 
 apply_saved_round_settings() {
-    _as_it=$1; _vc=$2; _vt=$3; _vp=$4; _va=$5; _ev=$6
+    _as_it=$1; _vc=$2; _vt=$3; _vp=$4; _va=$5; _ev=$6; _man=$7
     if [ -n "$_vc" ]; then
         if [ "$VERIFY_CMD_SET" -eq 0 ]; then
             VERIFY_CMD=$_vc
@@ -349,6 +368,18 @@ apply_saved_round_settings() {
         version_acceptance=$_va
     elif [ -n "$VERSION_PLAN" ]; then
         echo "resume: version plan was not part of the saved round" >&2
+        return 1
+    fi
+    if [ -n "$_man" ]; then
+        if [ "$MANIFEST_SET" -eq 0 ]; then
+            MANIFEST=$_man
+            manifest=$_man
+        elif [ "$MANIFEST" != "$_man" ]; then
+            echo "resume: manifest path differs from the saved round" >&2
+            return 1
+        fi
+    elif [ "$MANIFEST_SET" -eq 1 ]; then
+        echo "resume: manifest path was not part of the saved round" >&2
         return 1
     fi
 }
@@ -643,6 +674,7 @@ resume_pending() {
     rvp=$(printf '%s' "$raw" | jget version_plan)
     rva=$(printf '%s' "$raw" | jget version_acceptance)
     rev=$(printf '%s' "$raw" | jget evidence)
+    rman=$(printf '%s' "$raw" | jget manifest)
     runtracked=$(printf '%s' "$raw" | jget untracked)
     case "$rphase" in
         agent|verify|staged|reviewing)
@@ -650,7 +682,7 @@ resume_pending() {
             preserve_untracked=$(merge_untracked "$runtracked" "$_now_untracked")
             ;;
     esac
-    apply_saved_round_settings "$rit" "$rvc" "$rvt" "$rvp" "$rva" "$rev" || return 1
+    apply_saved_round_settings "$rit" "$rvc" "$rvt" "$rvp" "$rva" "$rev" "$rman" || return 1
     case "$rclean" in 1) started_clean=1 ;; *) started_clean=0 ;; esac
     recorded=
     case "$rphase" in
@@ -922,7 +954,7 @@ while :; do
         retry_meta="$gitdir/auto-iterate/$(printf '%s' "$TASK" | tr '/ ' '__').retry"
         worker_pidfile="$gitdir/auto-iterate/worker.pid"
         worker_lock="$gitdir/auto-iterate/worker.lock"
-        manifest="$gitdir/auto-iterate/versions.ndjson"
+        manifest=${MANIFEST:-"$gitdir/auto-iterate/versions.ndjson"}
     fi
     if [ "$status" != running ]; then
         if [ "$RESUME" -eq 1 ] && [ "$round" -eq 0 ] && [ -f "$state" ]; then
@@ -986,8 +1018,9 @@ while :; do
         rtm_vp=$(printf '%s' "$_rtm_raw" | jget version_plan)
         rtm_va=$(printf '%s' "$_rtm_raw" | jget version_acceptance)
         rtm_ev=$(printf '%s' "$_rtm_raw" | jget evidence)
+        rtm_man=$(printf '%s' "$_rtm_raw" | jget manifest)
         if [ "$rtm_it" = "$iteration" ] && [ "$rtm_head" = "$(git -C "$repo" rev-parse HEAD)" ]; then
-            apply_saved_round_settings "$iteration" "$rtm_vc" "$rtm_vt" "$rtm_vp" "$rtm_va" "$rtm_ev" || exit 1
+            apply_saved_round_settings "$iteration" "$rtm_vc" "$rtm_vt" "$rtm_vp" "$rtm_va" "$rtm_ev" "$rtm_man" || exit 1
             _now_untracked=$(collect_rejection_untracked)
             preserve_untracked=$(merge_untracked "$preserve_untracked" "$_now_untracked")
             started_clean=0
