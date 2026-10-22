@@ -88,11 +88,18 @@ tools/auto-iterate/auto-iterate.sh --task <task-id> \
 
 ## 安装与版本
 
-权威文本在本仓库 `tools/auto-iterate/SKILL.md`（`version: 2`）。各宿主从仓库复制或链接，不要各自分叉：
+权威文本在本仓库 `tools/auto-iterate/SKILL.md`（`version: 2`）。各宿主从仓库链接，不要各自分叉：
 
-- Claude Code：`ln -sf <repo>/tools/auto-iterate/SKILL.md ~/.claude/skills/auto-iterate/SKILL.md`
-- opencode / 其他宿主：放进其 skill 目录（或直接引用本文件）；没有 skill 机制时用 L2 驱动。
-- 升级后核对 `head -5 tools/auto-iterate/SKILL.md` 的 `version`，三家应一致。
+```bash
+tools/auto-iterate/install.sh \
+  --skill-dir ~/.claude/skills/auto-iterate \
+  --bin-dir ~/.local/bin
+```
+
+`--check` 只校验链接，`--dry-run` 只打印计划，`--force` 才替换已有普通文件或不同链接。
+默认不会覆盖普通文件；安装器测试：`tools/auto-iterate/test-install.sh`。
+opencode / 其他宿主使用各自 skill 目录（或直接引用本文件）；没有 skill 机制时用 L2 驱动。
+升级后核对 `head -5 tools/auto-iterate/SKILL.md` 的 `version`，三家应一致。
 
 ## 硬性约束
 

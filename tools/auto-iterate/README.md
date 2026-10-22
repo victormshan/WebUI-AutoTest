@@ -5,17 +5,32 @@
 
 ## Install (one source of truth)
 
-Copy or link the same file into each host's skill directory; do not fork the text.
+Link the same files into each host; do not fork the text.
 
 ```bash
-# Claude Code (this machine)
-ln -sfn <repo>/tools/auto-iterate/SKILL.md ~/.claude/skills/auto-iterate/SKILL.md
+tools/auto-iterate/install.sh \
+  --skill-dir ~/.claude/skills/auto-iterate \
+  --bin-dir ~/.local/bin
 
-# opencode / other skill-aware hosts: use their skill directory, pointing at the same file.
-# Hosts without a skill mechanism: use the driver below or reference the file from AGENTS.md.
+tools/auto-iterate/install.sh --skill-dir ~/.claude/skills/auto-iterate --check
 ```
 
-Check the installed version with `head -5 tools/auto-iterate/SKILL.md` (`version: 2`).
+`--check` only verifies existing links; `--dry-run` prints the plan; `--force`
+replaces a regular file or a different symlink. Without `--force`, an existing
+regular file is never overwritten. Run `tools/auto-iterate/test-install.sh` to test
+the installer in a temporary directory.
+
+Manual equivalent:
+
+```bash
+ln -sfn <repo>/tools/auto-iterate/SKILL.md ~/.claude/skills/auto-iterate/SKILL.md
+ln -sfn <repo>/tools/auto-iterate/auto-iterate.sh ~/.local/bin/auto-iterate.sh
+```
+
+opencode / other skill-aware hosts use their own skill directory, pointing at the
+same file. Hosts without a skill mechanism use the driver below or reference the
+file from AGENTS.md. Check the installed version with
+`head -5 tools/auto-iterate/SKILL.md` (`version: 2`).
 
 ## Driver (L2)
 
