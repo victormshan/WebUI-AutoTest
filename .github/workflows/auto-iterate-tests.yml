@@ -1,0 +1,19 @@
+name: auto-iterate tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Installer
+        run: sh tools/auto-iterate/test-install.sh
+      - name: Codex adapter
+        run: tools/auto-iterate/test-codex-agent.sh
+      - name: Driver
+        run: sh tools/auto-iterate/test-driver.sh

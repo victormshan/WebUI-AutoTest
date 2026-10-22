@@ -148,7 +148,7 @@ STUB_REPO=$repo STUB_STATE=$state STUB_ARGS=$tmp/args PATH="$bin:$PATH" \
     --message demo --max 3 --log "$tmp/run.log" --report "$tmp/report.md" \
     --events "$tmp/events.jsonl" --provider fake --evidence "$tmp/evidence" \
     --verify-cmd true --notify-cmd "$tmp/notify.sh" --verify-range >"$tmp/out" 2>&1 \
-    || fail "driver exited $?"
+    || { cat "$tmp/out"; fail "driver exited $?"; }
 
 grep -q "finalized: demo" "$tmp/out" || fail "driver did not finalize"
 [ "$(git -C "$repo" rev-list --count HEAD)" -eq 3 ] || fail "expected base + 2 versions"
@@ -188,6 +188,18 @@ PY
 
 gitdir_main=$(git -C "$repo" rev-parse --absolute-git-dir)
 manifest_main=$gitdir_main/auto-iterate/versions.ndjson
+python3 - "$gitdir_main/auto-iterate/status/demo.json" <<'PY' || fail "run status is incomplete"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["task"] == "demo", d
+assert d["phase"] == "finalized", d
+assert d["iteration"] == 2, d
+assert d["exit_code"] == 0, d
+assert d["review"] == "v2-1", d
+assert d["verdict"] == "approved", d
+assert d["commit"], d
+assert d["started"].endswith("Z") and d["updated"].endswith("Z"), d
+PY
 python3 - "$manifest_main" <<'PY' || fail "versions.ndjson is incomplete"
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
@@ -466,6 +478,18 @@ out=$(STUB_REPO=$repo4 STUB_STATE=$state4 PATH="$bin:$PATH" \
     || fail "custom manifest check failed"
 printf '%s' "$out" | grep -q "check ok: task=check" || fail "custom manifest check output"
 [ ! -e "$tmp/check-manifest.ndjson" ] || fail "check created the manifest"
+out=$(STUB_REPO=$repo4 STUB_STATE=$state4 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --plan --task check --manifest "$tmp/plan-manifest.ndjson" 2>&1) \
+    || { printf '%s\n' "$out"; fail "plan mode failed"; }
+printf '%s' "$out" | grep -q "plan task=check status=running iteration=1" || fail "no plan task output"
+printf '%s' "$out" | grep -q "plan worktree=clean" || fail "plan misses worktree"
+printf '%s' "$out" | grep -q "plan manifest=$tmp/plan-manifest.ndjson" || fail "plan misses manifest"
+printf '%s' "$out" | grep -q "plan next=run-round" || fail "plan misses next action"
+[ ! -e "$tmp/plan-manifest.ndjson" ] || fail "plan created the manifest"
+[ ! -e "$repo4/auto-iterate" ] || fail "plan wrote state"
+out=$(STUB_REPO=$repo4 STUB_STATE=$state4 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --dry-run --task check 2>&1) || fail "dry-run alias failed"
+printf '%s' "$out" | grep -q "plan task=check" || fail "dry-run alias output"
 
 # --- v13: repo flock lease ---
 repo11=$tmp/repo11
@@ -1933,7 +1957,7 @@ STUB_REPO=$repo58 STUB_STATE=$state58 STUB_HISTORY=$tmp/history58.json \
     --resume --max 1 >"$tmp/out58" 2>&1
 rc=$?
 set -e
-[ "$rc" -ne 0 ] || fail "failed state persistence was ignored"
+[ "$rc" -ne 0 ] || { cat "$tmp/out58"; fail "failed state persistence was ignored"; }
 [ -f "$gitdir58/auto-iterate/resume58.json" ] || fail "failed state persistence removed the state"
 grep -q "cannot persist committed state" "$tmp/out58" || fail "state persistence failure was not reported"
 

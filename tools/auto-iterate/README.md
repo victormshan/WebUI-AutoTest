@@ -58,6 +58,15 @@ automatically) and
 Exit codes: `0` done/finalized, `2` lock held or pending state, `3` no external AI,
 `4` paused by the gate, `5` stopped on a rejection, `1` error.
 
+`--plan` (alias `--dry-run`) validates the same prerequisites as `--check` and
+prints the next round without writing state, logs, manifests or commits. A live
+run also writes `<gitdir>/auto-iterate/status/<task>.json` atomically on every
+phase change (task, phase, iteration, timestamps, exit code, review, commit, tag).
+The file is telemetry, not recovery state; the durable recovery file remains
+`<gitdir>/auto-iterate/<task>.json`.
+
+CI runs the three test scripts via `.github/workflows/auto-iterate-tests.yml`.
+
 ## Codex adapter
 
 `codex-agent.sh` is a thin host adapter; the driver and the gate are unchanged.

@@ -19,6 +19,7 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --events FILE      append one JSON object per line to FILE
   --review-timeout S kill the external review client after S seconds (0 = off, default 0)
   --check            validate prerequisites and exit without changing anything
+  --plan, --dry-run  validate and print the next round plan; change nothing
   --provider NAME    reviewer provider passed to `review run` (default: gate auto)
   --stop-on-reject   stop after a rejected review instead of retrying (exit 5)
   --allow-dirty      start even if the repository has uncommitted changes
@@ -63,7 +64,7 @@ TXT
 
 TASK=; AGENT=; MESSAGE=; EVIDENCE=; EVIDENCE_SET=0; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; FALLBACK=; FALLBACK_CHANNEL=claude-subagent; state=
 LOCK_TIMEOUT=0; lockfile=; lock_owner=; VERIFY_CMD=; VERIFY_TIMEOUT=0; VERIFY_CMD_SET=0; VERIFY_TIMEOUT_SET=0; VERSION_PLAN=; resume_review=0; resume_allow_dirty=0; keep_state=0; started_clean=0; durable_feedback=
-NOTIFY=; VERIFY_RANGE=0; NOTIFY_TIMEOUT=0; VERIFY_RANGE_TIMEOUT=0; notify_event=; notify_reason=; manifest=; MANIFEST=; MANIFEST_SET=0; commit=; tag=; rid=; verdict=; channel=; msg=; full=
+NOTIFY=; VERIFY_RANGE=0; NOTIFY_TIMEOUT=0; VERIFY_RANGE_TIMEOUT=0; notify_event=; notify_reason=; manifest=; MANIFEST=; MANIFEST_SET=0; commit=; tag=; rid=; verdict=; channel=; msg=; full=; PLAN=0; status_file=; run_started=
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -78,6 +79,7 @@ while [ $# -gt 0 ]; do
         --events) EVENTS=$2; shift 2 ;;
         --review-timeout) REVIEW_TIMEOUT=$2; shift 2 ;;
         --check) CHECK=1; shift ;;
+        --plan|--dry-run) PLAN=1; shift ;;
         --provider) PROVIDER=$2; shift 2 ;;
         --stop-on-reject) STOP_ON_REJECT=1; shift ;;
         --allow-dirty) ALLOW_DIRTY=1; shift ;;
@@ -98,7 +100,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -n "$TASK" ] || { usage >&2; exit 2; }
-if [ "$CHECK" -eq 0 ] && [ -z "$AGENT" ]; then
+if [ "$CHECK" -eq 0 ] && [ "$PLAN" -eq 0 ] && [ -z "$AGENT" ]; then
     usage >&2
     exit 2
 fi
@@ -152,7 +154,27 @@ for k in sys.argv[1:]:
     d = d[k]
 print(d if not isinstance(d, str) else d)' "$@" 2>/dev/null || true; }
 
-if [ "$CHECK" -eq 1 ]; then
+version_acceptance_for() {
+    [ -n "$VERSION_PLAN" ] || return 0
+    python3 - "$VERSION_PLAN" "$1" <<'PY'
+import json, sys
+plan, iteration = sys.argv[1], int(sys.argv[2])
+d = json.load(open(plan))
+v = ""
+if isinstance(d, dict):
+    v = d.get(str(iteration), d.get(iteration, ""))
+elif isinstance(d, list):
+    for e in d:
+        if isinstance(e, dict) and int(e.get("version", e.get("iteration", -1))) == iteration:
+            v = e.get("acceptance", "")
+            break
+if isinstance(v, dict):
+    v = v.get("acceptance", "")
+print("" if v is None else v)
+PY
+}
+
+if [ "$CHECK" -eq 1 ] || [ "$PLAN" -eq 1 ]; then
     for f in "$LOG" "$REPORT" "$EVENTS" "$EVIDENCE"; do
         [ -n "$f" ] || continue
         if [ -e "$f" ]; then
@@ -187,6 +209,21 @@ if [ "$CHECK" -eq 1 ]; then
         fi
         { [ -d "$_check_manifest_dir" ] && [ -w "$_check_manifest_dir" ]; } || {
             echo "check: cannot create manifest $_check_manifest" >&2; exit 1; }
+    fi
+    if [ "$PLAN" -eq 1 ]; then
+        _plan_dirty=$(git -C "$repo" status --porcelain)
+        _plan_manifest=${MANIFEST:-"$(git -C "$repo" rev-parse --absolute-git-dir)/auto-iterate/versions.ndjson"}
+        _plan_acc=$(version_acceptance_for "$iteration") || {
+            echo "plan: cannot read version acceptance for $iteration" >&2; exit 1; }
+        echo "plan task=$TASK status=$status iteration=$iteration repo=$repo"
+        if [ -z "$_plan_dirty" ]; then echo "plan worktree=clean"; else echo "plan worktree=dirty"; fi
+        echo "plan manifest=$_plan_manifest"
+        echo "plan verify=${VERIFY_CMD:-none}"
+        echo "plan verify_range=$VERIFY_RANGE"
+        echo "plan review_provider=${PROVIDER:-auto} fallback=${FALLBACK:-none} channel=$FALLBACK_CHANNEL"
+        echo "plan version_acceptance=${_plan_acc:-none}"
+        echo "plan next=run-round"
+        exit 0
     fi
     echo "check ok: task=$TASK status=$status iteration=$iteration repo=$repo"
     exit 0
@@ -268,6 +305,31 @@ for a in sys.argv[2:]:
 print(json.dumps(d,separators=(",",":")))' "$@" >>"$EVENTS"
 }
 
+write_run_status() {
+    _rs_phase=$1; _rs_exit=${2:-}
+    [ -n "$status_file" ] || return 0
+    mkdir -p "$(dirname "$status_file")" || return 0
+    python3 - "$status_file" "$TASK" "$_rs_phase" "${iteration:-0}" "${repo:-}" "$$" \
+        "${run_started:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" "${_rs_exit}" "${rid:-}" \
+        "${full:-${commit:-}}" "${tag:-}" "${verdict:-}" <<'PY'
+import datetime, json, os, sys
+p, task, phase, iteration, repo, pid, started, exit_code, review, commit, tag, verdict = sys.argv[1:13]
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+d = {"task": task, "phase": phase, "iteration": int(iteration or 0),
+     "repo": repo, "pid": int(pid), "started": started, "updated": now,
+     "exit_code": None if exit_code == "" else int(exit_code),
+     "review": review or "", "commit": commit or "", "tag": tag or "",
+     "verdict": verdict or ""}
+tmp = f"{p}.tmp.{os.getpid()}"
+with open(tmp, "w") as f:
+    json.dump(d, f, separators=(",", ":"))
+    f.write("\n")
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(tmp, p)
+PY
+}
+
 write_state() {
     _phase=$1; _it=$2; _rid=$3; _commit=$4; _tag=$5; _msg=$6; _chan=$7
     _head=${8:-}; _clean=${9:-0}; _fb=${10:-}; _tree=${11:-}; _untracked=${12-$preserve_untracked}
@@ -291,6 +353,9 @@ with open(tmp, "w") as f:
     os.fsync(f.fileno())
 os.replace(tmp, p)
 PY
+    _ws_rc=$?
+    write_run_status "$_phase" || true
+    return "$_ws_rc"
 }
 
 write_retry_meta() {
@@ -309,26 +374,6 @@ with open(tmp, "w") as f:
                "evidence": evidence, "manifest": manifest}, f)
     f.write("\n")
 os.replace(tmp, p)
-PY
-}
-
-version_acceptance_for() {
-    [ -n "$VERSION_PLAN" ] || return 0
-    python3 - "$VERSION_PLAN" "$1" <<'PY'
-import json, sys
-plan, iteration = sys.argv[1], int(sys.argv[2])
-d = json.load(open(plan))
-v = ""
-if isinstance(d, dict):
-    v = d.get(str(iteration), d.get(iteration, ""))
-elif isinstance(d, list):
-    for e in d:
-        if isinstance(e, dict) and int(e.get("version", e.get("iteration", -1))) == iteration:
-            v = e.get("acceptance", "")
-            break
-if isinstance(v, dict):
-    v = v.get("acceptance", "")
-print("" if v is None else v)
 PY
 }
 
@@ -946,6 +991,17 @@ report_header() {
 feedback=$(mktemp "${TMPDIR:-/tmp}/auto-iterate-feedback.XXXXXX")
 finish() {
     rc=$?
+    _fin_phase=$notify_event
+    if [ -z "$_fin_phase" ]; then
+        case "$rc" in
+            0) _fin_phase=done ;;
+            2) _fin_phase=blocked ;;
+            3|5) _fin_phase=stopped ;;
+            4) _fin_phase=paused ;;
+            *) _fin_phase=failed ;;
+        esac
+    fi
+    write_run_status "$_fin_phase" "$rc" || true
     release_lock
     rm -f "$feedback"
     notify_exit "$rc" || true
@@ -978,6 +1034,7 @@ while :; do
         worker_pidfile="$gitdir/auto-iterate/worker.pid"
         worker_lock="$gitdir/auto-iterate/worker.lock"
         manifest=${MANIFEST:-"$gitdir/auto-iterate/versions.ndjson"}
+        status_file="$gitdir/auto-iterate/status/$(printf '%s' "$TASK" | tr '/ ' '__').json"
     fi
     if [ "$status" != running ]; then
         if [ "$RESUME" -eq 1 ] && [ "$round" -eq 0 ] && [ -f "$state" ]; then
@@ -1009,6 +1066,10 @@ while :; do
         repo_after=$(printf '%s' "$show" | jget repo)
         [ "$repo_after" = "$repo" ] || {
             echo "task repo changed while waiting for the lock: $repo -> ${repo_after:-empty}" >&2; exit 1; }
+    fi
+    if [ "$round" -eq 0 ]; then
+        [ -n "$run_started" ] || run_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        write_run_status starting || true
     fi
     if [ -s "$durable_feedback" ]; then
         cat "$durable_feedback" >"$feedback"
