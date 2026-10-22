@@ -65,7 +65,25 @@ phase change (task, phase, iteration, timestamps, exit code, review, commit, tag
 The file is telemetry, not recovery state; the durable recovery file remains
 `<gitdir>/auto-iterate/<task>.json`.
 
-CI runs the three test scripts via `.github/workflows/auto-iterate-tests.yml`.
+CI runs the four test scripts via `.github/workflows/auto-iterate-tests.yml`.
+
+## Manifest integrity
+
+The approved-version manifest is append-only JSONL. `manifest-tool.sh` inspects and
+maintains it without touching the gate:
+
+```bash
+tools/auto-iterate/manifest-tool.sh validate <gitdir>/auto-iterate/versions.ndjson
+tools/auto-iterate/manifest-tool.sh repair   <gitdir>/auto-iterate/versions.ndjson
+tools/auto-iterate/manifest-tool.sh export   <gitdir>/auto-iterate/versions.ndjson csv
+```
+
+`validate` checks required fields, full commit ids, `iteration == version` and
+duplicate `task/version` pairs. `repair` atomically keeps valid lines and writes
+bad or duplicate lines to `versions.ndjson.corrupt.<timestamp>.<pid>`. `export`
+refuses a corrupt manifest. The driver lock is repo-wide; a second driver targeting
+the same worktree exits `2` before changing state, and this overlap is covered by
+`test-driver.sh`.
 
 ## Codex adapter
 

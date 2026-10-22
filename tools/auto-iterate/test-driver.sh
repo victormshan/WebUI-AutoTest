@@ -530,6 +530,54 @@ STUB_REPO=$repo11 STUB_STATE=$state11 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
 [ "$(git -C "$repo11" rev-list --count HEAD)" -eq 2 ] || fail "post-lock run did not commit"
 [ ! -f "$lock11.meta" ] || fail "lock metadata not removed after run"
 
+repo75=$tmp/repo75
+state75a=$tmp/state75a
+state75b=$tmp/state75b
+mkdir -p "$repo75"
+git -C "$repo75" init -q
+git -C "$repo75" config user.email test@example.com
+git -C "$repo75" config user.name test
+echo base > "$repo75/f"
+git -C "$repo75" add f
+git -C "$repo75" commit -qm base
+echo 0 > "$state75a"
+echo 0 > "$state75b"
+cat > "$tmp/agent-slow.sh" <<'AG'
+#!/bin/sh
+set -eu
+echo slow > "$AUTO_ITERATE_REPO/slow.txt"
+sleep 4
+AG
+chmod +x "$tmp/agent-slow.sh"
+STUB_REPO=$repo75 STUB_STATE=$state75a STUB_ITERATIONS=1 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task conc60a --agent-cmd "$tmp/agent-slow.sh" --max 1 \
+    >"$tmp/out60a" 2>&1 &
+pid60=$!
+gitdir75=$(git -C "$repo75" rev-parse --absolute-git-dir)
+i=0
+while [ ! -f "$gitdir75/auto-iterate/lock.meta" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
+[ -f "$gitdir75/auto-iterate/lock.meta" ] || fail "first driver never took the lock"
+set +e
+STUB_REPO=$repo75 STUB_STATE=$state75b PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task conc60b --agent-cmd true --max 1 \
+    >"$tmp/out60b" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail "concurrent driver exited $rc"
+grep -q "repo is locked by" "$tmp/out60b" || fail "concurrent driver did not report the lock"
+wait "$pid60" || fail "first concurrent driver failed"
+[ "$(git -C "$repo75" rev-list --count HEAD)" -eq 2 ] || fail "concurrent run committed wrong number"
+[ ! -f "$gitdir75/auto-iterate/lock.meta" ] || fail "concurrent lock metadata leaked"
+python3 - "$gitdir75/auto-iterate/status/conc60a.json" <<'PY' || fail "concurrent status is incomplete"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["phase"] == "finalized", d
+assert d["iteration"] == 1, d
+PY
+
 # --- v13: verify command ---
 repo12=$tmp/repo12
 state12=$tmp/state12
