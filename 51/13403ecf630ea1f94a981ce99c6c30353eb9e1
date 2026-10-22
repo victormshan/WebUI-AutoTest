@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: self-v20-1792688691
+version: 3/3
+commit: 5113403ecf630ea1f94a981ce99c6c30353eb9e1
+tree: 0c7b55ddeb6df46844b987530cb5544470811332
+parent: 163f4705cb48ba2f86c2ce3bd24607e85d56ca5c
+review: v3-1
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-22T17:46:09Z
+signature: 5Nl7JFcpW8eSg3IW/KgUaD+0p4HOCTpOtNwUS8C2q6CVwr2WZ3Ky32M9vN3vXRSuJ8hUoZ+tetE7dgA3RkdlCw==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
