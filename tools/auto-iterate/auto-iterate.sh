@@ -21,6 +21,7 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --check            validate prerequisites and exit without changing anything
   --provider NAME    reviewer provider passed to `review run` (default: gate auto)
   --stop-on-reject   stop after a rejected review instead of retrying (exit 5)
+  --allow-dirty      start even if the repository has uncommitted changes
 
 The agent command sees:
   AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_FEEDBACK
@@ -32,7 +33,7 @@ Exit: 0 done/finalized, 3 no external AI, 4 paused by the gate,
 TXT
 }
 
-TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0
+TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -49,6 +50,7 @@ while [ $# -gt 0 ]; do
         --check) CHECK=1; shift ;;
         --provider) PROVIDER=$2; shift 2 ;;
         --stop-on-reject) STOP_ON_REJECT=1; shift ;;
+        --allow-dirty) ALLOW_DIRTY=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -97,6 +99,10 @@ if [ "$CHECK" -eq 1 ]; then
         echo "check: $repo is not a git work tree" >&2
         exit 1
     }
+    if [ "$ALLOW_DIRTY" -eq 0 ]; then
+        dirty=$(git -C "$repo" status --porcelain)
+        [ -z "$dirty" ] || { printf 'check: %s has uncommitted changes:\n%s\n' "$repo" "$dirty" >&2; exit 1; }
+    fi
     echo "check ok: task=$TASK status=$status iteration=$iteration repo=$repo"
     exit 0
 fi
@@ -165,7 +171,18 @@ while :; do
     repo=$(printf '%s' "$show" | jget repo)
     [ -n "$repo" ] || { echo "task $TASK has no repo" >&2; exit 1; }
     report_header
+    if [ "$round" -eq 0 ] && [ "$ALLOW_DIRTY" -eq 0 ]; then
+        dirty=$(git -C "$repo" status --porcelain)
+        if [ -n "$dirty" ]; then
+            log "stop dirty-worktree"
+            emit stop reason="dirty-worktree"
+            printf 'worktree %s is dirty; commit/stash first or pass --allow-dirty:\n%s\n' "$repo" "$dirty" >&2
+            exit 1
+        fi
+    fi
 
+    goal=$(printf '%s' "$show" | jget goal)
+    acceptance=$(printf '%s' "$show" | jget final_acceptance)
     commit=-
     tag=-
     channel=-
@@ -182,7 +199,8 @@ while :; do
     round_start=$(date +%s)
 
     export AUTO_ITERATE_REPO="$repo" AUTO_ITERATE_ITERATION="$iteration" \
-        AUTO_ITERATE_FEEDBACK="$feedback"
+        AUTO_ITERATE_FEEDBACK="$feedback" AUTO_ITERATE_GOAL="$goal" \
+        AUTO_ITERATE_ACCEPTANCE="$acceptance" AUTO_ITERATE_TASK="$TASK"
     set +e
     if [ "$AGENT_TIMEOUT" -gt 0 ]; then
         ( cd "$repo" && timeout "$AGENT_TIMEOUT" sh -c "$AGENT" )

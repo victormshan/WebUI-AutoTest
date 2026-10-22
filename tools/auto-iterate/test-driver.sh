@@ -28,7 +28,7 @@ state=${STUB_STATE:?}
 n=$(cat "$state" 2>/dev/null || echo 0)
 [ -n "$n" ] || n=0
 case "$1" in
-    task) printf '{"status":"running","current_iteration":%s,"repo":"%s","stop_reason":null}\n' "$((n+1))" "$STUB_REPO" ;;
+    task) printf '{"status":"running","current_iteration":%s,"repo":"%s","stop_reason":null,"goal":"g","final_acceptance":"a"}\n' "$((n+1))" "$STUB_REPO" ;;
     stage) git -C "$STUB_REPO" add -A; printf '{"tree":"t","base":"b"}\n' ;;
     review)
         if [ "${STUB_SLOW_REVIEW:-0}" = 1 ]; then sleep 5; fi
@@ -49,6 +49,8 @@ cat > "$tmp/agent.sh" <<'AG'
 #!/bin/sh
 set -eu
 echo "v$AUTO_ITERATE_ITERATION" > "$AUTO_ITERATE_REPO/out.txt"
+printf '%s\n' "${AUTO_ITERATE_GOAL:-}" > "$AUTO_ITERATE_REPO/goal.txt"
+printf '%s\n' "${AUTO_ITERATE_ACCEPTANCE:-}" > "$AUTO_ITERATE_REPO/acceptance.txt"
 AG
 chmod +x "$tmp/agent.sh"
 
@@ -62,6 +64,8 @@ grep -q "finalized: demo" "$tmp/out" || fail "driver did not finalize"
 [ "$(git -C "$repo" rev-list --count HEAD)" -eq 3 ] || fail "expected base + 2 versions"
 [ "$(git -C "$repo" tag | wc -l)" -eq 2 ] || fail "expected 2 tags"
 [ "$(cat "$repo/out.txt")" = v2 ] || fail "agent output is not v2"
+[ "$(cat "$repo/goal.txt")" = g ] || fail "goal was not injected"
+[ "$(cat "$repo/acceptance.txt")" = a ] || fail "acceptance was not injected"
 grep -q "round=1 " "$tmp/run.log" || fail "log misses round 1"
 grep -q "round=2 " "$tmp/run.log" || fail "log misses round 2"
 grep -q "verdict=approved" "$tmp/run.log" || fail "log misses approved verdict"
@@ -163,6 +167,30 @@ elapsed=$(( $(date +%s) - start ))
 [ "$elapsed" -le 3 ] || fail "review timeout case took ${elapsed}s"
 grep -q "review timed out after 1s" "$tmp/out3" || fail "no review timeout message"
 [ "$(git -C "$repo3" rev-list --count HEAD)" -eq 1 ] || fail "review timeout committed"
+
+repo6=$tmp/repo6
+state6=$tmp/state6
+mkdir -p "$repo6"
+git -C "$repo6" init -q
+git -C "$repo6" config user.email test@example.com
+git -C "$repo6" config user.name test
+echo base > "$repo6/f"
+git -C "$repo6" add f
+git -C "$repo6" commit -qm base
+echo dirty > "$repo6/dirty.txt"
+echo 0 > "$state6"
+
+set +e
+STUB_REPO=$repo6 STUB_STATE=$state6 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --check --task check >"$tmp/out6" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "dirty check exited $rc"
+grep -q "uncommitted changes" "$tmp/out6" || fail "no dirty check message"
+
+out=$(STUB_REPO=$repo6 STUB_STATE=$state6 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --check --allow-dirty --task check 2>&1) || fail "allow-dirty check failed"
+printf '%s' "$out" | grep -q "check ok" || fail "allow-dirty check output"
 
 repo4=$tmp/repo4
 state4=$tmp/state4

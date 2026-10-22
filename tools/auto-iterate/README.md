@@ -61,6 +61,10 @@ report row.
 The verdict log line and the `review` event also carry the channel and provider the
 service used, so the report records which reviewer decided each version.
 
+The agent also receives `AUTO_ITERATE_GOAL`, `AUTO_ITERATE_ACCEPTANCE` and
+`AUTO_ITERATE_TASK`. The driver refuses to start on a dirty worktree unless
+`--allow-dirty` is given, so pre-existing edits cannot silently enter version 1.
+
 `--stop-on-reject` stops as soon as a review is not approved (exit 5), leaving the
 task running so a human can inspect the feedback instead of burning more rounds.
 
