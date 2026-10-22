@@ -146,7 +146,7 @@ STUB_REPO=$repo STUB_STATE=$state STUB_ARGS=$tmp/args PATH="$bin:$PATH" \
     "$here/auto-iterate.sh" --task demo --agent-cmd "$tmp/agent.sh" \
     --message demo --max 3 --log "$tmp/run.log" --report "$tmp/report.md" \
     --events "$tmp/events.jsonl" --provider fake --evidence "$tmp/evidence" \
-    --notify-cmd "$tmp/notify.sh" --verify-range >"$tmp/out" 2>&1 \
+    --verify-cmd true --notify-cmd "$tmp/notify.sh" --verify-range >"$tmp/out" 2>&1 \
     || fail "driver exited $?"
 
 grep -q "finalized: demo" "$tmp/out" || fail "driver did not finalize"
@@ -174,8 +174,10 @@ python3 - "$tmp/events.jsonl" <<'PY' || fail "events are incomplete"
 import json, sys
 ev = [json.loads(line) for line in open(sys.argv[1])]
 kinds = [e["event"] for e in ev]
-for kind in ("start", "round", "review", "approved", "record", "finalized"):
+for kind in ("start", "round", "verify", "review", "approved", "record", "finalized"):
     assert kind in kinds, (kind, kinds)
+verify = next(e for e in ev if e["event"] == "verify")
+assert verify["ok"] == "true", verify
 review = next(e for e in ev if e["event"] == "review")
 assert review["channel"] == "stub", review
 assert review["provider"] == "stub-provider", review

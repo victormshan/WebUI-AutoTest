@@ -870,7 +870,7 @@ verify_worktree() {
         return 1
     fi
     log "verify ok"
-    emit verify ok
+    emit verify ok=true
     return 0
 }
 
