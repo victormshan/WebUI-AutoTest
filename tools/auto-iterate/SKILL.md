@@ -1,10 +1,10 @@
 ---
 name: auto-iterate
-version: 2
+version: 3
 description: Autonomously evolve a target repo through N versions under the dsh-web-relay three-party protocol — a main agent implements, an external AI from another vendor reviews each version, and the independent review-gate service (its own system user, private store, signed attestations) decides whether a version may be committed, with a reviewer-strength gate, 3-strike circuit breaker and commit+tag per approved version. Vendor-neutral: the main agent may be Claude, opencode or Codex. Use when the user asks to auto-iterate / 自动迭代 / 自动演进 a project through multiple versions with minimal supervision. Do not use for a single one-off change.
 ---
 
-# Auto-Iterate（实施者中立版，v2）
+# Auto-Iterate（实施者中立版，v3）
 
 对齐 dsh-web-relay 的三方协议：**主 agent**（实施者，任一厂商）／**外部审核者**（另一家厂商的模型）／**用户**（定目标与验收、外部审核不可用时人工把关、终态验收）。
 
@@ -88,7 +88,7 @@ tools/auto-iterate/auto-iterate.sh --task <task-id> \
 
 ## 安装与版本
 
-权威文本在本仓库 `tools/auto-iterate/SKILL.md`（`version: 2`）。各宿主从仓库链接，不要各自分叉：
+权威文本在本仓库 `tools/auto-iterate/SKILL.md`（`version: 3`）。各宿主从仓库链接，不要各自分叉：
 
 ```bash
 tools/auto-iterate/install.sh \

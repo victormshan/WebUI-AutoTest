@@ -1,6 +1,6 @@
 # Auto-iterate tooling
 
-`SKILL.md` is the authoritative, vendor-neutral workflow (v2). The gate is still
+`SKILL.md` is the authoritative, vendor-neutral workflow (v3). The gate is still
 `crates/review-gate`; this directory only holds the protocol text and the optional driver.
 
 ## Install (one source of truth)
@@ -30,7 +30,7 @@ ln -sfn <repo>/tools/auto-iterate/auto-iterate.sh ~/.local/bin/auto-iterate.sh
 opencode / other skill-aware hosts use their own skill directory, pointing at the
 same file. Hosts without a skill mechanism use the driver below or reference the
 file from AGENTS.md. Check the installed version with
-`head -5 tools/auto-iterate/SKILL.md` (`version: 2`).
+`head -5 tools/auto-iterate/SKILL.md` (`version: 3`).
 
 ## Driver (L2)
 
