@@ -75,7 +75,7 @@ tools/auto-iterate/auto-iterate.sh --task <task-id> \
   --agent-cmd '<跑一轮实施+测试的命令>' --message '<提交说明模板>'
 ```
 
-它循环：读任务 → 跑 agent → stage → review run → commit/tag/record → 按 action 继续；把上一轮审核全文通过 `$AUTO_ITERATE_FEEDBACK` 交给下一轮，把 goal/acceptance/task 通过 `$AUTO_ITERATE_GOAL`、`$AUTO_ITERATE_ACCEPTANCE`、`$AUTO_ITERATE_TASK` 交给实施者；启动时默认拒绝脏工作区（`--allow-dirty` 可放开）。`/loop` + `ScheduleWakeup`、`step_relay_*` 都只是 Claude 侧的可选适配器，不是协议前提。
+它循环：读任务 → 跑 agent → stage → review run → commit/tag/record → 按 action 继续；把上一轮审核全文通过 `$AUTO_ITERATE_FEEDBACK` 交给下一轮，把 goal/acceptance/task 通过 `$AUTO_ITERATE_GOAL`、`$AUTO_ITERATE_ACCEPTANCE`、`$AUTO_ITERATE_TASK` 交给实施者；启动时默认拒绝脏工作区（`--allow-dirty` 可放开）；审核通过到 `record` 之间会在 git dir 写恢复状态，崩溃后带 `--resume` 重跑可补记，未带 `--resume` 会拒绝继续。`/loop` + `ScheduleWakeup`、`step_relay_*` 都只是 Claude 侧的可选适配器，不是协议前提。
 
 ## 审核者不可用时的替代（需用户明确授权）
 

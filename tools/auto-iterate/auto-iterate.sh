@@ -22,6 +22,7 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --provider NAME    reviewer provider passed to `review run` (default: gate auto)
   --stop-on-reject   stop after a rejected review instead of retrying (exit 5)
   --allow-dirty      start even if the repository has uncommitted changes
+  --resume           finish a pending record/commit from a crashed run
 
 The agent command sees:
   AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_FEEDBACK
@@ -33,7 +34,7 @@ Exit: 0 done/finalized, 3 no external AI, 4 paused by the gate,
 TXT
 }
 
-TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0
+TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; state=
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -51,6 +52,7 @@ while [ $# -gt 0 ]; do
         --provider) PROVIDER=$2; shift 2 ;;
         --stop-on-reject) STOP_ON_REJECT=1; shift ;;
         --allow-dirty) ALLOW_DIRTY=1; shift ;;
+        --resume) RESUME=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -131,6 +133,66 @@ for a in sys.argv[2:]:
 print(json.dumps(d,separators=(",",":")))' "$@" >>"$EVENTS"
 }
 
+write_state() {
+    _phase=$1; _it=$2; _rid=$3; _commit=$4; _tag=$5; _msg=$6; _chan=$7
+    mkdir -p "$(dirname "$state")"
+    python3 - "$state" "$_phase" "$_it" "$_rid" "$_commit" "$_tag" "$_msg" "$_chan" <<'PY'
+import json, sys
+p, phase, iteration, review, commit, tag, message, channel = sys.argv[1:]
+with open(p, "w") as f:
+    json.dump({"phase": phase, "iteration": int(iteration), "review": review,
+               "commit": commit, "tag": tag, "message": message,
+               "channel": channel}, f)
+    f.write("\n")
+PY
+}
+
+resume_pending() {
+    raw=$(cat "$state")
+    rphase=$(printf '%s' "$raw" | jget phase)
+    rit=$(printf '%s' "$raw" | jget iteration)
+    rrid=$(printf '%s' "$raw" | jget review)
+    rcommit=$(printf '%s' "$raw" | jget commit)
+    rtag=$(printf '%s' "$raw" | jget tag)
+    rmsg=$(printf '%s' "$raw" | jget message)
+    rchan=$(printf '%s' "$raw" | jget channel)
+    log "resume phase=$rphase iteration=$rit review=$rrid"
+    case "$rphase" in
+        committed)
+            [ -n "$rrid" ] && [ -n "$rcommit" ] && [ -n "$rtag" ] || { echo "resume: committed state is incomplete" >&2; return 1; }
+            git -C "$repo" rev-parse "$rcommit^{commit}" >/dev/null 2>&1 || { echo "resume: commit $rcommit is missing" >&2; return 1; }
+            out=$(review-gate record --id "$TASK" --review "$rrid" --commit "$rcommit" --tag "$rtag") || {
+                echo "resume: record failed; state kept" >&2; return 1; }
+            ;;
+        reviewed)
+            [ -n "$rrid" ] || { echo "resume: reviewed state has no review" >&2; return 1; }
+            if git -C "$repo" diff --cached --quiet; then
+                rcommit=$(git -C "$repo" rev-parse HEAD)
+            else
+                [ -n "$rmsg" ] || rmsg="auto-iterate: version $rit"
+                git -C "$repo" commit -q -m "$rmsg" || { echo "resume: commit failed" >&2; return 1; }
+                rcommit=$(git -C "$repo" rev-parse HEAD)
+            fi
+            rtag="$TAG_PREFIX/$TASK/v$rit"
+            if ! git -C "$repo" rev-parse "refs/tags/$rtag" >/dev/null 2>&1; then
+                git -C "$repo" tag "$rtag" || { echo "resume: tag failed" >&2; return 1; }
+            fi
+            out=$(review-gate record --id "$TASK" --review "$rrid" --commit "$rcommit" --tag "$rtag") || {
+                echo "resume: record failed; state kept" >&2; return 1; }
+            ;;
+        *) echo "resume: unknown phase ${rphase:-none}" >&2; return 1 ;;
+    esac
+    raction=$(printf '%s' "$out" | jget action)
+    rm -f "$state"
+    log "resume recorded review=$rrid commit=$rcommit tag=$rtag action=$raction"
+    emit resume review="$rrid" commit="$rcommit" tag="$rtag" action="$raction"
+    if [ "$report_init" -eq 1 ]; then
+        printf '| %s | %s | approved | %s | %s | %s | %s | - |\n' \
+            "$rit" "$rrid" "$raction" "${rcommit:--}" "${rtag:--}" "${rchan:--}" >>"$REPORT"
+    fi
+    return 0
+}
+
 report_header() {
     [ -n "$REPORT" ] && [ "$report_init" -eq 0 ] || return 0
     {
@@ -171,6 +233,24 @@ while :; do
     repo=$(printf '%s' "$show" | jget repo)
     [ -n "$repo" ] || { echo "task $TASK has no repo" >&2; exit 1; }
     report_header
+    if [ -z "$state" ]; then
+        gitdir=$(git -C "$repo" rev-parse --absolute-git-dir)
+        state="$gitdir/auto-iterate/$(printf '%s' "$TASK" | tr '/ ' '__').json"
+    fi
+    if [ "$round" -eq 0 ] && [ -f "$state" ]; then
+        if [ "$RESUME" -eq 0 ]; then
+            log "stop pending-state"
+            emit stop reason="pending-state"
+            echo "pending state $state; rerun with --resume" >&2
+            exit 2
+        fi
+        resume_pending || exit 1
+        show=$(review-gate task show --id "$TASK")
+        status=$(printf '%s' "$show" | jget status)
+        [ "$status" = running ] || { log "stop status=${status:-unknown}"; echo "task $TASK is ${status:-unknown}; stopping"; exit 0; }
+        iteration=$(printf '%s' "$show" | jget current_iteration)
+        repo=$(printf '%s' "$show" | jget repo)
+    fi
     if [ "$round" -eq 0 ] && [ "$ALLOW_DIRTY" -eq 0 ]; then
         dirty=$(git -C "$repo" status --porcelain)
         if [ -n "$dirty" ]; then
@@ -267,13 +347,17 @@ while :; do
 
     if [ "$verdict" = approved ]; then
         msg=${MESSAGE:-"auto-iterate: version $iteration"}
+        write_state reviewed "$iteration" "$rid" "" "" "$msg" "$channel"
         git -C "$repo" commit -q -m "$msg"
         tag="$TAG_PREFIX/$TASK/v$iteration"
         git -C "$repo" tag "$tag"
+        full=$(git -C "$repo" rev-parse HEAD)
         commit=$(git -C "$repo" rev-parse --short HEAD)
+        write_state committed "$iteration" "$rid" "$full" "$tag" "$msg" "$channel"
         log "approved review=$rid commit=$commit tag=$tag"
         emit approved review="$rid" commit="$commit" tag="$tag"
         out=$(review-gate record --id "$TASK" --review "$rid" --commit HEAD --tag "$tag")
+        rm -f "$state"
     else
         printf '%s\n' "$text" > "$feedback"
         log "rejected review=$rid"

@@ -28,7 +28,10 @@ state=${STUB_STATE:?}
 n=$(cat "$state" 2>/dev/null || echo 0)
 [ -n "$n" ] || n=0
 case "$1" in
-    task) printf '{"status":"running","current_iteration":%s,"repo":"%s","stop_reason":null,"goal":"g","final_acceptance":"a"}\n' "$((n+1))" "$STUB_REPO" ;;
+    task)
+        if [ -f "$state.done" ]; then st=done; else st=running; fi
+        printf '{"status":"%s","current_iteration":%s,"repo":"%s","stop_reason":null,"goal":"g","final_acceptance":"a"}\n' "$st" "$((n+1))" "$STUB_REPO"
+        ;;
     stage) git -C "$STUB_REPO" add -A; printf '{"tree":"t","base":"b"}\n' ;;
     review)
         if [ "${STUB_SLOW_REVIEW:-0}" = 1 ]; then sleep 5; fi
@@ -37,8 +40,14 @@ case "$1" in
         printf '{"record":{"id":"v%s-1","verdict":"%s","text":"%s","channel":"stub","provider":"stub-provider","model":"stub-model"}}\n' "$((n+1))" "$v" "$t"
         ;;
     record)
-        if [ "$n" -eq 0 ]; then printf '{"action":"start_round"}\n'; else printf '{"action":"finalize"}\n'; fi
+        if [ "${STUB_FAIL_RECORD:-0}" = 1 ] && [ ! -f "${STUB_FAIL_MARKER:-/nonexistent}" ]; then
+            : > "${STUB_FAIL_MARKER:-/dev/null}"
+            exit 1
+        fi
+        if [ "$((n+1))" -ge "${STUB_ITERATIONS:-2}" ]; then act=finalize; else act=start_round; fi
+        printf '{"action":"%s"}\n' "$act"
         echo $((n+1)) > "$state"
+        if [ "$act" = finalize ]; then : > "$state.done"; fi
         ;;
     *) echo "stub: unsupported $*" >&2; exit 1 ;;
 esac
@@ -191,6 +200,74 @@ grep -q "uncommitted changes" "$tmp/out6" || fail "no dirty check message"
 out=$(STUB_REPO=$repo6 STUB_STATE=$state6 PATH="$bin:$PATH" \
     "$here/auto-iterate.sh" --check --allow-dirty --task check 2>&1) || fail "allow-dirty check failed"
 printf '%s' "$out" | grep -q "check ok" || fail "allow-dirty check output"
+
+repo7=$tmp/repo7
+state7=$tmp/state7
+mkdir -p "$repo7"
+git -C "$repo7" init -q
+git -C "$repo7" config user.email test@example.com
+git -C "$repo7" config user.name test
+echo base > "$repo7/f"
+git -C "$repo7" add f
+git -C "$repo7" commit -qm base
+echo 0 > "$state7"
+
+set +e
+STUB_REPO=$repo7 STUB_STATE=$state7 STUB_FAIL_RECORD=1 STUB_FAIL_MARKER=$tmp/marker \
+    PATH="$bin:$PATH" "$here/auto-iterate.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
+    --message "resume v1" --max 1 >"$tmp/out7" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "failed record exited $rc"
+[ "$(git -C "$repo7" rev-list --count HEAD)" -eq 2 ] || fail "failed record did not commit"
+[ "$(git -C "$repo7" tag | wc -l)" -eq 1 ] || fail "failed record did not tag"
+gitdir7=$(git -C "$repo7" rev-parse --absolute-git-dir)
+state7file=$gitdir7/auto-iterate/resume7.json
+[ -f "$state7file" ] || fail "no pending state after failed record"
+python3 - "$state7file" <<'PY' || fail "pending state is wrong"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["phase"] == "committed", d
+assert d["iteration"] == 1, d
+assert d["review"] == "v1-1", d
+PY
+set +e
+STUB_REPO=$repo7 STUB_STATE=$state7 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
+    --max 1 >"$tmp/out7b" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail "pending state without --resume exited $rc"
+grep -q "pending state" "$tmp/out7b" || fail "no pending state message"
+STUB_REPO=$repo7 STUB_STATE=$state7 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
+    --resume --max 1 >"$tmp/out7c" 2>&1 || fail "resume committed failed"
+grep -q "task resume7 is done" "$tmp/out7c" || fail "resume did not observe done"
+[ ! -f "$state7file" ] || fail "state not cleared after resume"
+
+repo8=$tmp/repo8
+state8=$tmp/state8
+mkdir -p "$repo8"
+git -C "$repo8" init -q
+git -C "$repo8" config user.email test@example.com
+git -C "$repo8" config user.name test
+echo base > "$repo8/f"
+git -C "$repo8" add f
+git -C "$repo8" commit -qm base
+echo change > "$repo8/f2"
+git -C "$repo8" add f2
+echo 0 > "$state8"
+gitdir8=$(git -C "$repo8" rev-parse --absolute-git-dir)
+mkdir -p "$gitdir8/auto-iterate"
+printf '{"phase":"reviewed","iteration":1,"review":"v1-1","commit":"","tag":"","message":"resume reviewed v1","channel":"stub"}\n' \
+    > "$gitdir8/auto-iterate/resume8.json"
+STUB_REPO=$repo8 STUB_STATE=$state8 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task resume8 --agent-cmd "$tmp/agent.sh" \
+    --resume --max 1 >"$tmp/out8" 2>&1 || fail "resume reviewed failed"
+[ "$(git -C "$repo8" rev-list --count HEAD)" -eq 2 ] || fail "resume reviewed did not commit"
+[ "$(git -C "$repo8" show HEAD:f2)" = change ] || fail "resume reviewed lost the staged change"
+[ "$(git -C "$repo8" tag)" = "auto-iterate/resume8/v1" ] || fail "resume reviewed tag missing"
+[ ! -f "$gitdir8/auto-iterate/resume8.json" ] || fail "reviewed state not cleared"
 
 repo4=$tmp/repo4
 state4=$tmp/state4

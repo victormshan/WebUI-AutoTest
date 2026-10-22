@@ -65,6 +65,12 @@ The agent also receives `AUTO_ITERATE_GOAL`, `AUTO_ITERATE_ACCEPTANCE` and
 `AUTO_ITERATE_TASK`. The driver refuses to start on a dirty worktree unless
 `--allow-dirty` is given, so pre-existing edits cannot silently enter version 1.
 
+Before an approved version is committed, the driver writes a small state file under
+the repository's git dir (`auto-iterate/<task>.json`). If it crashes between commit
+and `record`, the next run refuses to start and prints the path; rerun with
+`--resume` to finish the pending `record` (or commit/tag a reviewed but uncommitted
+tree) before continuing. A successful `record` removes the state file.
+
 `--stop-on-reject` stops as soon as a review is not approved (exit 5), leaving the
 task running so a human can inspect the feedback instead of burning more rounds.
 
