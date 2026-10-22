@@ -43,6 +43,12 @@ case "$1" in
         git -C "$STUB_REPO" add -A
         printf '{"tree":"t","base":"b"}\n'
         ;;
+    pubkey) printf 'stub-pub\n' ;;
+    verify-range)
+        [ -z "${STUB_VERIFY_RANGE_ARGS:-}" ] || printf '%s\n' "$*" > "$STUB_VERIFY_RANGE_ARGS"
+        [ "${STUB_FAIL_VERIFY_RANGE:-0}" != 1 ] || exit 1
+        printf 'verified\n'
+        ;;
     review)
         case "$2" in
             run)
@@ -116,10 +122,31 @@ printf '%s\n' "${AUTO_ITERATE_EVIDENCE:-}" > "$AUTO_ITERATE_REPO/evidence.txt"
 AG
 chmod +x "$tmp/agent.sh"
 
+cat > "$tmp/notify.sh" <<'AG'
+#!/bin/sh
+set -eu
+{
+    printf 'event=%s\n' "${AUTO_ITERATE_EVENT:-}"
+    printf 'exit_code=%s\n' "${AUTO_ITERATE_EXIT_CODE:-}"
+    printf 'reason=%s\n' "${AUTO_ITERATE_REASON:-}"
+    printf 'task=%s\n' "${AUTO_ITERATE_TASK:-}"
+    printf 'iteration=%s\n' "${AUTO_ITERATE_ITERATION:-}"
+    printf 'commit=%s\n' "${AUTO_ITERATE_COMMIT:-}"
+    printf 'tag=%s\n' "${AUTO_ITERATE_TAG:-}"
+    printf 'review=%s\n' "${AUTO_ITERATE_REVIEW:-}"
+    printf 'verdict=%s\n' "${AUTO_ITERATE_VERDICT:-}"
+    printf 'channel=%s\n' "${AUTO_ITERATE_CHANNEL:-}"
+    printf 'message=%s\n' "${AUTO_ITERATE_MESSAGE:-}"
+} > "${STUB_NOTIFY_OUT:?}"
+AG
+chmod +x "$tmp/notify.sh"
+
 STUB_REPO=$repo STUB_STATE=$state STUB_ARGS=$tmp/args PATH="$bin:$PATH" \
+    STUB_NOTIFY_OUT=$tmp/notify.out STUB_VERIFY_RANGE_ARGS=$tmp/vrargs \
     "$here/auto-iterate.sh" --task demo --agent-cmd "$tmp/agent.sh" \
     --message demo --max 3 --log "$tmp/run.log" --report "$tmp/report.md" \
-    --events "$tmp/events.jsonl" --provider fake --evidence "$tmp/evidence" >"$tmp/out" 2>&1 \
+    --events "$tmp/events.jsonl" --provider fake --evidence "$tmp/evidence" \
+    --notify-cmd "$tmp/notify.sh" --verify-range >"$tmp/out" 2>&1 \
     || fail "driver exited $?"
 
 grep -q "finalized: demo" "$tmp/out" || fail "driver did not finalize"
@@ -155,6 +182,38 @@ assert review["provider"] == "stub-provider", review
 done = next(e for e in ev if e["event"] == "round_done")
 assert done["duration"].isdigit(), done
 PY
+
+gitdir_main=$(git -C "$repo" rev-parse --absolute-git-dir)
+manifest_main=$gitdir_main/auto-iterate/versions.ndjson
+python3 - "$manifest_main" <<'PY' || fail "versions.ndjson is incomplete"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+assert len(rows) == 2, rows
+for i, row in enumerate(rows, 1):
+    assert row["task"] == "demo", row
+    assert row["version"] == i, row
+    assert row["iteration"] == i, row
+    assert row["review"] == f"v{i}-1", row
+    assert row["verdict"] == "approved", row
+    assert row["tag"] == f"auto-iterate/demo/v{i}", row
+    assert row["channel"] == "stub", row
+    assert row["provider"] == "stub-provider", row
+    assert row["message"] == "demo", row
+    assert len(row["commit"]) == 40, row
+    assert row["at"].endswith("Z"), row
+PY
+grep -q '^event=finalized$' "$tmp/notify.out" || fail "notify event is not finalized"
+grep -q '^exit_code=0$' "$tmp/notify.out" || fail "notify exit code is wrong"
+grep -q '^task=demo$' "$tmp/notify.out" || fail "notify task is wrong"
+grep -q '^iteration=2$' "$tmp/notify.out" || fail "notify iteration is wrong"
+grep -q '^tag=auto-iterate/demo/v2$' "$tmp/notify.out" || fail "notify tag is wrong"
+grep -q '^review=v2-1$' "$tmp/notify.out" || fail "notify review is wrong"
+grep -q '^verdict=approved$' "$tmp/notify.out" || fail "notify verdict is wrong"
+grep -q '^channel=stub$' "$tmp/notify.out" || fail "notify channel is wrong"
+grep -q -- '--pubkey stub-pub' "$tmp/vrargs" || fail "verify-range pubkey was not forwarded"
+grep -Eq '[0-9a-f]{40}\.\.HEAD$' "$tmp/vrargs" || fail "verify-range got no range"
+root_main=$(git -C "$repo" rev-list --max-parents=0 HEAD | head -n 1)
+grep -q " $root_main\.\.HEAD$" "$tmp/vrargs" || fail "verify-range used the wrong base"
 
 repo2=$tmp/repo2
 state2=$tmp/state2
@@ -298,6 +357,15 @@ STUB_REPO=$repo7 STUB_STATE=$state7 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
     --resume --max 1 >"$tmp/out7c" 2>&1 || fail "resume committed failed"
 grep -q "task resume7 is done" "$tmp/out7c" || fail "resume did not observe done"
 [ ! -f "$state7file" ] || fail "state not cleared after resume"
+manifest7=$gitdir7/auto-iterate/versions.ndjson
+python3 - "$manifest7" <<'PY' || fail "resume did not append versions.ndjson"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+assert len(rows) == 1, rows
+assert rows[0]["task"] == "resume7", rows
+assert rows[0]["version"] == 1, rows
+assert rows[0]["review"] == "v1-1", rows
+PY
 
 repo8=$tmp/repo8
 state8=$tmp/state8
@@ -2229,5 +2297,30 @@ STUB_REPO=$repo71 STUB_STATE=$state71 STUB_HISTORY=$tmp/history71.json STUB_REJE
     "$here/auto-iterate.sh" --task review71 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out71" 2>&1 || fail "staged user file resume failed"
 [ -e "$repo71/user-staged71.txt" ] || fail "newly staged user file was deleted"
+
+# Finalize verify-range failure is reported without undoing the approved commit.
+repo72=$tmp/repo72
+state72=$tmp/state72
+mkdir -p "$repo72"
+git -C "$repo72" init -q
+git -C "$repo72" config user.email test@example.com
+git -C "$repo72" config user.name test
+echo base > "$repo72/f"
+git -C "$repo72" add f
+git -C "$repo72" commit -qm base
+echo 0 > "$state72"
+set +e
+STUB_REPO=$repo72 STUB_STATE=$state72 STUB_ITERATIONS=1 STUB_FAIL_VERIFY_RANGE=1 PATH="$bin:$PATH" \
+    STUB_NOTIFY_OUT=$tmp/notify72.out \
+    "$here/auto-iterate.sh" --task vr72 --agent-cmd "$tmp/agent.sh" \
+    --verify-range --notify-cmd "$tmp/notify.sh" --max 1 >"$tmp/out72" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "failed verify-range exited $rc"
+grep -q "verify-range failed" "$tmp/out72" || fail "no verify-range failure message"
+[ "$(git -C "$repo72" rev-list --count HEAD)" -eq 2 ] || fail "verify-range failure rolled back the commit"
+[ "$(git -C "$repo72" tag | wc -l)" -eq 1 ] || fail "verify-range failure lost the tag"
+grep -q '^event=failed$' "$tmp/notify72.out" || fail "failed run did not notify failure"
+grep -q '^exit_code=1$' "$tmp/notify72.out" || fail "failure notification has the wrong exit code"
 
 echo "test-driver: ok"

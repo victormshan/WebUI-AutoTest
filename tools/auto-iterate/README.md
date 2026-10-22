@@ -114,6 +114,21 @@ report row.
 The verdict log line and the `review` event also carry the channel and provider the
 service used, so the report records which reviewer decided each version.
 
+Every approved version is appended to `auto-iterate/versions.ndjson` in the worktree's
+git dir. The file is rewritten atomically and is idempotent by task and iteration, so
+a crash after `record` can be resumed without duplicating an entry. Each line records
+the task, version, review id, commit, tag, channel, provider, message, tree,
+per-version acceptance and verify command. Rejected versions are not added.
+
+`--notify-cmd CMD` runs once when the driver exits, with `AUTO_ITERATE_EVENT`
+(`finalized`, `paused`, `failed`, `stopped`, `done` or `blocked`), the exit code,
+reason, task, repo, iteration, commit, tag, review, verdict, channel and message.
+It is best-effort: a notification failure is reported but does not change the
+driver's exit status. `--verify-range` runs `review-gate verify-range` after a
+finalize record, using the gate pubkey and the range starting at the first approved
+task commit (or the repository root when task history is empty). A failed range
+verification exits 1 after the approved commit/tag are already recorded.
+
 The agent also receives `AUTO_ITERATE_GOAL`, `AUTO_ITERATE_ACCEPTANCE` and
 `AUTO_ITERATE_TASK`. The driver refuses to start on a dirty worktree unless
 `--allow-dirty` is given, so pre-existing edits cannot silently enter version 1.

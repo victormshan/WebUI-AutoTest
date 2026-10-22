@@ -29,6 +29,15 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --verify-cmd CMD   run CMD in the repo after the agent; failure stops the round
   --verify-timeout S kill --verify-cmd after S seconds (0 = off, default 0)
   --version-plan F   JSON object mapping version number to acceptance text
+  --notify-cmd CMD   run CMD once when the driver exits (notification hook)
+  --verify-range     after finalize, verify every task commit with review-gate
+
+The notify command sees AUTO_ITERATE_EVENT (finalized/paused/failed/stopped/
+done/blocked), AUTO_ITERATE_EXIT_CODE, AUTO_ITERATE_REASON, AUTO_ITERATE_TASK,
+AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_COMMIT,
+AUTO_ITERATE_TAG, AUTO_ITERATE_REVIEW, AUTO_ITERATE_VERDICT,
+AUTO_ITERATE_CHANNEL and AUTO_ITERATE_MESSAGE. A notification failure is
+reported but never changes the driver's exit status.
 
 The agent command sees:
   AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_FEEDBACK,
@@ -51,6 +60,7 @@ TXT
 
 TASK=; AGENT=; MESSAGE=; EVIDENCE=; EVIDENCE_SET=0; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; FALLBACK=; FALLBACK_CHANNEL=claude-subagent; state=
 LOCK_TIMEOUT=0; lockfile=; lock_owner=; VERIFY_CMD=; VERIFY_TIMEOUT=0; VERIFY_CMD_SET=0; VERIFY_TIMEOUT_SET=0; VERSION_PLAN=; resume_review=0; resume_allow_dirty=0; keep_state=0; started_clean=0; durable_feedback=
+NOTIFY=; VERIFY_RANGE=0; notify_event=; notify_reason=; manifest=; commit=; tag=; rid=; verdict=; channel=; msg=; full=
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -75,6 +85,8 @@ while [ $# -gt 0 ]; do
         --verify-cmd) VERIFY_CMD=$2; VERIFY_CMD_SET=1; shift 2 ;;
         --verify-timeout) VERIFY_TIMEOUT=$2; VERIFY_TIMEOUT_SET=1; shift 2 ;;
         --version-plan) VERSION_PLAN=$2; shift 2 ;;
+        --notify-cmd) NOTIFY=$2; shift 2 ;;
+        --verify-range) VERIFY_RANGE=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -168,8 +180,50 @@ if [ -n "$EVIDENCE" ]; then
 fi
 
 log() {
+    case "$*" in
+        stop\ *) _logline=$*; notify_reason=${_logline#stop } ;;
+        finalized) notify_event=finalized ;;
+        paused\ *) notify_event=paused ;;
+    esac
     [ -n "$LOG" ] || return 0
     printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG"
+}
+
+notify_exit() {
+    _nrc=$1
+    [ -n "$NOTIFY" ] || return 0
+    _ne=$notify_event
+    if [ -z "$_ne" ]; then
+        case "$_nrc" in
+            0) _ne=done ;;
+            2) _ne=blocked ;;
+            3) _ne=stopped ;;
+            4) _ne=paused ;;
+            5) _ne=stopped ;;
+            *) _ne=failed ;;
+        esac
+    fi
+    _nr=${notify_reason:-exit-$_nrc}
+    _ndir=${repo:-$(pwd)}
+    if ! (
+        cd "$_ndir" 2>/dev/null || cd /
+        AUTO_ITERATE_EVENT="$_ne" \
+        AUTO_ITERATE_EXIT_CODE="$_nrc" \
+        AUTO_ITERATE_REASON="$_nr" \
+        AUTO_ITERATE_TASK="$TASK" \
+        AUTO_ITERATE_REPO="${repo:-}" \
+        AUTO_ITERATE_ITERATION="${iteration:-}" \
+        AUTO_ITERATE_COMMIT="${full:-${commit:-}}" \
+        AUTO_ITERATE_TAG="${tag:-}" \
+        AUTO_ITERATE_REVIEW="${rid:-}" \
+        AUTO_ITERATE_VERDICT="${verdict:-}" \
+        AUTO_ITERATE_CHANNEL="${channel:-}" \
+        AUTO_ITERATE_MESSAGE="${msg:-}" \
+        sh -c "$NOTIFY"
+    ) 9>&- 8>&-; then
+        echo "notify command failed" >&2
+    fi
+    return 0
 }
 
 emit() {
@@ -339,6 +393,99 @@ PY
 clean_untracked() {
     [ -n "$1" ] || return 0
     printf '%s' "$1" | base64 -d | ( cd "$repo" || exit 1; xargs -0 -r rm -rf -- )
+}
+
+write_manifest() {
+    _mi=$1; _mrid=$2; _mcommit=$3; _mtag=$4; _mchan=$5; _mmsg=$6
+    _mprov=$7; _mtree=$8; _macc=$9; _mvcmd=${10:-}
+    [ -n "$manifest" ] || return 1
+    mkdir -p "$(dirname "$manifest")" || return 1
+    python3 - "$manifest" "$TASK" "$_mi" "$_mrid" "$_mcommit" "$_mtag" \
+        "$_mchan" "$_mprov" "$_mmsg" "$_mtree" "$_macc" "$_mvcmd" <<'PY'
+import datetime, json, os, sys
+p, task, iteration, review, commit, tag, channel, provider, message, tree, acceptance, verify_cmd = sys.argv[1:13]
+entry = {
+    "at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "task": task,
+    "version": int(iteration),
+    "iteration": int(iteration),
+    "review": review,
+    "verdict": "approved",
+    "commit": commit,
+    "tag": tag,
+    "channel": channel,
+    "provider": provider,
+    "message": message,
+    "tree": tree,
+    "acceptance": acceptance,
+    "verify_cmd": verify_cmd,
+}
+entries = []
+if os.path.exists(p):
+    with open(p) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                entries.append(json.loads(line))
+            except ValueError:
+                raise SystemExit(f"invalid manifest line in {p}")
+for e in entries:
+    if e.get("task") == task and int(e.get("iteration", -1)) == int(iteration):
+        if e.get("review") != review or e.get("commit") != commit or e.get("tag") != tag:
+            raise SystemExit(f"manifest entry for {task} v{iteration} differs")
+        raise SystemExit(0)
+entries.append(entry)
+tmp = f"{p}.tmp.{os.getpid()}"
+with open(tmp, "w") as f:
+    for e in entries:
+        f.write(json.dumps(e, ensure_ascii=False, separators=(",", ":")) + "\n")
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(tmp, p)
+try:
+    dfd = os.open(os.path.dirname(p) or ".", os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+except OSError:
+    pass
+PY
+}
+
+task_range() {
+    _show=$(review-gate task show --id "$TASK") || return 1
+    _first=$(printf '%s' "$_show" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+for h in d.get("history") or []:
+    if h.get("commit"):
+        print(h["commit"]); break' 2>/dev/null) || return 1
+    if [ -n "$_first" ]; then
+        if _base=$(git -C "$repo" rev-parse "$_first^" 2>/dev/null); then
+            :
+        else
+            _base=$_first
+        fi
+    else
+        _base=$(git -C "$repo" rev-list --max-parents=0 HEAD | head -n 1) || return 1
+    fi
+    [ -n "$_base" ] || return 1
+    printf '%s..HEAD\n' "$_base"
+}
+
+verify_range() {
+    [ "$VERIFY_RANGE" -eq 1 ] || return 0
+    _range=$(task_range) || { echo "verify-range: cannot determine task range" >&2; return 1; }
+    _pub=$(review-gate pubkey 2>/dev/null | tr -d '\r\n') || { echo "verify-range: cannot read gate pubkey" >&2; return 1; }
+    [ -n "$_pub" ] || { echo "verify-range: empty gate pubkey" >&2; return 1; }
+    if ! review-gate verify-range --repo "$repo" --pubkey "$_pub" "$_range"; then
+        echo "verify-range failed for $_range" >&2
+        return 1
+    fi
+    log "verify-range ok range=$_range"
+    emit verify_range range="$_range"
+    return 0
 }
 
 host_name() { hostname 2>/dev/null || uname -n 2>/dev/null || echo unknown; }
@@ -662,6 +809,11 @@ resume_pending() {
     esac
     [ -n "$raction" ] || raction=$(printf '%s' "$out" | jget action)
     if [ "$rphase" = committed ] || [ "$rphase" = reviewed ]; then
+        write_manifest "$rit" "$rrid" "$rcommit" "$rtag" "$rchan" "$rmsg" "" "$rtree" "$rva" "$rvc" \
+            || { echo "resume: cannot append approved version to $manifest" >&2; return 1; }
+        if [ "$raction" = finalize ] && [ "$VERIFY_RANGE" -eq 1 ]; then
+            verify_range || { echo "resume: verify-range failed" >&2; return 1; }
+        fi
         rm -f "$durable_feedback" || { echo "resume: cannot remove durable feedback" >&2; return 1; }
         rm -f "$retry_meta" || { echo "resume: cannot remove retry metadata" >&2; return 1; }
         : > "$feedback" || { echo "resume: cannot clear feedback" >&2; return 1; }
@@ -741,6 +893,7 @@ finish() {
     rc=$?
     release_lock
     rm -f "$feedback"
+    notify_exit "$rc" || true
     if [ -n "$REPORT" ]; then
         {
             printf '\n'
@@ -769,11 +922,13 @@ while :; do
         retry_meta="$gitdir/auto-iterate/$(printf '%s' "$TASK" | tr '/ ' '__').retry"
         worker_pidfile="$gitdir/auto-iterate/worker.pid"
         worker_lock="$gitdir/auto-iterate/worker.lock"
+        manifest="$gitdir/auto-iterate/versions.ndjson"
     fi
     if [ "$status" != running ]; then
         if [ "$RESUME" -eq 1 ] && [ "$round" -eq 0 ] && [ -f "$state" ]; then
             :
         else
+            [ "$status" = paused ] && notify_event=paused
             log "stop status=${status:-unknown}"
             emit stop reason="status" status="${status:-unknown}"
             echo "task $TASK is ${status:-unknown}; stopping"
@@ -788,6 +943,7 @@ while :; do
         status=$(printf '%s' "$show" | jget status)
         if [ "$status" != running ]; then
             [ "$RESUME" -eq 1 ] && [ "$round" -eq 0 ] && [ -f "$state" ] || {
+                [ "$status" = paused ] && notify_event=paused
                 log "stop status=${status:-unknown}"
                 emit stop reason="status" status="${status:-unknown}"
                 echo "task $TASK is ${status:-unknown}; stopping"
@@ -865,6 +1021,7 @@ while :; do
     channel=-
     round=$((round + 1))
     if [ "$round" -gt "$MAX" ]; then
+        notify_event=stopped
         log "stop max-rounds"
         emit stop reason="max-rounds"
         echo "reached --max $MAX; stopping with the task still running" >&2
@@ -1073,6 +1230,8 @@ while :; do
         log "approved review=$rid commit=$commit tag=$tag"
         emit approved review="$rid" commit="$commit" tag="$tag"
         out=$(review-gate record --id "$TASK" --review "$rid" --commit HEAD --tag "$tag")
+        write_manifest "$iteration" "$rid" "$full" "$tag" "$channel" "$msg" "$rprovider" "$reviewed_tree" "$version_acceptance" "$VERIFY_CMD" \
+            || { echo "cannot append approved version to $manifest; state kept" >&2; exit 1; }
         rm -f "$durable_feedback"
         rm -f "$retry_meta"
         : > "$feedback"
@@ -1118,9 +1277,14 @@ while :; do
     fi
     case "$action" in
         start_round|retry_same_round) continue ;;
-        finalize) log "finalized"; emit finalized; echo "finalized: $TASK"; exit 0 ;;
+        finalize)
+            if [ "$VERIFY_RANGE" -eq 1 ]; then
+                verify_range || exit 1
+            fi
+            log "finalized"; emit finalized; echo "finalized: $TASK"; exit 0 ;;
         pause)
             reason=$(review-gate task show --id "$TASK" | jget stop_reason)
+            notify_event=paused
             log "paused reason=${reason:-none}"
             echo "paused by the gate: ${reason:-no reason}" >&2
             exit 4
