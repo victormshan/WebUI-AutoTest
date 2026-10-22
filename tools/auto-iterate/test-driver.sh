@@ -147,7 +147,7 @@ STUB_REPO=$repo STUB_STATE=$state STUB_ARGS=$tmp/args PATH="$bin:$PATH" \
     "$here/auto-iterate.sh" --task demo --agent-cmd "$tmp/agent.sh" \
     --message demo --max 3 --log "$tmp/run.log" --report "$tmp/report.md" \
     --events "$tmp/events.jsonl" --provider fake --evidence "$tmp/evidence" \
-    --verify-cmd true --notify-cmd "$tmp/notify.sh" --verify-range >"$tmp/out" 2>&1 \
+    --verify-cmd true --notify-cmd "$tmp/notify.sh" --notify-events finalized --verify-range >"$tmp/out" 2>&1 \
     || { cat "$tmp/out"; fail "driver exited $?"; }
 
 grep -q "finalized: demo" "$tmp/out" || fail "driver did not finalize"
@@ -225,6 +225,34 @@ grep -q '^tag=auto-iterate/demo/v2$' "$tmp/notify.out" || fail "notify tag is wr
 grep -q '^review=v2-1$' "$tmp/notify.out" || fail "notify review is wrong"
 grep -q '^verdict=approved$' "$tmp/notify.out" || fail "notify verdict is wrong"
 grep -q '^channel=stub$' "$tmp/notify.out" || fail "notify channel is wrong"
+
+repo76=$tmp/repo76
+state76=$tmp/state76
+mkdir -p "$repo76"
+git -C "$repo76" init -q
+git -C "$repo76" config user.email test@example.com
+git -C "$repo76" config user.name test
+echo base > "$repo76/f"
+git -C "$repo76" add f
+git -C "$repo76" commit -qm base
+echo 0 > "$state76"
+cat > "$tmp/retry-notify.sh" <<'AG'
+#!/bin/sh
+set -eu
+n=0
+[ ! -f "$STUB_NOTIFY_COUNT" ] || n=$(cat "$STUB_NOTIFY_COUNT")
+n=$((n + 1))
+echo "$n" > "$STUB_NOTIFY_COUNT"
+[ "$n" -ge 3 ]
+AG
+chmod +x "$tmp/retry-notify.sh"
+STUB_REPO=$repo76 STUB_STATE=$state76 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
+    STUB_NOTIFY_COUNT=$tmp/notify76.count \
+    "$here/auto-iterate.sh" --task notify76 --agent-cmd "$tmp/agent.sh" --max 1 \
+    --notify-cmd "$tmp/retry-notify.sh" --notify-retries 2 --notify-retry-delay 0 \
+    >"$tmp/out76" 2>&1 || fail "notify retry run failed"
+[ "$(cat "$tmp/notify76.count")" = 3 ] || fail "notify retry count is not 3"
+grep -q "finalized: notify76" "$tmp/out76" || fail "notify retry run did not finalize"
 grep -q -- '--pubkey stub-pub' "$tmp/vrargs" || fail "verify-range pubkey was not forwarded"
 grep -Eq '[0-9a-f]{40}\.\.HEAD$' "$tmp/vrargs" || fail "verify-range got no range"
 root_main=$(git -C "$repo" rev-list --max-parents=0 HEAD | head -n 1)
@@ -328,6 +356,16 @@ grep -q "uncommitted changes" "$tmp/out6" || fail "no dirty check message"
 out=$(STUB_REPO=$repo6 STUB_STATE=$state6 PATH="$bin:$PATH" \
     "$here/auto-iterate.sh" --check --allow-dirty --task check 2>&1) || fail "allow-dirty check failed"
 printf '%s' "$out" | grep -q "check ok" || fail "allow-dirty check output"
+
+rm -f "$tmp/notify6.out"
+set +e
+STUB_REPO=$repo6 STUB_STATE=$state6 STUB_NOTIFY_OUT=$tmp/notify6.out PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task filter6 --agent-cmd true \
+    --notify-cmd "$tmp/notify.sh" --notify-events finalized --max 1 >"$tmp/outfilter6" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "dirty filtered run exited $rc"
+[ ! -e "$tmp/notify6.out" ] || fail "notify filter did not suppress failed event"
 
 repo7=$tmp/repo7
 state7=$tmp/state7

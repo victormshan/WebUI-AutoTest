@@ -37,6 +37,46 @@ grep -q "refusing to replace regular file" "$tmp/conflict.out" || fail "no confl
 [ -L "$conflict/auto-iterate.sh" ] || fail "force did not replace the regular file"
 [ -L "$conflict/codex-agent.sh" ] || fail "force did not install the adapter"
 
+upgrade=$tmp/upgrade
+mkdir -p "$tmp/old/tools/auto-iterate" "$upgrade"
+echo old > "$tmp/old/tools/auto-iterate/SKILL.md"
+ln -s "$tmp/old/tools/auto-iterate/SKILL.md" "$upgrade/SKILL.md"
+"$here/install.sh" --skill-dir "$upgrade" --upgrade >"$tmp/upgrade.out" ||
+    fail "upgrade failed"
+[ "$(readlink "$upgrade/SKILL.md")" = "$here/SKILL.md" ] || fail "upgrade did not migrate the link"
+grep -q "^upgrade ok$" "$tmp/upgrade.out" || fail "upgrade did not report success"
+echo keep > "$upgrade/user.conf"
+set +e
+"$here/install.sh" --skill-dir "$upgrade" --upgrade >"$tmp/upgrade2.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "idempotent upgrade exited $rc"
+[ "$(cat "$upgrade/user.conf")" = keep ] || fail "upgrade disturbed user data"
+
+un=$tmp/uninstall
+"$here/install.sh" --skill-dir "$un/skills" --bin-dir "$un/bin" >/dev/null || fail "uninstall setup failed"
+echo keep > "$un/bin/user-tool"
+"$here/install.sh" --skill-dir "$un/skills" --bin-dir "$un/bin" --uninstall >"$tmp/un.out" ||
+    fail "uninstall failed"
+[ ! -e "$un/skills/SKILL.md" ] || fail "uninstall kept the skill link"
+[ ! -e "$un/bin/auto-iterate.sh" ] || fail "uninstall kept the driver link"
+[ ! -e "$un/bin/codex-agent.sh" ] || fail "uninstall kept the adapter link"
+[ "$(cat "$un/bin/user-tool")" = keep ] || fail "uninstall removed a foreign file"
+"$here/install.sh" --skill-dir "$un/skills" --bin-dir "$un/bin" --uninstall >"$tmp/un2.out" ||
+    fail "idempotent uninstall failed"
+grep -q "^absent: $un/bin/auto-iterate.sh$" "$tmp/un2.out" || fail "idempotent uninstall output"
+
+foreign=$tmp/foreign
+mkdir -p "$foreign"
+echo keep > "$foreign/auto-iterate.sh"
+set +e
+"$here/install.sh" --bin-dir "$foreign" --uninstall >"$tmp/foreign.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "foreign uninstall exited $rc"
+grep -q "not ours" "$tmp/foreign.out" || fail "foreign uninstall did not warn"
+[ "$(cat "$foreign/auto-iterate.sh")" = keep ] || fail "foreign uninstall removed a regular file"
+
 dry=$tmp/dry
 "$here/install.sh" --skill-dir "$dry" --dry-run >"$tmp/dry.out" || fail "dry-run failed"
 [ ! -e "$dry/SKILL.md" ] || fail "dry-run created a link"

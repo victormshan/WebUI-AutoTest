@@ -16,9 +16,11 @@ tools/auto-iterate/install.sh --skill-dir ~/.claude/skills/auto-iterate --check
 ```
 
 `--check` only verifies existing links; `--dry-run` prints the plan; `--force`
-replaces a regular file or a different symlink. Without `--force`, an existing
-regular file is never overwritten. Run `tools/auto-iterate/test-install.sh` to test
-the installer in a temporary directory.
+replaces a regular file or a different symlink. `--upgrade` migrates a symlink
+from another `tools/auto-iterate/` checkout but never touches foreign files.
+`--uninstall` removes only links that point at this checkout and leaves regular
+files or other installations alone. Run `tools/auto-iterate/test-install.sh` to
+test all lifecycle paths in a temporary directory.
 
 Manual equivalent:
 
@@ -144,6 +146,12 @@ code. A crash still leaves a usable file.
 
 `--events FILE` appends one JSON object per line (`ts`, `event`, plus event fields)
 for machine consumption: start, round, review, approved, rejected, record, stop.
+
+`--notify-events LIST` restricts the exit hook to terminal events (`finalized`,
+`paused`, `failed`, `stopped`, `done`, `blocked`). `--notify-retries N` retries a
+non-zero hook, and `--notify-retry-delay S` sets the base for exponential backoff
+(1s, 2s, 4s, ... capped at 30s). Notification failure never changes the driver exit
+status.
 
 `--review-timeout S` bounds the `review run` client (0 disables it). On timeout the
 driver exits 3 and leaves the task and staged tree intact; the service may still

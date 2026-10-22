@@ -34,14 +34,19 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --verify-range     after finalize, verify every task commit with review-gate
   --manifest FILE    approved-version manifest (default <gitdir>/auto-iterate/versions.ndjson)
   --notify-timeout S kill --notify-cmd after S seconds (0 = off, default 0)
+  --notify-events LIST comma-separated terminal events to notify (default: all)
+  --notify-retries N retry a failed notify command up to N times (default 0)
+  --notify-retry-delay S base backoff seconds, doubled per retry (default 1)
   --verify-range-timeout S kill verify-range after S seconds (0 = off, default 0)
 
 The notify command sees AUTO_ITERATE_EVENT (finalized/paused/failed/stopped/
 done/blocked), AUTO_ITERATE_EXIT_CODE, AUTO_ITERATE_REASON, AUTO_ITERATE_TASK,
 AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_COMMIT,
 AUTO_ITERATE_TAG, AUTO_ITERATE_REVIEW, AUTO_ITERATE_VERDICT,
-AUTO_ITERATE_CHANNEL and AUTO_ITERATE_MESSAGE. A notification failure is
-reported but never changes the driver's exit status.
+AUTO_ITERATE_CHANNEL and AUTO_ITERATE_MESSAGE. --notify-events can restrict
+delivery to finalized, paused, failed, stopped, done or blocked. A failed command
+is retried with exponential backoff; failure is reported but never changes the
+driver's exit status.
 
 The agent command sees:
   AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_FEEDBACK,
@@ -64,7 +69,7 @@ TXT
 
 TASK=; AGENT=; MESSAGE=; EVIDENCE=; EVIDENCE_SET=0; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; FALLBACK=; FALLBACK_CHANNEL=claude-subagent; state=
 LOCK_TIMEOUT=0; lockfile=; lock_owner=; VERIFY_CMD=; VERIFY_TIMEOUT=0; VERIFY_CMD_SET=0; VERIFY_TIMEOUT_SET=0; VERSION_PLAN=; resume_review=0; resume_allow_dirty=0; keep_state=0; started_clean=0; durable_feedback=
-NOTIFY=; VERIFY_RANGE=0; NOTIFY_TIMEOUT=0; VERIFY_RANGE_TIMEOUT=0; notify_event=; notify_reason=; manifest=; MANIFEST=; MANIFEST_SET=0; commit=; tag=; rid=; verdict=; channel=; msg=; full=; PLAN=0; status_file=; run_started=
+NOTIFY=; VERIFY_RANGE=0; NOTIFY_TIMEOUT=0; VERIFY_RANGE_TIMEOUT=0; NOTIFY_EVENTS=; NOTIFY_RETRIES=0; NOTIFY_RETRY_DELAY=1; notify_event=; notify_reason=; manifest=; MANIFEST=; MANIFEST_SET=0; commit=; tag=; rid=; verdict=; channel=; msg=; full=; PLAN=0; status_file=; run_started=
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -94,6 +99,9 @@ while [ $# -gt 0 ]; do
         --verify-range) VERIFY_RANGE=1; shift ;;
         --manifest) MANIFEST=$2; MANIFEST_SET=1; shift 2 ;;
         --notify-timeout) NOTIFY_TIMEOUT=$2; shift 2 ;;
+        --notify-events) NOTIFY_EVENTS=$2; shift 2 ;;
+        --notify-retries) NOTIFY_RETRIES=$2; shift 2 ;;
+        --notify-retry-delay) NOTIFY_RETRY_DELAY=$2; shift 2 ;;
         --verify-range-timeout) VERIFY_RANGE_TIMEOUT=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -115,6 +123,20 @@ case "$REVIEW_TIMEOUT" in ''|*[!0-9]*) echo "--review-timeout must be an integer
 case "$LOCK_TIMEOUT" in ''|*[!0-9]*) echo "--lock-timeout must be an integer" >&2; exit 2 ;; esac
 case "$VERIFY_TIMEOUT" in ''|*[!0-9]*) echo "--verify-timeout must be an integer" >&2; exit 2 ;; esac
 case "$NOTIFY_TIMEOUT" in ''|*[!0-9]*) echo "--notify-timeout must be an integer" >&2; exit 2 ;; esac
+case "$NOTIFY_RETRIES" in ''|*[!0-9]*) echo "--notify-retries must be an integer" >&2; exit 2 ;; esac
+[ "$NOTIFY_RETRIES" -le 5 ] || { echo "--notify-retries must be <= 5" >&2; exit 2; }
+case "$NOTIFY_RETRY_DELAY" in ''|*[!0-9]*) echo "--notify-retry-delay must be an integer" >&2; exit 2 ;; esac
+if [ -n "$NOTIFY_EVENTS" ]; then
+    old_ifs=$IFS
+    IFS=,
+    for _ne in $NOTIFY_EVENTS; do
+        case "$_ne" in
+            finalized|paused|failed|stopped|done|blocked) ;;
+            *) IFS=$old_ifs; echo "unknown --notify-events value: $_ne" >&2; exit 2 ;;
+        esac
+    done
+    IFS=$old_ifs
+fi
 case "$VERIFY_RANGE_TIMEOUT" in ''|*[!0-9]*) echo "--verify-range-timeout must be an integer" >&2; exit 2 ;; esac
 case "$FALLBACK_CHANNEL" in claude-subagent|self-review) ;; *) echo "--fallback-channel must be claude-subagent or self-review" >&2; exit 2 ;; esac
 if [ "$AGENT_TIMEOUT" -gt 0 ] || [ "$REVIEW_TIMEOUT" -gt 0 ] || [ "$VERIFY_TIMEOUT" -gt 0 ] || [ "$NOTIFY_TIMEOUT" -gt 0 ] || [ "$VERIFY_RANGE_TIMEOUT" -gt 0 ]; then
@@ -265,8 +287,16 @@ notify_exit() {
             *) _ne=failed ;;
         esac
     fi
+    if [ -n "$NOTIFY_EVENTS" ]; then
+        case ",$NOTIFY_EVENTS," in
+            *",$_ne,"*) ;;
+            *) return 0 ;;
+        esac
+    fi
     _nr=${notify_reason:-exit-$_nrc}
     _ndir=${repo:-$(pwd)}
+    _ntry=0
+    while :; do
     _nrc2=0
     (
         cd "$_ndir" 2>/dev/null || cd /
@@ -287,10 +317,19 @@ notify_exit() {
         fi
         exec sh -c "$NOTIFY"
     ) 9>&- 8>&- || _nrc2=$?
+    [ "$_nrc2" -eq 0 ] && break
+    [ "$_ntry" -ge "$NOTIFY_RETRIES" ] && break
+    _ntry=$((_ntry + 1))
+    if [ "$NOTIFY_RETRY_DELAY" -gt 0 ]; then
+        _ndelay=$((NOTIFY_RETRY_DELAY * (1 << (_ntry - 1))))
+        [ "$_ndelay" -le 30 ] || _ndelay=30
+        sleep "$_ndelay"
+    fi
+    done
     if [ "$_nrc2" -eq 124 ] && [ "$NOTIFY_TIMEOUT" -gt 0 ]; then
         echo "notify command timed out after ${NOTIFY_TIMEOUT}s" >&2
     elif [ "$_nrc2" -ne 0 ]; then
-        echo "notify command failed" >&2
+        echo "notify command failed after $((_ntry + 1)) attempt(s)" >&2
     fi
     return 0
 }
