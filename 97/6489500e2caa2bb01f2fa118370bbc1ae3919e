@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: self-v16-1792678208
+version: 2/3
+commit: 976489500e2caa2bb01f2fa118370bbc1ae3919e
+tree: e2c8f387e6ce8b41df839370ddb403b7475ea2b4
+parent: 8735b122f9274f77035c8a16e63c8faa77a9ed03
+review: v2-1
+reviewer: self-review/self-review
+verdict: approved
+at: 2026-10-22T14:29:39Z
+signature: f/dpoWkua7zAiHoEmQGCf4Sa3QTJXNRiz/qFA/g2kjpmehoejhyVi0r26RpbCusdYsPh5OMbdCYPVqA/WU4LDw==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
