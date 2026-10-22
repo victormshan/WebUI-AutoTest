@@ -75,7 +75,7 @@ tools/auto-iterate/auto-iterate.sh --task <task-id> \
   --agent-cmd '<跑一轮实施+测试的命令>' --message '<提交说明模板>'
 ```
 
-它循环：读任务 → 跑 agent → stage → review run → commit/tag/record → 按 action 继续；把上一轮审核全文通过 `$AUTO_ITERATE_FEEDBACK` 交给下一轮，把 goal/acceptance/task 通过 `$AUTO_ITERATE_GOAL`、`$AUTO_ITERATE_ACCEPTANCE`、`$AUTO_ITERATE_TASK` 交给实施者；启动时默认拒绝脏工作区（`--allow-dirty` 可放开）；审核通过到 `record` 之间会在 git dir 写恢复状态，崩溃后带 `--resume` 重跑可补记，未带 `--resume` 会拒绝继续。`/loop` + `ScheduleWakeup`、`step_relay_*` 都只是 Claude 侧的可选适配器，不是协议前提。
+它循环：读任务 → 跑 agent → 可选 verify → stage → review run → commit/tag/record → 按 action 继续；把上一轮审核全文通过 `$AUTO_ITERATE_FEEDBACK` 交给下一轮（通过后清空），把 goal/acceptance/task 通过 `$AUTO_ITERATE_GOAL`、`$AUTO_ITERATE_ACCEPTANCE`、`$AUTO_ITERATE_TASK` 交给实施者，把 `--evidence` 路径通过 `$AUTO_ITERATE_EVIDENCE` 交给实施者。启动时默认拒绝脏工作区（`--allow-dirty` 可放开），并用内核 `flock` 锁住每个 worktree（`--lock-timeout`，第二个驱动退出 2；进程退出自动释放）；每轮写 `agent → staged → reviewing → reviewed → committed`（或 `rejected`）状态，崩溃后带 `--resume` 可补记/重审/重跑，未带 `--resume` 会拒绝继续；打回后清理本轮新增的未跟踪文件（开始时干净时）。`--verify-cmd` 在 agent 后独立验收，失败保留改动并退出 1；`--version-plan` 把每版验收文本经 `$AUTO_ITERATE_VERSION_ACCEPTANCE` 交给实施者并写入证据。Codex 宿主用 `tools/auto-iterate/codex-agent.sh`（WSL 仓库优先 native Linux CLI）。`/loop` + `ScheduleWakeup`、`step_relay_*` 都只是 Claude 侧的可选适配器，不是协议前提。
 
 ## 审核者不可用时的替代（需用户明确授权）
 

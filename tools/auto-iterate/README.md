@@ -33,10 +33,62 @@ tools/auto-iterate/auto-iterate.sh \
   --evidence /tmp/evidence.txt
 ```
 
-The agent sees `AUTO_ITERATE_REPO`, `AUTO_ITERATE_ITERATION` and
-`AUTO_ITERATE_FEEDBACK` (previous review text, empty on round 1). Exit codes:
-`0` done/finalized, `3` no external AI, `4` paused by the gate,
-`5` stopped on a rejection, `1` error.
+The agent sees `AUTO_ITERATE_REPO`, `AUTO_ITERATE_ITERATION`,
+`AUTO_ITERATE_FEEDBACK` (previous review text; cleared after an approved version),
+`AUTO_ITERATE_GOAL`, `AUTO_ITERATE_ACCEPTANCE`, `AUTO_ITERATE_TASK`,
+`AUTO_ITERATE_EVIDENCE` (an absolute `--evidence` path; when `--version-plan` or
+`--verify-cmd` is used without `--evidence`, a temporary evidence file is created
+automatically) and
+`AUTO_ITERATE_VERSION_ACCEPTANCE` (the per-version plan entry, empty if none).
+Exit codes: `0` done/finalized, `2` lock held or pending state, `3` no external AI,
+`4` paused by the gate, `5` stopped on a rejection, `1` error.
+
+## Codex adapter
+
+`codex-agent.sh` is a thin host adapter; the driver and the gate are unchanged.
+Use the native Linux CLI for repositories on the WSL filesystem:
+
+```bash
+npm i -g @openai/codex
+codex login status            # or: codex login
+tools/auto-iterate/auto-iterate.sh --task <task-id> \
+  --agent-cmd tools/auto-iterate/codex-agent.sh \
+  --evidence /tmp/codex-evidence.txt
+```
+
+`CODEX_BIN` overrides the binary. Without it, a repository under `/mnt/<drive>/`
+prefers the Windows CLI (`CODEX_WIN_BIN` overrides its path); a WSL repository
+prefers `codex` on PATH, then `~/.npm-global/bin/codex`, then the Windows CLI.
+`CODEX_FLAGS` defaults to `--sandbox workspace-write --ephemeral --color never`;
+Codex 0.162/0.163 does not accept `--full-auto`, so do not copy older examples.
+`CODEX_MODEL` and `CODEX_PROFILE` are optional.
+
+The adapter builds the version prompt from the task, goal, acceptance, per-version
+acceptance and previous review; it receives the prompt on stdin and appends
+stdout/stderr to the driver's `--evidence` path. It refuses to run when the evidence path is inside the repo, when
+Codex changed `HEAD`, changed a tag name or tag object id, made no change to the
+worktree/index/untracked-file snapshot (including the index tree and NUL-delimited
+untracked names), or when the binary is a Windows `.exe` and
+the repo is not under `/mnt/<drive>/`. The snapshot comparison also catches a no-op
+when the worktree was already dirty. It also unsets
+every exported `REVIEW_GATE_*` variable before starting Codex. The driver still stages, reviews, commits,
+tags and records; the adapter never does.
+
+For a Windows Codex CLI, use only a Windows-drive worktree (for example `/mnt/e/...`);
+it cannot safely edit a WSL-only repository. Its PowerShell sandbox may fail and fall
+back to `cmd.exe`, so native Linux Codex is more reliable for test-heavy versions.
+
+`E:\Tools\npm` is a Windows npm prefix. Its `codex` and `codex.cmd` shims are not
+usable directly from WSL: the Unix shim needs the missing `@openai/codex-linux-x64`
+optional package, and the `.cmd` shim needs `cmd.exe`. Use the native Linux CLI, or
+point `CODEX_BIN` at the actual `...\@openai\codex-win32-x64\...\codex.exe` for a
+Windows-drive worktree.
+
+Run the adapter test without calling a model:
+
+```bash
+tools/auto-iterate/test-codex-agent.sh
+```
 
 ## Run log, timeout and tests
 
@@ -66,11 +118,85 @@ The agent also receives `AUTO_ITERATE_GOAL`, `AUTO_ITERATE_ACCEPTANCE` and
 `AUTO_ITERATE_TASK`. The driver refuses to start on a dirty worktree unless
 `--allow-dirty` is given, so pre-existing edits cannot silently enter version 1.
 
-Before an approved version is committed, the driver writes a small state file under
-the repository's git dir (`auto-iterate/<task>.json`). If it crashes between commit
-and `record`, the next run refuses to start and prints the path; rerun with
-`--resume` to finish the pending `record` (or commit/tag a reviewed but uncommitted
-tree) before continuing. A successful `record` removes the state file.
+### Concurrency, recovery and acceptance
+
+The driver holds a kernel `flock` on `auto-iterate/lock` in the worktree's git dir;
+`auto-iterate/lock.meta` records the owner, host, PID, task and timestamps for
+diagnostics. A second driver fails fast with exit 2; use `--lock-timeout S` to wait.
+The kernel releases the lock when the driver exits, so a crashed run never leaves a
+stale lease. Child agent, verify, review and fallback processes get FD 9 closed so
+they cannot keep the repository lease alive. A separate inherited FD 8 holds
+`auto-iterate/worker.lock` while an agent or verifier runs; the parent acquires it
+before forking, so the interval before `worker.pid` appears is covered. If the
+driver dies, `--resume` sees the still-held worker lease and exits 2 until that
+worker (and any descendant that inherited FD 8) exits. After a wait, the parent
+closes FD 8 and tries to take the lease again; if a background descendant still
+holds it, the driver stops before staging or committing instead of racing it. The
+same lease covers review and fallback workers, so a driver killed during review
+cannot be resumed until that review process has exited. The metadata is refreshed at each round and removed on release.
+
+Each round writes `agent -> staged -> reviewing -> reviewed -> committed` (or
+`rejected`) to `auto-iterate/<task>.json`. `--resume` also handles an interrupted
+`agent` phase, preserving partial edits and saved feedback before restarting, a
+`verify`/`staged`/`reviewing` tree that can be verified and staged again without
+discarding the edits, and a `rejected` record that still needs `record`/reset.
+The state carries the absolute evidence path, verification command and timeout, the
+absolute version-plan path, the selected acceptance, and the intended tag. A resume without those options
+restores them, while adding or changing an evidence path, command, timeout, plan or
+acceptance is rejected before any recovery commit, tag or record. A custom tag is
+therefore reused even if the resume uses a different `--tag-prefix`. Feedback is carried through
+`agent`, `verify`, `staged` and `reviewing` writes. After approval the durable
+feedback is removed before the state file, so a crash between those operations
+cannot leak rejection text into the next version. A
+successful `record` removes the state file. Before replaying a pending
+`committed`/`rejected` record, the driver checks the task history and skips the
+record when that review id is already present; an already recorded `rejected` or
+`insufficient-reviewer` outcome is completed without replay, including when an
+approved weak-channel review paused after its commit, and the durable feedback is
+preserved. The rejected state is the authoritative checkpoint: it is written before
+the feedback/retry files, `record`, and index cleanup; recovery re-derives those files
+from the state before recording. Reviewed recovery persists `committed`
+before calling `record`, so a crash during that call is replayable, and records the
+approved tree ID: it refuses to commit a changed index or a child commit with a
+different tree. Recovery checks every state/feedback/retry persistence operation and
+stops before recording or cleanup if one fails. Appending per-version acceptance or
+verification output to evidence is fail-closed: the round stops rather than letting a
+reviewer approve without the required evidence. Rejected recovery allows the recovered tracked edits through the
+dirty-worktree guard, resets the index, cleans only the agent-created untracked paths
+recorded when the round was rejected, merges saved protections with untracked or newly
+staged files that already existed when an interrupted agent,
+verifier/staged/reviewing round, or rejected-round retry was resumed, and leaves files
+a user created later untouched, then removes the state file; the
+feedback is kept in `auto-iterate/<task>.feedback` and retry metadata in
+`auto-iterate/<task>.retry`, so a paused or stopped task cannot leave a pending JSON
+that blocks other tasks; `--resume` uses the metadata to preserve the cleanup policy,
+the verify command/timeout, version plan/acceptance and evidence path, and allow the
+retained tracked edits. Agent, verify and stage failures also keep the
+round state and its feedback text, so a later `--resume` can retry instead of
+losing the rejection context. A rejection is retried on the same version; only an
+approval advances the iteration. The driver reloads
+the task and the durable feedback after acquiring the lock, clearing the temporary
+feedback when the durable file is absent, so an iteration advanced by another
+driver while it waited cannot inherit stale review text. A pending state belonging to any other task in the same git
+dir blocks startup instead of letting a second task stage the first task's tree. After an approved version the feedback
+file is cleared, so the next version never inherits stale review text. After a
+rejected version the driver unstages the tree and, when the run started clean,
+removes the untracked files the agent created; tracked edits are kept for the fix,
+and the rejection text is also written to `auto-iterate/<task>.feedback`. That file
+is cleared after approval.
+
+`--verify-cmd CMD` runs in the repository after the agent and before staging. A
+resumed `staged`/`reviewing` tree also reruns verification before it is staged again,
+so edits made after the interruption cannot bypass it. A non-zero exit stops the
+round with exit 1, keeps the changes for inspection, and leaves the task running;
+`--verify-timeout S` bounds it. Verify output is appended
+to `--evidence` so the reviewer sees it. This is an independent check in addition
+to the reviewer, not a replacement for it.
+
+`--version-plan FILE` accepts a JSON object (`{"1": "acceptance ...", "2": ...}`)
+or an array of `{"version": N, "acceptance": "..."}` entries. The selected text is
+exported as `AUTO_ITERATE_VERSION_ACCEPTANCE` and appended to the evidence file for
+the reviewer. `AUTO_ITERATE_ACCEPTANCE` remains the task's final acceptance.
 
 `--fallback-cmd CMD` is an explicit opt-in for the case where `review run` exits 3
 (no external AI). It runs a fresh reviewer command in the repository with
