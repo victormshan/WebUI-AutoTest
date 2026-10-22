@@ -23,6 +23,8 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
   --stop-on-reject   stop after a rejected review instead of retrying (exit 5)
   --allow-dirty      start even if the repository has uncommitted changes
   --resume           finish a pending record/commit from a crashed run
+  --fallback-cmd CMD explicit fallback reviewer when `review run` has no external AI
+  --fallback-channel C weaker channel for the fallback (default claude-subagent)
 
 The agent command sees:
   AUTO_ITERATE_REPO, AUTO_ITERATE_ITERATION, AUTO_ITERATE_FEEDBACK
@@ -34,7 +36,7 @@ Exit: 0 done/finalized, 3 no external AI, 4 paused by the gate,
 TXT
 }
 
-TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; state=
+TASK=; AGENT=; MESSAGE=; EVIDENCE=; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; FALLBACK=; FALLBACK_CHANNEL=claude-subagent; state=
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -53,6 +55,8 @@ while [ $# -gt 0 ]; do
         --stop-on-reject) STOP_ON_REJECT=1; shift ;;
         --allow-dirty) ALLOW_DIRTY=1; shift ;;
         --resume) RESUME=1; shift ;;
+        --fallback-cmd) FALLBACK=$2; shift 2 ;;
+        --fallback-channel) FALLBACK_CHANNEL=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -70,6 +74,7 @@ case "$MAX" in ''|*[!0-9]*) echo "--max must be an integer" >&2; exit 2 ;; esac
 [ "$MAX" -ge 1 ] || { echo "--max must be >= 1" >&2; exit 2; }
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*) echo "--agent-timeout must be an integer" >&2; exit 2 ;; esac
 case "$REVIEW_TIMEOUT" in ''|*[!0-9]*) echo "--review-timeout must be an integer" >&2; exit 2 ;; esac
+case "$FALLBACK_CHANNEL" in claude-subagent|self-review) ;; *) echo "--fallback-channel must be claude-subagent or self-review" >&2; exit 2 ;; esac
 if [ "$AGENT_TIMEOUT" -gt 0 ] || [ "$REVIEW_TIMEOUT" -gt 0 ]; then
     command -v timeout >/dev/null 2>&1 || { echo "missing required command: timeout" >&2; exit 1; }
 fi
@@ -320,6 +325,47 @@ while :; do
         emit stop reason="review-timeout"
         echo "review timed out after ${REVIEW_TIMEOUT}s; the task may have a pending review" >&2
         exit 3
+    fi
+    if [ "$rc" -eq 3 ] && [ -n "$FALLBACK" ]; then
+        log "fallback review-unavailable channel=$FALLBACK_CHANNEL"
+        emit fallback channel="$FALLBACK_CHANNEL"
+        fb_diff=$(mktemp "${TMPDIR:-/tmp}/auto-iterate-diff.XXXXXX")
+        fb_file=$(mktemp "${TMPDIR:-/tmp}/auto-iterate-review.XXXXXX")
+        git -C "$repo" diff --cached >"$fb_diff"
+        set +e
+        (
+            cd "$repo"
+            AUTO_ITERATE_REPO="$repo" AUTO_ITERATE_TASK="$TASK" \
+            AUTO_ITERATE_ITERATION="$iteration" AUTO_ITERATE_GOAL="$goal" \
+            AUTO_ITERATE_ACCEPTANCE="$acceptance" AUTO_ITERATE_EVIDENCE="$EVIDENCE" \
+            AUTO_ITERATE_DIFF="$fb_diff" AUTO_ITERATE_REVIEW_FILE="$fb_file" \
+            sh -c "$FALLBACK"
+        )
+        frc=$?
+        set -e
+        if [ "$frc" -ne 0 ]; then
+            log "stop fallback-failed rc=$frc"
+            emit stop reason="fallback-failed"
+            echo "fallback reviewer failed (exit $frc); staged tree kept" >&2
+            exit 1
+        fi
+        if [ ! -s "$fb_file" ]; then
+            log "stop fallback-empty"
+            emit stop reason="fallback-empty"
+            echo "fallback reviewer wrote no review text" >&2
+            exit 1
+        fi
+        if ! job=$(review-gate review submit --id "$TASK" --channel "$FALLBACK_CHANNEL" --file "$fb_file"); then
+            log "stop fallback-submit-failed"
+            emit stop reason="fallback-submit-failed"
+            echo "review submit failed; staged tree kept" >&2
+            exit 1
+        fi
+        job=$(printf '{"record":%s}\n' "$job")
+        rm -f "$fb_diff" "$fb_file"
+        log "fallback submitted channel=$FALLBACK_CHANNEL"
+        emit fallback_submitted channel="$FALLBACK_CHANNEL"
+        rc=0
     fi
     case "$rc" in
         0) ;;

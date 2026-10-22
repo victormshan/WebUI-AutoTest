@@ -35,7 +35,8 @@ tools/auto-iterate/auto-iterate.sh \
 
 The agent sees `AUTO_ITERATE_REPO`, `AUTO_ITERATE_ITERATION` and
 `AUTO_ITERATE_FEEDBACK` (previous review text, empty on round 1). Exit codes:
-`0` done/finalized, `3` no external AI, `4` paused by the gate, `1` error.
+`0` done/finalized, `3` no external AI, `4` paused by the gate,
+`5` stopped on a rejection, `1` error.
 
 ## Run log, timeout and tests
 
@@ -70,6 +71,15 @@ the repository's git dir (`auto-iterate/<task>.json`). If it crashes between com
 and `record`, the next run refuses to start and prints the path; rerun with
 `--resume` to finish the pending `record` (or commit/tag a reviewed but uncommitted
 tree) before continuing. A successful `record` removes the state file.
+
+`--fallback-cmd CMD` is an explicit opt-in for the case where `review run` exits 3
+(no external AI). It runs a fresh reviewer command in the repository with
+`AUTO_ITERATE_DIFF`, `AUTO_ITERATE_REVIEW_FILE`, goal, acceptance, evidence and task
+in the environment. The command must write a review containing a
+`VERDICT: APPROVED|REJECTED` line and must not modify the repository; the driver
+submits it with `review submit --channel` (`claude-subagent` by default, or
+`self-review`). The gate still applies its reviewer-strength gate, so this never
+silently downgrades a task. Without the flag, exit 3 is unchanged.
 
 `--stop-on-reject` stops as soon as a review is not approved (exit 5), leaving the
 task running so a human can inspect the feedback instead of burning more rounds.

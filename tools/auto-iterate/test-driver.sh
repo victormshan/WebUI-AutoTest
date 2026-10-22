@@ -34,10 +34,20 @@ case "$1" in
         ;;
     stage) git -C "$STUB_REPO" add -A; printf '{"tree":"t","base":"b"}\n' ;;
     review)
-        if [ "${STUB_SLOW_REVIEW:-0}" = 1 ]; then sleep 5; fi
-        if [ -n "${STUB_ARGS:-}" ]; then printf '%s\n' "$*" > "$STUB_ARGS"; fi
-        if [ "${STUB_REJECT:-0}" = 1 ]; then v=rejected; t=no; else v=approved; t=ok; fi
-        printf '{"record":{"id":"v%s-1","verdict":"%s","text":"%s","channel":"stub","provider":"stub-provider","model":"stub-model"}}\n' "$((n+1))" "$v" "$t"
+        case "$2" in
+            run)
+                if [ "${STUB_RUN_NO_AI:-0}" = 1 ]; then exit 3; fi
+                if [ "${STUB_SLOW_REVIEW:-0}" = 1 ]; then sleep 5; fi
+                if [ -n "${STUB_ARGS:-}" ]; then printf '%s\n' "$*" > "$STUB_ARGS"; fi
+                if [ "${STUB_REJECT:-0}" = 1 ]; then v=rejected; t=no; else v=approved; t=ok; fi
+                printf '{"record":{"id":"v%s-1","verdict":"%s","text":"%s","channel":"stub","provider":"stub-provider","model":"stub-model"}}\n' "$((n+1))" "$v" "$t"
+                ;;
+            submit)
+                if [ -n "${STUB_SUBMIT_ARGS:-}" ]; then printf '%s\n' "$*" > "$STUB_SUBMIT_ARGS"; fi
+                printf '{"id":"fallback-1","verdict":"approved","text":"ok","channel":"claude-subagent","provider":"claude-subagent","model":null}\n'
+                ;;
+            *) echo "stub: unsupported review $*" >&2; exit 1 ;;
+        esac
         ;;
     record)
         if [ "${STUB_FAIL_RECORD:-0}" = 1 ] && [ ! -f "${STUB_FAIL_MARKER:-/nonexistent}" ]; then
@@ -53,6 +63,15 @@ case "$1" in
 esac
 STUB
 chmod +x "$bin/review-gate"
+
+cat > "$tmp/fallback.sh" <<'AG'
+#!/bin/sh
+set -eu
+printf 'VERDICT: approved\nfallback review\n' > "$AUTO_ITERATE_REVIEW_FILE"
+[ -z "${STUB_FALLBACK_DIFF:-}" ] || cp "$AUTO_ITERATE_DIFF" "$STUB_FALLBACK_DIFF"
+[ -z "${STUB_FALLBACK_ENV:-}" ] || printf '%s|%s|%s|%s\n' "$AUTO_ITERATE_GOAL" "$AUTO_ITERATE_ACCEPTANCE" "$AUTO_ITERATE_TASK" "$AUTO_ITERATE_ITERATION" > "$STUB_FALLBACK_ENV"
+AG
+chmod +x "$tmp/fallback.sh"
 
 cat > "$tmp/agent.sh" <<'AG'
 #!/bin/sh
@@ -268,6 +287,48 @@ STUB_REPO=$repo8 STUB_STATE=$state8 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
 [ "$(git -C "$repo8" show HEAD:f2)" = change ] || fail "resume reviewed lost the staged change"
 [ "$(git -C "$repo8" tag)" = "auto-iterate/resume8/v1" ] || fail "resume reviewed tag missing"
 [ ! -f "$gitdir8/auto-iterate/resume8.json" ] || fail "reviewed state not cleared"
+
+repo9=$tmp/repo9
+state9=$tmp/state9
+mkdir -p "$repo9"
+git -C "$repo9" init -q
+git -C "$repo9" config user.email test@example.com
+git -C "$repo9" config user.name test
+echo base > "$repo9/f"
+git -C "$repo9" add f
+git -C "$repo9" commit -qm base
+echo 0 > "$state9"
+
+STUB_REPO=$repo9 STUB_STATE=$state9 STUB_ITERATIONS=1 STUB_RUN_NO_AI=1 \
+    STUB_SUBMIT_ARGS=$tmp/subargs STUB_FALLBACK_DIFF=$tmp/fbdiff STUB_FALLBACK_ENV=$tmp/fbenv \
+    PATH="$bin:$PATH" "$here/auto-iterate.sh" --task fallback9 --agent-cmd "$tmp/agent.sh" \
+    --fallback-cmd "$tmp/fallback.sh" --fallback-channel claude-subagent \
+    --log "$tmp/run9.log" --max 1 >"$tmp/out9" 2>&1 || fail "fallback run failed"
+[ "$(git -C "$repo9" rev-list --count HEAD)" -eq 2 ] || fail "fallback did not commit"
+[ "$(git -C "$repo9" tag)" = "auto-iterate/fallback9/v1" ] || fail "fallback tag missing"
+grep -q -- "--channel claude-subagent" "$tmp/subargs" || fail "fallback channel not forwarded"
+grep -q "out.txt" "$tmp/fbdiff" || fail "fallback did not receive the staged diff"
+[ "$(cat "$tmp/fbenv")" = "g|a|fallback9|1" ] || fail "fallback context is wrong"
+grep -q "fallback submitted" "$tmp/run9.log" || fail "fallback not logged"
+
+repo10=$tmp/repo10
+state10=$tmp/state10
+mkdir -p "$repo10"
+git -C "$repo10" init -q
+git -C "$repo10" config user.email test@example.com
+git -C "$repo10" config user.name test
+echo base > "$repo10/f"
+git -C "$repo10" add f
+git -C "$repo10" commit -qm base
+echo 0 > "$state10"
+set +e
+STUB_REPO=$repo10 STUB_STATE=$state10 STUB_RUN_NO_AI=1 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task noai10 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out10" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 3 ] || fail "no-ai without fallback exited $rc"
+grep -q "no external AI available" "$tmp/out10" || fail "no no-ai message"
+[ "$(git -C "$repo10" rev-list --count HEAD)" -eq 1 ] || fail "no-ai run committed"
 
 repo4=$tmp/repo4
 state4=$tmp/state4

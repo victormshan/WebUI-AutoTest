@@ -48,7 +48,7 @@ review-gate task init --id <task-id> --goal "<一句话目标>" \
    review-gate review run --id <task-id> [--evidence <证据文件>]
    ```
    命令会 `git add -A` 暂存并交 tree/base；审核门只读取 diff、分段送外部 AI、写记录，直到出结论。**审核期间和之后都不要再改工作区**——记录绑定暂存 tree，提交必须一字不差。
-   - 退出码 3（无外部 AI）或反复失败：默认门槛下 **停下等人**，不要降级自审；告诉用户启动 bridge/扩展或配置 `/etc/review-gate/env`。
+   - 退出码 3（无外部 AI）或反复失败：默认门槛下 **停下等人**，不要降级自审；告诉用户启动 bridge/扩展或配置 `/etc/review-gate/env`。仅在用户明确授权替代时，L2 驱动可用 `--fallback-cmd` 起一个全新 reviewer 命令写 `VERDICT:`，再由驱动 `review submit` 提交；门仍按强度门判定，`self-review` 通常会被打回或暂停。
    - 用户 init 时显式允许 `--min-reviewer implementer-subagent`：可用**实施方本家族**的全新子 agent 审，首行 `VERDICT: …`，原文写入文件后 `review-gate review submit --id <task-id> --channel implementer-subagent --file <文件>`。旧名 `claude-subagent` 仍作为别名可读，强度不变（2）。
    - 人工审核只能由用户本人以 reviewgate 身份执行 `review-gate admin manual …`；agent **不能也不得**代填。
 6. **记账**：
