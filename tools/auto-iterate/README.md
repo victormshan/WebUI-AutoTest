@@ -19,14 +19,19 @@ tools/auto-iterate/install.sh --skill-dir ~/.claude/skills/auto-iterate --check
 replaces a regular file or a different symlink. `--upgrade` migrates a symlink
 from another `tools/auto-iterate/` checkout but never touches foreign files.
 `--uninstall` removes only links that point at this checkout and leaves regular
-files or other installations alone. Run `tools/auto-iterate/test-install.sh` to
-test all lifecycle paths in a temporary directory.
+files or other installations alone. `--bin-dir` links the driver plus both host
+adapters (`codex-agent.sh`, `opencode-agent.sh`); a missing adapter source aborts the
+install before anything changes. Run `tools/auto-iterate/test-install.sh` to test
+all lifecycle paths, including adapter upgrade and uninstall, in a temporary
+directory.
 
 Manual equivalent:
 
 ```bash
 ln -sfn <repo>/tools/auto-iterate/SKILL.md ~/.claude/skills/auto-iterate/SKILL.md
 ln -sfn <repo>/tools/auto-iterate/auto-iterate.sh ~/.local/bin/auto-iterate.sh
+ln -sfn <repo>/tools/auto-iterate/codex-agent.sh ~/.local/bin/codex-agent.sh
+ln -sfn <repo>/tools/auto-iterate/opencode-agent.sh ~/.local/bin/opencode-agent.sh
 ```
 
 opencode / other skill-aware hosts use their own skill directory, pointing at the

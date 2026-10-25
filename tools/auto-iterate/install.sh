@@ -6,13 +6,14 @@ here=$(cd "$(dirname "$0")" && pwd)
 skill_src=$here/SKILL.md
 driver_src=$here/auto-iterate.sh
 codex_src=$here/codex-agent.sh
+opencode_src=$here/opencode-agent.sh
 
 usage() {
     cat <<'TXT'
 usage: install.sh [options]
 
   --skill-dir DIR  link SKILL.md as DIR/SKILL.md
-  --bin-dir DIR    link auto-iterate.sh and codex-agent.sh into DIR
+  --bin-dir DIR    link auto-iterate.sh, codex-agent.sh and opencode-agent.sh into DIR
   --check          verify the requested links, change nothing
   --dry-run        print planned links, change nothing
   --force          replace an existing regular file or different symlink
@@ -46,6 +47,7 @@ if [ "$UNINSTALL" -eq 0 ]; then
     [ -f "$skill_src" ] || { echo "missing $skill_src" >&2; exit 1; }
     [ -f "$driver_src" ] || { echo "missing $driver_src" >&2; exit 1; }
     [ -f "$codex_src" ] || { echo "missing $codex_src" >&2; exit 1; }
+    [ -f "$opencode_src" ] || { echo "missing $opencode_src" >&2; exit 1; }
 fi
 
 install_link() {
@@ -124,6 +126,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
     if [ -n "$BIN_DIR" ]; then
         uninstall_link "$driver_src" "$BIN_DIR/auto-iterate.sh" || _rc=1
         uninstall_link "$codex_src" "$BIN_DIR/codex-agent.sh" || _rc=1
+        uninstall_link "$opencode_src" "$BIN_DIR/opencode-agent.sh" || _rc=1
     fi
     exit "$_rc"
 fi
@@ -134,6 +137,7 @@ fi
 if [ -n "$BIN_DIR" ]; then
     install_link "$driver_src" "$BIN_DIR/auto-iterate.sh" || exit 1
     install_link "$codex_src" "$BIN_DIR/codex-agent.sh" || exit 1
+    install_link "$opencode_src" "$BIN_DIR/opencode-agent.sh" || exit 1
 fi
 if [ "$UPGRADE" -eq 1 ]; then
     echo "upgrade ok"
