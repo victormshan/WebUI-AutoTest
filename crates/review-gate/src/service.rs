@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::GateError;
+use crate::drain::{Drain, OpGuard};
 use crate::gate::{Gate, NewTask};
 use crate::milestone::flow::{Flow, FlowError, valid_job_id};
 use crate::model::{Channel, ReviewRecord};
@@ -35,6 +36,8 @@ pub struct AppState {
     write: Mutex<()>,
     /// The milestone flow (6c), when `serve --milestones` is given.
     milestones: Option<Arc<Flow>>,
+    /// Maintenance drain: every external write is admitted through it.
+    drain: Arc<Drain>,
 }
 
 impl AppState {
@@ -47,13 +50,32 @@ impl AppState {
             next_job: AtomicU64::new(1),
             write: Mutex::new(()),
             milestones: None,
+            drain: Drain::new(None),
         }
     }
 
+    /// Must come before `with_milestones`, so the flow carries the same drain.
+    pub fn with_drain(mut self, drain: Arc<Drain>) -> Self {
+        self.drain = drain;
+        self
+    }
+
     pub fn with_milestones(mut self, flow: Arc<Flow>) -> Self {
+        flow.set_drain(self.drain.clone());
         self.milestones = Some(flow);
         self
     }
+
+    pub fn drain(&self) -> &Arc<Drain> {
+        &self.drain
+    }
+}
+
+/// Admits one external write, or 503 once draining (before any effect).
+fn admit(s: &AppState, what: &str) -> Result<OpGuard, ApiError> {
+    s.drain
+        .enter(what)
+        .map_err(|why| ApiError(StatusCode::SERVICE_UNAVAILABLE, format!("draining: {why}")))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,8 +169,35 @@ async fn auth(State(s): State<Arc<AppState>>, req: Request, next: Next) -> Respo
     next.run(req).await
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({ "ok": true, "service": "review-gate", "version": env!("CARGO_PKG_VERSION") }))
+/// Liveness plus the drain view an operator stops on: `drain.idle` is true only when the latch
+/// is set, no admitted operation is unfinished and nothing failed; `m2_pending` counts phases
+/// whose current request is still Pending in the log (null when it cannot be read).
+async fn health(State(s): State<Arc<AppState>>) -> Json<Value> {
+    let d = s.drain.snapshot();
+    let m1_running = s
+        .jobs
+        .lock()
+        .await
+        .values()
+        .filter(|j| j.status == "running")
+        .count();
+    let m2_pending = match s.milestones.clone() {
+        None => json!(0),
+        Some(f) => match tokio::task::spawn_blocking(move || f.pending_requests()).await {
+            Ok(Ok(n)) => json!(n),
+            _ => Value::Null,
+        },
+    };
+    Json(json!({
+        "ok": true, "service": "review-gate", "version": env!("CARGO_PKG_VERSION"),
+        "drain": {
+            "configured": d.configured, "draining": d.draining, "reason": d.reason,
+            "active_ops": d.active_ops, "failure_count": d.failure_count,
+            "failures": d.failures, "idle": d.idle(),
+        },
+        "m1_jobs_running": m1_running,
+        "m2_pending": m2_pending,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -165,6 +214,7 @@ struct InitBody {
 }
 
 async fn init_task(State(s): State<Arc<AppState>>, Json(b): Json<InitBody>) -> ApiResult<Value> {
+    let _op = admit(&s, "init task")?;
     let min = match b.min_reviewer.as_deref() {
         None => Channel::WebGemini,
         Some(c) => Channel::parse(c)
@@ -206,6 +256,7 @@ async fn link_task(
     Path(id): Path<String>,
     Json(b): Json<LinkBody>,
 ) -> ApiResult<Value> {
+    let _op = admit(&s, "link task")?;
     let _w = s.write.lock().await;
     Ok(Json(json!(s.gate.link(&id, &b.expr_id)?)))
 }
@@ -226,6 +277,7 @@ async fn request_review(
     Path(id): Path<String>,
     Json(b): Json<ReviewBody>,
 ) -> ApiResult<Job> {
+    let op = admit(&s, "review request")?;
     // Fail fast on bad input before spawning.
     let task = s.gate.store().load_task(&id)?;
     review::staged_from(std::path::Path::new(&task.repo), &b.tree, &b.base)?;
@@ -240,6 +292,9 @@ async fn request_review(
     s.jobs.lock().await.insert(job.id.clone(), job.clone());
     let state = s.clone();
     let job_id = job.id.clone();
+    // Counted until the job's status is final (after review::run has stored its record).
+    let carried = op.carry(&format!("m1 review job {job_id}"));
+    drop(op);
     tokio::spawn(async move {
         let res = review::run(
             &state.gate,
@@ -265,6 +320,8 @@ async fn request_review(
                 }
             }
         }
+        drop(jobs);
+        drop(carried);
     });
     Ok(Json(job))
 }
@@ -308,6 +365,7 @@ async fn submit_review(
             ));
         }
     };
+    let _op = admit(&s, "review submit")?;
     let _w = s.write.lock().await;
     Ok(Json(review::submit(
         &s.gate, &id, &b.tree, &b.base, channel, &b.text,
@@ -325,6 +383,8 @@ async fn check_commit(
     State(s): State<Arc<AppState>>,
     Json(b): Json<CheckBody>,
 ) -> ApiResult<crate::gate::CommitCheck> {
+    // Not a write, but refused while draining all the same: a refusal never lets a commit by.
+    let _op = admit(&s, "check")?;
     Ok(Json(s.gate.check_commit(&b.repo, &b.tree, &b.base)?))
 }
 
@@ -353,6 +413,7 @@ async fn record(
     Path(id): Path<String>,
     Json(b): Json<RecordBody>,
 ) -> ApiResult<Value> {
+    let _op = admit(&s, "record")?;
     let _w = s.write.lock().await;
     let out = s
         .gate
@@ -404,8 +465,12 @@ fn check_phase(phase: &str) -> Result<(), Box<Response>> {
 /// the service has halted before the call or by the time it returns, whatever the call
 /// produced; the call itself on a blocking thread. The admission boundaries stay inside the
 /// flow (6b); nothing here holds them.
+///
+/// `op` (the drain guard) moves into the blocking call, so it is released when the call has
+/// ended, even if the client goes away and this future is dropped first.
 async fn guarded<T: Send + 'static>(
     s: &AppState,
+    op: OpGuard,
     f: impl FnOnce(&Arc<Flow>) -> Result<T, FlowError> + Send + 'static,
 ) -> Result<T, Box<Response>> {
     let Some(flow) = s.milestones.clone() else {
@@ -421,6 +486,7 @@ async fn guarded<T: Send + 'static>(
         let r = f(&f2);
         #[cfg(test)]
         f2.test_in_call();
+        drop(op);
         r
     })
     .await;
@@ -454,6 +520,29 @@ async fn guarded<T: Send + 'static>(
     Err(Box::new(err))
 }
 
+/// A milestone write: admitted through the drain first (503 once draining, before any
+/// effect), and counted until the call has returned, including the job a request dispatches
+/// (the flow carries that one on).
+async fn guarded_write<T: Send + 'static>(
+    s: &AppState,
+    what: &str,
+    f: impl FnOnce(&Arc<Flow>) -> Result<T, FlowError> + Send + 'static,
+) -> Result<T, Box<Response>> {
+    let op = admit(s, what).map_err(|e| Box::new(e.into_response()))?;
+    guarded(s, op, f).await
+}
+
+/// A milestone read: never refused, but counted while it runs (a status read may still
+/// complete a crash-cut group in the log).
+async fn guarded_read<T: Send + 'static>(
+    s: &AppState,
+    what: &str,
+    f: impl FnOnce(&Arc<Flow>) -> Result<T, FlowError> + Send + 'static,
+) -> Result<T, Box<Response>> {
+    let op = s.drain.track(what);
+    guarded(s, op, f).await
+}
+
 fn ok_json(v: impl Serialize) -> Response {
     Json(json!(v)).into_response()
 }
@@ -475,7 +564,7 @@ async fn ms_apply(State(s): State<Arc<AppState>>, Json(b): Json<ApplyBody>) -> R
     if let Err(r) = check_phase(&b.phase) {
         return *r;
     }
-    match guarded(&s, move |f| {
+    match guarded_write(&s, "milestone apply", move |f| {
         f.apply(
             &b.phase,
             &b.base,
@@ -506,7 +595,7 @@ async fn ms_request(
     if let Err(r) = check_phase(&phase) {
         return *r;
     }
-    match guarded(&s, move |f| f.request(&phase, &b.head)).await {
+    match guarded_write(&s, "milestone request", move |f| f.request(&phase, &b.head)).await {
         Ok(id) => ok_json(json!({ "request_id": id })),
         Err(r) => *r,
     }
@@ -516,7 +605,7 @@ async fn ms_status(State(s): State<Arc<AppState>>, Path(phase): Path<String>) ->
     if let Err(r) = check_phase(&phase) {
         return *r;
     }
-    match guarded(&s, move |f| {
+    match guarded_read(&s, "milestone status", move |f| {
         #[cfg(feature = "fault-injection")]
         crate::milestone::serve::fault::in_status();
         f.status_archived(&phase)
@@ -542,14 +631,14 @@ async fn ms_cancel(
         )
         .into_response();
     }
-    match guarded(&s, move |f| f.cancel(&phase, &id)).await {
+    match guarded_write(&s, "milestone cancel", move |f| f.cancel(&phase, &id)).await {
         Ok(()) => ok_json(json!({ "cancelled": true })),
         Err(r) => *r,
     }
 }
 
 async fn ms_log(State(s): State<Arc<AppState>>) -> Response {
-    match guarded(&s, |f| f.log().map_err(FlowError::Other)).await {
+    match guarded_read(&s, "milestone log", |f| f.log().map_err(FlowError::Other)).await {
         Ok(text) => ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response(),
         Err(r) => *r,
     }
@@ -563,7 +652,11 @@ struct PublishedBody {
 }
 
 async fn ms_published(State(s): State<Arc<AppState>>, Json(b): Json<PublishedBody>) -> Response {
-    match guarded(&s, move |f| f.published_then_archive(b.seq, &b.hash)).await {
+    match guarded_write(&s, "milestone published", move |f| {
+        f.published_then_archive(b.seq, &b.hash)
+    })
+    .await
+    {
         Ok(o) => ok_json(o),
         Err(r) => *r,
     }
@@ -589,6 +682,10 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn start(bridge: &str) -> Env {
+        start_in(bridge, Drain::new(None)).await
+    }
+
+    pub(crate) async fn start_in(bridge: &str, drain: Arc<Drain>) -> Env {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir(&repo).unwrap();
@@ -605,7 +702,7 @@ pub(crate) mod tests {
         let gate = Gate::new(Store::open(dir.path().join("state")).unwrap())
             .with_signer(crate::attest::Keypair::load_or_create(&dir.path().join("state")).unwrap())
             .with_relay(crate::relay::RelayTrace::new(dir.path().join("relay")));
-        let state = Arc::new(AppState::new(gate, cfg(bridge), TOKEN.into()));
+        let state = Arc::new(AppState::new(gate, cfg(bridge), TOKEN.into()).with_drain(drain));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(serve(state, listener));
@@ -818,5 +915,187 @@ pub(crate) mod tests {
             !token_ok("", Some("Bearer ")),
             "an empty configured token never authenticates"
         );
+    }
+
+    async fn health(url: &str) -> Value {
+        reqwest::get(format!("{url}/health"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    async fn raw(url: &str, method: &str, path: &str, body: Value) -> (u16, Value) {
+        let r = reqwest::Client::new()
+            .request(method.parse().unwrap(), format!("{url}{path}"))
+            .bearer_auth(TOKEN)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let code = r.status().as_u16();
+        (code, r.json().await.unwrap_or(Value::Null))
+    }
+
+    /// Drain (Codex n8 R1): once latched, every M1 write answers 503 and changes nothing;
+    /// reads still answer; health says it is safe to stop.
+    #[tokio::test]
+    async fn every_m1_write_is_refused_while_draining_and_changes_nothing() {
+        let drain = Drain::new(None);
+        let e = start_in("http://127.0.0.1:9", drain.clone()).await;
+        fs::write(e.repo.join("a.txt"), "v1\n").unwrap();
+        let (tree, base) = git::stage_all(&e.repo).unwrap();
+        let before: Value = e.client.get("/tasks/t").await.unwrap();
+        let h = health(&e.url).await;
+        assert_eq!(h["drain"]["draining"], false, "{h}");
+        assert_eq!(h["drain"]["idle"], false, "{h}");
+        drain.latch("test".into());
+        let tb = json!({ "tree": tree, "base": base });
+        for (path, body) in [
+            (
+                "/tasks",
+                json!({ "id": "t2", "goal": "g", "acceptance": "a", "iterations": 1, "repo": e.repo }),
+            ),
+            ("/tasks/t/link", json!({ "expr_id": "x9" })),
+            (
+                "/tasks/t/reviews",
+                json!({ "tree": tree, "base": base, "evidence": "" }),
+            ),
+            (
+                "/tasks/t/reviews/submit",
+                json!({ "tree": tree, "base": base, "channel": "self-review", "text": "VERDICT: APPROVED\n" }),
+            ),
+            ("/tasks/t/record", json!({ "review": "v1-1" })),
+            (
+                "/check",
+                json!({ "repo": e.repo, "tree": tb["tree"], "base": tb["base"] }),
+            ),
+        ] {
+            let (c, v) = raw(&e.url, "POST", path, body).await;
+            assert_eq!(c, 503, "{path}: {v}");
+            assert!(
+                v["error"].as_str().unwrap().starts_with("draining: test"),
+                "{path}: {v}"
+            );
+        }
+        let after: Value = e.client.get("/tasks/t").await.unwrap();
+        assert_eq!(before, after, "no write reached the task");
+        let tasks: Value = e.client.get("/tasks").await.unwrap();
+        assert_eq!(tasks.as_array().unwrap().len(), 1, "no task was created");
+        let h = health(&e.url).await;
+        assert_eq!(
+            (
+                &h["drain"]["draining"],
+                &h["drain"]["active_ops"],
+                &h["drain"]["idle"],
+                &h["m1_jobs_running"]
+            ),
+            (&json!(true), &json!(0), &json!(true), &json!(0)),
+            "{h}"
+        );
+        assert_eq!(h["drain"]["reason"], "test");
+    }
+
+    /// A review admitted before the drain keeps the drain from going idle until its status is
+    /// final; then it is done and stored, and only then idle.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_review_admitted_before_the_drain_finishes_and_is_counted_until_then() {
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (bridge, _) = crate::reviewer::tests::mock_bridge_held(
+            0,
+            vec![Ok("VERDICT: APPROVED\n\n无")],
+            Some(release.clone()),
+        )
+        .await;
+        let drain = Drain::new(None);
+        let e = start_in(&bridge, drain.clone()).await;
+        fs::write(e.repo.join("a.txt"), "v1\n").unwrap();
+        let (tree, base) = git::stage_all(&e.repo).unwrap();
+        let (c, job) = raw(
+            &e.url,
+            "POST",
+            "/tasks/t/reviews",
+            json!({ "tree": tree, "base": base }),
+        )
+        .await;
+        assert_eq!(c, 200, "{job}");
+        let job_id = job["id"].as_str().unwrap().to_string();
+        drain.latch("maintenance".into());
+        let h = health(&e.url).await;
+        assert_eq!(h["drain"]["active_ops"], 1, "{h}");
+        assert_eq!(h["drain"]["idle"], false, "{h}");
+        assert_eq!(h["m1_jobs_running"], 1, "{h}");
+        // New work is refused meanwhile.
+        let (c, _) = raw(
+            &e.url,
+            "POST",
+            "/tasks/t/reviews",
+            json!({ "tree": tree, "base": base }),
+        )
+        .await;
+        assert_eq!(c, 503);
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut h = Value::Null;
+        for _ in 0..200 {
+            h = health(&e.url).await;
+            if h["drain"]["idle"] == true {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(h["drain"]["idle"], true, "{h}");
+        // Idle means persisted: the job is final and its record is in the store.
+        let j: Job = e.client.get(&format!("/jobs/{job_id}")).await.unwrap();
+        assert_eq!(j.status, "done", "{j:?}");
+        let rec = j.record.unwrap();
+        let task: Value = e.client.get("/tasks/t").await.unwrap();
+        assert_eq!(task["id"], "t");
+        assert_eq!(rec.verdict, Verdict::Approved);
+        assert_eq!(h["m1_jobs_running"], 0, "{h}");
+    }
+
+    /// Linearization: an operation admitted just before the latch is counted in every snapshot
+    /// taken after the latch, until it has finished (two threads and a barrier; the hook runs
+    /// outside the drain mutex, so the latch is not blocked by it).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_operation_admitted_just_before_the_latch_is_counted_until_it_ends() {
+        let drain = Drain::new(None);
+        let e = start_in("http://127.0.0.1:9", drain.clone()).await;
+        let (in_op, go) = (
+            Arc::new(std::sync::Barrier::new(2)),
+            Arc::new(std::sync::Barrier::new(2)),
+        );
+        let (a, b) = (in_op.clone(), go.clone());
+        drain.set_after_enter(Some(Arc::new(move || {
+            a.wait();
+            b.wait();
+        })));
+        let url = e.url.clone();
+        let op = tokio::spawn(async move {
+            raw(&url, "POST", "/tasks/t/link", json!({ "expr_id": "x2" })).await
+        });
+        let (d2, in2, go2) = (drain.clone(), in_op.clone(), go.clone());
+        let snap = tokio::task::spawn_blocking(move || {
+            in2.wait();
+            d2.set_after_enter(None);
+            d2.latch("now".into());
+            let s = d2.snapshot();
+            go2.wait();
+            s
+        })
+        .await
+        .unwrap();
+        assert!(
+            snap.draining && snap.active_ops == 1 && !snap.idle(),
+            "{snap:?}"
+        );
+        let (c, v) = op.await.unwrap();
+        assert_eq!(c, 200, "the admitted operation completes: {v}");
+        let task: Value = e.client.get("/tasks/t").await.unwrap();
+        assert_eq!(task["expr_id"], "x2", "and its write is on file");
+        assert!(drain.snapshot().idle());
+        let (c, _) = raw(&e.url, "POST", "/tasks/t/link", json!({ "expr_id": "x3" })).await;
+        assert_eq!(c, 503);
     }
 }

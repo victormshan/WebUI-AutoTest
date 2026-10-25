@@ -500,6 +500,15 @@ pub(crate) mod tests {
         refused: usize,
         answers: Vec<Result<&'static str, &'static str>>,
     ) -> (String, Arc<Mutex<Vec<String>>>) {
+        mock_bridge_held(refused, answers, None).await
+    }
+
+    /// As `mock_bridge_refusing`; while `hold` is false every task reads as still running.
+    pub(crate) async fn mock_bridge_held(
+        refused: usize,
+        answers: Vec<Result<&'static str, &'static str>>,
+        hold: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         let creates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -514,6 +523,7 @@ pub(crate) mod tests {
                 let seen = seen.clone();
                 let answers = answers.clone();
                 let creates = creates.clone();
+                let hold = hold.clone();
                 tokio::spawn(async move {
                     let mut buf = Vec::new();
                     let mut chunk = [0u8; 8192];
@@ -559,6 +569,11 @@ pub(crate) mod tests {
                             s.push(req["prompt"].as_str().unwrap().to_string());
                             json!({ "ok": true, "id": format!("t{}", s.len()) })
                         }
+                    } else if hold
+                        .as_ref()
+                        .is_some_and(|h| !h.load(std::sync::atomic::Ordering::SeqCst))
+                    {
+                        json!({ "ok": true, "task": { "status": "running" } })
                     } else {
                         let n: usize = path.rsplit('t').next().unwrap().parse().unwrap();
                         match answers.get(n - 1) {

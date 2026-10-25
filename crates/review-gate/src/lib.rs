@@ -5,6 +5,7 @@
 
 pub mod attest;
 pub mod client;
+pub mod drain;
 pub mod gate;
 pub mod git;
 pub mod hook;

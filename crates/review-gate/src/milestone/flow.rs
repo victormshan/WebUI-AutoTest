@@ -192,6 +192,10 @@ pub struct Flow {
     /// halted, whatever was being prepared meanwhile. Held only for that short commit and the
     /// thread spawn, never across git, the bridge or the runner.
     admit: Mutex<()>,
+    /// The service's maintenance drain (set once by the service): a dispatched job is counted
+    /// in it until its result is on file, and whatever goes wrong with a job is a failure
+    /// there.
+    drain: std::sync::OnceLock<Arc<crate::drain::Drain>>,
     #[cfg(test)]
     hooks: Mutex<TestHooks>,
     service: bool,
@@ -627,6 +631,7 @@ impl Flow {
             halted: Mutex::new(None),
             halted_cv: Condvar::new(),
             admit: Mutex::new(()),
+            drain: std::sync::OnceLock::new(),
             #[cfg(test)]
             hooks: Mutex::new(TestHooks::default()),
             service,
@@ -675,6 +680,38 @@ impl Flow {
 
     pub fn ledger(&self) -> &Ledger {
         &self.ledger
+    }
+
+    /// Ties the flow to the service's drain (once; later calls are ignored).
+    pub fn set_drain(&self, drain: Arc<crate::drain::Drain>) {
+        let _ = self.drain.set(drain);
+    }
+
+    fn drain_fail(&self, why: String) {
+        if let Some(d) = self.drain.get() {
+            d.fail(why);
+        }
+    }
+
+    /// Phases whose current request is Pending in the log as it is on file (what a stop must
+    /// wait for, or report: one left over after a restart is closed at start, so a Pending
+    /// request in a drained, idle service is something that went wrong).
+    pub fn pending_requests(&self) -> Result<usize> {
+        let snap = self.ledger.load()?;
+        let phases: BTreeSet<&str> = snap
+            .records
+            .iter()
+            .filter(|r| r.kind == "request")
+            .map(|r| r.phase.as_str())
+            .collect();
+        Ok(phases
+            .into_iter()
+            .filter(|p| {
+                derive(&snap.records, p, 0)
+                    .current
+                    .is_some_and(|c| c.state == RequestState::Pending)
+            })
+            .count())
     }
 
     fn phase_lock(&self, phase: &str) -> Arc<Mutex<()>> {
@@ -1214,7 +1251,12 @@ impl Flow {
             .insert(id.to_string());
         let me = self.clone();
         let (phase, id) = (phase.to_string(), id.to_string());
-        std::thread::spawn(move || {
+        // Counted from here (the request's own drain guard is still held by the route) until
+        // the result is on file; dropped at the end of the job thread.
+        let carried = self.drain.get().map(|d| d.track(&format!("m2 job {id}")));
+        let id2 = id.clone();
+        let spawned = std::thread::Builder::new().spawn(move || {
+            let _carried = carried;
             // When is a job sent (Codex review of e93dd92)? When its request line has been
             // written to the runner, and that write happens under the admission lock, after a
             // last look at `halted`. So halt() waits for a send in progress, and once it has
@@ -1244,6 +1286,7 @@ impl Flow {
             let reply = match sent {
                 Sending::Halted(why) => {
                     eprintln!("review-gate: {id} not sent: service halted: {why}");
+                    me.drain_fail(format!("m2 job {id}: not sent (service halted)"));
                     me.running
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
@@ -1264,10 +1307,12 @@ impl Flow {
                     eprintln!(
                         "review-gate: result of {id} not recorded: {}",
                         why.join("; ")
-                    )
+                    );
+                    me.drain_fail(format!("m2 job {id}: result not recorded (refused)"));
                 }
                 Err(FlowError::Other(e)) => {
                     eprintln!("review-gate: recording the result of {id} failed: {e:#}");
+                    me.drain_fail(format!("m2 job {id}: recording the result failed"));
                     me.halt(format!("recording the result of {id} failed: {e:#}"));
                 }
             }
@@ -1276,6 +1321,15 @@ impl Flow {
                 .unwrap_or_else(|p| p.into_inner())
                 .remove(&id);
         });
+        if spawned.is_err() {
+            // The closure (and its drain guard) is gone; the request stays Pending.
+            eprintln!("review-gate: {id2} not started: the job thread could not be spawned");
+            self.drain_fail(format!("m2 job {id2}: job thread not spawned"));
+            self.running
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&id2);
+        }
     }
 
     /// The sealed input is what goes out: both files are still what the request recorded.
@@ -3866,6 +3920,8 @@ mod tests {
         );
     }
 
+    /// The maintenance drain over the milestone routes (M2 step 8, Codex n8 R1).
+    mod drain;
     /// Flow service-level fault tests F1–F6 (M2 step 7; F7–F11 are in `faults_remote`).
     mod faults;
     /// F7–F11: remote faults (written by opencode, reviewed by Claude).

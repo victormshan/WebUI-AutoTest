@@ -55,6 +55,12 @@ enum Cmd {
         /// Milestone audits: JSON configuration (absent: milestone routes answer 404)
         #[arg(long)]
         milestones: Option<PathBuf>,
+        /// Maintenance drain: once this path exists (checked at start, before anything else,
+        /// and every second), every external write is refused with 503 while admitted work
+        /// finishes; `GET /health` reports when it is safe to stop. Only removing the file and
+        /// restarting ends it.
+        #[arg(long)]
+        drain_file: Option<PathBuf>,
     },
     /// Milestone audits, as the implementer (talks to the service)
     Milestone {
@@ -310,7 +316,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             token_file,
             relay_dir,
             milestones,
+            drain_file,
         } => {
+            let drain = review_gate::drain::Drain::new(drain_file);
+            drain.check_at_start()?;
+            drain.watch();
             let token = std::fs::read_to_string(&token_file)
                 .with_context(|| format!("reading token {}", token_file.display()))?
                 .trim()
@@ -325,7 +335,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             if let Some(dir) = relay_dir {
                 gate = gate.with_relay(RelayTrace::new(dir));
             }
-            let mut app = AppState::new(gate, ReviewerConfig::from_env(), token);
+            let mut app = AppState::new(gate, ReviewerConfig::from_env(), token).with_drain(drain);
             let mut watched = None;
             if let Some(path) = milestones {
                 let mc = MilestoneConfig::load(&path)?;

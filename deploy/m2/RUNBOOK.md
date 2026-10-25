@@ -1,5 +1,15 @@
 # M2 第 8 步运行手册：部署 review-gate + audit-runner + agent-bridge 并做 E1/E2/E4
 
+> **BLOCKED（2026-10-25）：不要执行本手册的任何步骤。**
+>
+> 1. Codex 实现复核 n8 为 REWORK（停机竞态、gate 自身拉取的匿名性、E2 打印与沙箱）。代码部分
+>    （drain、匿名 git）已在后续提交修复；本手册的停机、E2 与构建段尚未按修复重写。
+> 2. **新发现，待核实**：线上 `/usr/local/bin/review-gate` 已不是第 2 节记录的 `0b4f1e1e…`，而是
+>    2026-10-22 01:03 安装的 `d7a030cb…`，ExecStart 带 `--agents-file /etc/review-gate/agents.json`
+>    （来源待核实：opencode 的身份绑定构建）。按本手册部署会回退线上身份绑定。Codex n12：先在隔离
+>    分支整合并核实来源，重写第 2 节、unit、回滚与状态兼容矩阵。
+> 3. 线上旧 gate 不支持 drain，首次安装的排空（bootstrap）仍无可核验方案：部署段在解决前保持阻断。
+
 状态：**待用户执行**。本目录的文件由 opencode 准备并自测；所有 `sudo`/root 命令只在这里列出，
 **没有执行过**。线上服务、`/etc`、`/usr/local`、`/var/lib/reviewgate`、`~/.local/bin` 均未改动。
 
