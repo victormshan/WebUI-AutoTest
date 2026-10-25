@@ -15,6 +15,8 @@ jobs:
         run: sh tools/auto-iterate/test-install.sh
       - name: Codex adapter
         run: tools/auto-iterate/test-codex-agent.sh
+      - name: opencode adapter
+        run: tools/auto-iterate/test-opencode-agent.sh
       - name: Manifest tool
         run: tools/auto-iterate/test-manifest.sh
       - name: Driver

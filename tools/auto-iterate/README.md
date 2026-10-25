@@ -49,10 +49,17 @@ export REVIEW_GATE_URL=http://127.0.0.1:7878
 export REVIEW_GATE_TOKEN_FILE=~/.config/review-gate/token
 
 tools/auto-iterate/auto-iterate.sh \
-  --task my-task \
-  --agent-cmd 'opencode run "implement the next version; run the tests"' \
+  --task my-task --adapter opencode \
   --message 'auto-iterate: implement the next version' \
   --evidence /tmp/evidence.txt
+```
+
+`--adapter codex|opencode` resolves `<driver dir>/<name>-agent.sh` and is exclusive
+with `--agent-cmd`. A shell command still works for any other host:
+
+```bash
+tools/auto-iterate/auto-iterate.sh --task my-task \
+  --agent-cmd 'my-host run "implement the next version; run the tests"'
 ```
 
 The agent sees `AUTO_ITERATE_REPO`, `AUTO_ITERATE_ITERATION`,
@@ -162,6 +169,31 @@ Windows `.cmd` shim nor a `.exe` on a WSL-only repository is accepted.
 `OPENCODE_FLAGS` defaults to `--auto`, which is what lets an unattended round apply
 its edits; override it to tighten permissions (for example `--pure`). `OPENCODE_MODEL`
 (map to `-m provider/model`) and `OPENCODE_AGENT` (map to `--agent`) are optional.
+
+## Adapter contract
+
+A host adapter is a small executable next to the driver, named `<name>-agent.sh`,
+that implements exactly one version and then returns. Both shipped adapters follow
+the same contract:
+
+- Input: `AUTO_ITERATE_REPO` (mandatory), `AUTO_ITERATE_ITERATION` (mandatory,
+  integer), `AUTO_ITERATE_TASK`, `AUTO_ITERATE_GOAL`, `AUTO_ITERATE_ACCEPTANCE`,
+  `AUTO_ITERATE_VERSION_ACCEPTANCE`, `AUTO_ITERATE_FEEDBACK` (a file with the
+  previous review text) and `AUTO_ITERATE_EVIDENCE` (an output path).
+- Work: implement one coherent version inside the repository and leave every change
+  uncommitted. Run the relevant tests and report the exact commands.
+- Never stage, commit, tag, push, record, or write/infer a verdict; never read gate
+  credentials; unset `REVIEW_GATE_*` before starting the host model.
+- Evidence: append host stdout/stderr to `AUTO_ITERATE_EVIDENCE`; refuse a path
+  inside the repository. The driver passes this file to `review run`.
+- Guards: exit non-zero on host failure; after the host exits, refuse to hand the
+  tree back when `HEAD` moved, a tag name/object changed, or the worktree/index/
+  untracked snapshot is byte-identical (nothing to review).
+- Exit codes: the host's own exit code for failures (the driver stops), `0` with a
+  changed tree on success.
+
+`test-codex-agent.sh` and `test-opencode-agent.sh` exercise these rules with fake
+host binaries, so the adapter contract is testable without a model call.
 
 Run the adapter test without calling a model:
 

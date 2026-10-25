@@ -9,6 +9,8 @@ usage: auto-iterate.sh --task ID --agent-cmd CMD [options]
 
   --task ID          review-gate task id (must already exist and be running)
   --agent-cmd CMD    shell command that implements one version (run in the repo)
+  --adapter NAME     use <driver dir>/NAME-agent.sh (codex or opencode); exclusive
+                     with --agent-cmd
   --message MSG      commit message (default: "auto-iterate: version <n>")
   --evidence FILE    optional evidence file passed to `review run`
   --max N            safety limit on rounds (default 10)
@@ -67,13 +69,14 @@ Exit: 0 done/finalized, 2 lock held or pending state, 3 no external AI,
 TXT
 }
 
-TASK=; AGENT=; MESSAGE=; EVIDENCE=; EVIDENCE_SET=0; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; FALLBACK=; FALLBACK_CHANNEL=claude-subagent; state=
+TASK=; AGENT=; ADAPTER=; MESSAGE=; EVIDENCE=; EVIDENCE_SET=0; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; FALLBACK=; FALLBACK_CHANNEL=claude-subagent; state=
 LOCK_TIMEOUT=0; lockfile=; lock_owner=; VERIFY_CMD=; VERIFY_TIMEOUT=0; VERIFY_CMD_SET=0; VERIFY_TIMEOUT_SET=0; VERSION_PLAN=; resume_review=0; resume_allow_dirty=0; keep_state=0; started_clean=0; durable_feedback=
 NOTIFY=; VERIFY_RANGE=0; NOTIFY_TIMEOUT=0; VERIFY_RANGE_TIMEOUT=0; NOTIFY_EVENTS=; NOTIFY_RETRIES=0; NOTIFY_RETRY_DELAY=1; notify_event=; notify_reason=; manifest=; MANIFEST=; MANIFEST_SET=0; commit=; tag=; rid=; verdict=; channel=; msg=; full=; PLAN=0; status_file=; run_started=
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
         --agent-cmd) AGENT=$2; shift 2 ;;
+        --adapter) ADAPTER=$2; shift 2 ;;
         --message) MESSAGE=$2; shift 2 ;;
         --evidence) EVIDENCE=$2; EVIDENCE_SET=1; shift 2 ;;
         --max) MAX=$2; shift 2 ;;
@@ -108,6 +111,22 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -n "$TASK" ] || { usage >&2; exit 2; }
+if [ -n "$ADAPTER" ]; then
+    if [ -n "$AGENT" ]; then
+        echo "--adapter and --agent-cmd are exclusive" >&2
+        exit 2
+    fi
+    case "$ADAPTER" in
+        codex|opencode) ;;
+        *) echo "unknown adapter: $ADAPTER (expected codex or opencode)" >&2; exit 2 ;;
+    esac
+    _driver_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) \
+        || { echo "cannot resolve the driver directory" >&2; exit 1; }
+    _adapter=$_driver_dir/$ADAPTER-agent.sh
+    [ -f "$_adapter" ] && [ -x "$_adapter" ] \
+        || { echo "adapter not found or not executable: $_adapter" >&2; exit 1; }
+    AGENT=$(printf "'%s'" "$_adapter")
+fi
 if [ "$CHECK" -eq 0 ] && [ "$PLAN" -eq 0 ] && [ -z "$AGENT" ]; then
     usage >&2
     exit 2

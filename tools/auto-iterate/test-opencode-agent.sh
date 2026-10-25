@@ -218,6 +218,26 @@ ev=$tmp/evdir/auto-iterate-opencode-t_3-v3.log
 [ -f "$ev" ] || fail "default evidence file missing: $ev"
 grep -q "fake opencode output" "$ev" || fail "default evidence lacks output"
 
+# driver --adapter selection (no gate call: these fail before any review-gate use)
+driver=$here/auto-iterate.sh
+set +e
+sh "$driver" --task demo --adapter nope >"$tmp/driver-bad.out" 2>"$tmp/driver-bad.err"
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail "--adapter nope exited $rc"
+grep -q "unknown adapter: nope (expected codex or opencode)" "$tmp/driver-bad.err" \
+    || fail "unknown adapter message missing"
+
+set +e
+sh "$driver" --task demo --adapter opencode --agent-cmd true \
+    >"$tmp/driver-both.out" 2>"$tmp/driver-both.err"
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail "--adapter with --agent-cmd exited $rc"
+grep -q "exclusive" "$tmp/driver-both.err" || fail "exclusive message missing"
+
+sh "$driver" --help | grep -q -- '--adapter NAME' || fail "driver help lacks --adapter"
+
 set +e
 sh -n "$here/opencode-agent.sh"
 rc=$?
