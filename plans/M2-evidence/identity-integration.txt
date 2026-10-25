@@ -1,0 +1,244 @@
+# M2 step 8: identity integration (Codex n14 option (i), n18 REWORK, n20 boundaries)
+
+Base fd34eae74984dfc6de7405660743e4d58d2b4f2a (m2-step1 v3). One staged change.
+
+# Identity integration: port table (base fd34eae → staged tree on branch m2-identity-integration)
+
+Codex decisions: n14 (option (i): keep the live --agents-file interface), n18 (identity binding REWORK:
+F1 must be fixed this round; F2, F3), n20 (design accepted with boundaries). One staged change on
+fd34eae, gated as one version; this table is the per-source mapping.
+
+## Sources taken
+
+| Source | What | How | Where it lands |
+|---|---|---|---|
+| 2034b3e (ai-neutral step A, gate-signed, Codex-designed) | `identity.rs` (principals, credential hashes, strict config, canonical families), `Task.principal/credential/config_digest`, `Gate::ensure_owner/can_access`, owner checks on link/reviews/submit/record, job owner, `/check` with the caller's identity, `GateError::Forbidden`, reviewer eligibility (`review_eligibility`, external reviews from another known family), README | `git diff 335db3d 2034b3e -- crates/review-gate` applied with `git apply --3way`; conflicts only in main.rs and service.rs (the drain of fd34eae), resolved by keeping both | crates/review-gate/src/{identity,gate,model,review,reviewer,service,main,mcp,lib}.rs, README.md |
+| 9a19094 / 50e0546 / 1e04741 (live d7a030cb) | `guard` (agent-neutral pre-commit check), `install_guard` (hooks dir confined, no symlink follow), their tests | hook.rs part: `git diff d47eb34 1e04741 -- crates/review-gate/src/hook.rs` applied cleanly; the `Guard` subcommand re-added to main.rs by hand (same text) | hook.rs, main.rs |
+| same | `--agents-file` | kept as a command-line form with new meaning (n20 ①): consistency check against `--identity-config` only | identity.rs `check_agents_file`, main.rs |
+| same | init `implementer_family` claim checked against the token | already in step A (self-report only checked against the authenticated identity) | service.rs |
+
+## Not taken (exclusions)
+
+| Source | What | Why |
+|---|---|---|
+| 2034b3e | plans/M2-evidence/mutation-ai-A.txt, tests-ai-A.txt | evidence files of another version; this version has its own |
+| ai-neutral step B (5f4909f) | `claude-subagent` → `implementer-subagent` rename | writes a name d7a030cb cannot read (n12 §2); separate later deployment |
+| 9a19094 | `AppState.agents` HashMap (token → family) as the identity source; `family_for` with legacy fallback to `claude`; `read_agents` (mode & 007 only) | replaced: the identity configuration is the only authority (n20 ①); F2/F3 |
+| 9a19094 | `NewTask.implementer_family` from the request after the token check | step A freezes the family from the authenticated identity |
+| d47eb34 and everything else on auto-iterate-generic | docs, tools/auto-iterate, CI | not review-gate code; d47eb34 must not be carried |
+
+## New in this version (beyond the sources)
+
+| Change | Why (Codex) |
+|---|---|
+| A task without a principal has no owner (`owner_principal() -> Option`): only the administrator can access it; every write and every `/check` on its repository is refused | n20 ② (no automatic owner by time or legacy credential) |
+| `/check` refuses when any running task of the repository is not the caller's, even if the caller also has one there | n20 (no borrowing, no "found mine, ignore the rest") |
+| `read_admin_file`: O_NOFOLLOW, fstat on the same fd (regular, owner root or euid, no group/other write, nothing for others), directory checked; used for identity.json and the agents file | n18 F3 |
+| `check_agents_file`: duplicates (after unescaping), legacy token, not in identity config, disabled, family mismatch, unknown family → refuse to start; without `--identity-config` → refuse | n18 F2, n20 ① |
+| `milestones.json` `writers` (required, non-empty, unique, enabled principals); milestone write routes 403 for others, checked before admission; no HTTP admin exemption | n20 ③ |
+| `admin task unowned` (read only) and `admin task assign` (dry run unless --yes; reason and expected updated_at required; first assignment only; owner and audit in one atomic task write; refuses while a service holds `state/service.lock` unless it is drained idle) | n20 assign requirements |
+| `serve` holds `state/service.lock` for its whole life | the admin-write guard |
+| `admin identity-from-agents`: identity.json from token files (hash of the client's trimmed token), legacy entry explicit, checked against the agents file (same token set, same families), no token printed, output created 0600 | n20 configuration migration |
+| ETXTBSY retry in the fake-git environment test (only that error) | a flake seen once in the fault-injection suite |
+
+## Tests (raw summary)
+HEAD fd34eae74984dfc6de7405660743e4d58d2b4f2a staged tree 6e594c09f6e7ca77f7bb9a1508ecb5031e62e959
+
+== cargo fmt --check -p review-gate
+exit 0
+
+== cargo clippy -p review-gate --all-targets -- -D warnings
+exit 0
+
+== cargo clippy -p review-gate --all-targets --features fault-injection -- -D warnings
+exit 0
+
+== cargo test -p review-gate
+test result: ok. 267 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 31.41s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit 0
+
+== cargo test -p review-gate --features fault-injection
+test result: ok. 267 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 30.83s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.17s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit 0
+
+## Mutants (each alone, whole lib suite, tree checked equal to baseline after each)
+I1 principal-less task owned by legacy-claude => KILLED | ALL: KILLED exit=101 41.4s ['a_task_without_a_principal_has_no_owner_and_is_never_given_one', 'an_unowned_task_gets_its_first_owner_only_by_an_explicit_assignment']
+I2 check refuses only when none is the callers => KILLED | ALL: KILLED exit=101 37.3s ['a_commit_is_refused_when_another_principal_also_runs_a_task_on_the_repo']
+I3 access by family instead of principal => KILLED | ALL: KILLED exit=101 39.8s ['a_task_without_a_principal_has_no_owner_and_is_never_given_one', 'an_unowned_task_gets_its_first_owner_only_by_an_explicit_assignment']
+I4 agents dup tokens accepted => KILLED | ALL: KILLED exit=101 40.0s ['an_agents_file_with_a_bad_entry_stops_the_start_without_echoing_tokens']
+I5 agents legacy token accepted => KILLED | ALL: KILLED exit=101 41.3s ['an_agents_file_with_a_bad_entry_stops_the_start_without_echoing_tokens']
+I6 agents disabled principal accepted => KILLED | ALL: KILLED exit=101 35.2s ['an_agents_file_with_a_bad_entry_stops_the_start_without_echoing_tokens']
+I7 agents family not compared => KILLED | ALL: KILLED exit=101 36.9s ['an_agents_file_with_a_bad_entry_stops_the_start_without_echoing_tokens']
+I8 admin file group-writable accepted => KILLED | ALL: KILLED exit=101 36.1s ['an_admin_file_must_be_private_regular_and_not_a_symlink']
+I9 admin file symlink followed => KILLED | ALL: KILLED exit=101 35.9s ['an_admin_file_must_be_private_regular_and_not_a_symlink']
+I10 admin file directory not checked => KILLED | ALL: KILLED exit=101 35.8s ['an_admin_file_must_be_private_regular_and_not_a_symlink']
+I11 milestone writers not checked => KILLED | ALL: KILLED exit=101 37.9s ['the_service_lock_has_one_holder', 'only_listed_writers_may_write_milestones']
+I12 owner reassignment allowed => KILLED | ALL: KILLED exit=101 37.8s ['an_unowned_task_gets_its_first_owner_only_by_an_explicit_assignment']
+I13 stale listing accepted => KILLED | ALL: KILLED exit=101 37.2s ['an_unowned_task_gets_its_first_owner_only_by_an_explicit_assignment']
+I14 dry run writes => KILLED | ALL: KILLED exit=101 36.4s ['an_unowned_task_gets_its_first_owner_only_by_an_explicit_assignment']
+I15 converter hashes untrimmed file text => KILLED | ALL: KILLED exit=101 36.5s ['the_converter_hashes_what_the_client_sends_and_matches_the_agents_file', 'the_converter_refuses_duplicates_mismatches_and_unknown_families']
+I16 converter accepts the same token twice => KILLED | ALL: KILLED exit=101 35.1s ['the_converter_refuses_duplicates_mismatches_and_unknown_families']
+I17 converter ignores principals missing from agents file => KILLED | ALL: KILLED exit=101 38.2s ['the_converter_refuses_duplicates_mismatches_and_unknown_families']
+I18 empty writers accepted => KILLED | ALL: KILLED exit=101 38.4s ['a_config_with_a_relative_path_or_an_empty_field_is_refused']
+
+Note: under I11 the service-lock test also failed once: a fork-window flake in that test (the lock's open file description is briefly held by a forking test thread); fixed with a bounded retry after release, the one-holder assertion is unchanged.
+
+## State compatibility with the live gate (two real binaries, isolated state, test tokens)
+old sha256 d7a030cb0bcad51337f49a217297288c5ba4ea858ba5949bc9ad865299307865
+new sha256 26fbc24f7907fe38f0d6dd77ae39577e660969c0ec7628d9a9b84491a2e3bef6
+== 1. OLD (d7a030cb) creates tasks: old-oc with the opencode token, old-legacy with the legacy token
+init old-oc (opencode token): 200 {"created_at":"2026-10-25T07:54:10.866587695Z","current_iteration":1,"expr_id":null,"final_acceptance":"a","goal":"g","history":[],"id":"old-oc","implementer_family":"deepseek","iterations":2,"min_reviewer":"web-gemini",
+init old-legacy (legacy token): 200 {"created_at":"2026-10-25T07:54:10.883502895Z","current_iteration":1,"expr_id":null,"final_acceptance":"a","goal":"g","history":[],"id":"old-legacy","implementer_family":"claude","iterations":2,"min_reviewer":"web-gemini
+== 2. converter: identity.json from the token files, checked against agents.json
+claude claude sha256 16481771b94e…
+opencode deepseek sha256 0300f0719a3c…
+legacy-claude claude sha256 450553775fa6…
+written /tmp/tmp.fIUPCaspuJ/etc/identity.json (sha256 f3f1f52fbd7fc120ba4c6662101cad109608d0699ef8f9c78928c7fab9ce180c)
+exit 0
+tokens in identity.json: 0
+== 3. NEW (X) on the same state: old tasks have no known owner
+review-gate: agents file /tmp/tmp.fIUPCaspuJ/etc/agents.json: 2 entries match the identity configuration
+show old-oc as opencode: 403 {"error":"forbidden: task old-oc has no known owner (created before principals); it stays read-only for the administrator until `admin task assign`"}
+link old-oc as opencode: 403 {"error":"forbidden: task old-oc has no known owner (created before principals); it stays read-only for the administrator until `admin task assign`"}
+link old-legacy as legacy: 403 {"error":"forbidden: task old-legacy has no known owner (created before principals); it stays read-only for the administrator until `admin task assign`"}
+init new-oc as opencode: 200 {"config_digest":"f3f1f52fbd7fc120ba4c6662101cad109608d0699ef8f9c78928c7fab9ce180c","created_at":"2026-10-25T07:54:10.987251495Z","credential":"opencode-1","current_iteration":1,"expr_id":null,"final_acceptance":"a","goa
+link new-oc as claude (other principal): 403 {"error":"forbidden: task new-oc belongs to principal opencode, not claude"}
+link new-oc as opencode (owner): 200 {"config_digest":"f3f1f52fbd7fc120ba4c6662101cad109608d0699ef8f9c78928c7fab9ce180c","created_at":"2026-10-25T07:54:10.987251495Z","credential":"opencode-1","current_iteration":1,"expr_id":"mine","final_acceptance":"a","g
+only --agents-file without --identity-config:
+error: --agents-file needs --identity-config: the agents file names no principals, so it cannot be the identity authority
+exit 2
+unowned listing:
+  old-legacy claude 2026-10-25T07:54:10.883502895Z
+  old-oc deepseek 2026-10-25T07:54:10.866587695Z
+new-oc on file: principal=opencode
+state written by X at start: cache
+keys
+reviews
+service.lock
+tasks
+== 4. ROLLBACK to OLD after X wrote: ownership is ignored and then lost
+link new-oc as claude under OLD: 200 {"created_at":"2026-10-25T07:54:10.987251495Z","current_iteration":1,"expr_id":"stolen","final_acceptance":"a","goal":"g","history":[],"id":"new-oc","implementer_family":"deepseek","iterations":2,"min_reviewer":"web-gemi
+new-oc on file after OLD wrote it: principal=None expr_id=stolen
+
+## Known not covered
+- Ownership by another uid (needs root to set up): checked read-only at deployment.
+- admin task assign's guard against a running, not drained service (admin_write_guard in main.rs) has no automated test; the service lock itself is tested.
+- main.rs check that every milestone writer is an enabled principal has no automated test.
+- Deployment stays BLOCKED: bootstrap drain of the live gate, RUNBOOK rewrite, rebuild of the three binaries from the final X.
+
+== Version 2 (answering gate v1-1, web-gemini, REJECTED on segment 4) ==
+1 (blocking, real): check_commit looked only at the first of the caller's running tasks on the
+repository (init does not forbid several), so an approval under another of them was refused.
+Fixed: every running task (all the caller's at that point) is searched for an unused eligible
+approval of the tree; the commit is reported with the task the approval belongs to; when none
+covers it the refusal names every task and picks none. New test
+an_approval_under_any_of_the_callers_running_tasks_covers_the_commit. Mutant I19 (search only the
+first task, take(1)) is KILLED by it (raw: the test FAILED, 20 passed / 1 failed; source restored
+byte-identical, checked with cmp).
+2 (non-blocking, not a defect): review_eligibility(..., true) in the commit check. The flag only
+matters for the manual channel, and a manual record can only be written by the local
+administrator command (HTTP refuses manual), so every stored manual record is the
+administrator's; external and weak channels ignore it. The comment now says so; behaviour
+unchanged.
+
+Checks for version 2:
+
+== cargo fmt --check -p review-gate
+exit 0
+
+== cargo clippy -p review-gate --all-targets -- -D warnings
+exit 0
+
+== cargo clippy -p review-gate --all-targets --features fault-injection -- -D warnings
+exit 0
+
+== cargo test -p review-gate
+test result: ok. 268 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 30.74s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit 0
+
+== cargo test -p review-gate --features fault-injection
+test result: ok. 268 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 30.67s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.16s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit 0
+
+== Version 3 (answering Codex's review of bde37f0e: VERDICT: REJECTED, two blocking items) ==
+Codex's review text is kept verbatim: reviews/m2-step8-identity/v1-bde37f0e/codex-review.md,
+sha256 8ded47fb52a2b6f2c8889991429878c06984f9a6ead52a70fdd25ed41c4eb119. It was not recorded in the
+gate (that would have been the third rejection in a row and paused the task); the tree it rejected
+is not committed.
+1 (blocking): an administrator could change a task with no known owner (can_access let who.admin
+through, and ensure_owner reused it). Fixed by separating reading from writing:
+- can_read: the owner, or an administrator (list and show);
+- can_write: only the owner, and the local administrator command (Identity.local_admin, set only by
+  Identity::admin(), never over HTTP) for a task with a known owner. A task with no known owner can
+  be changed by nobody; an administrator over HTTP has no write exemption at all.
+  ensure_owner (every write route, review::run/submit) and /check use can_write.
+Tests: nobody_writes_a_task_with_no_known_owner_not_even_an_administrator (HTTP admin and local
+admin: link/record/add_review refused, nothing stored, /check refused, task unchanged),
+an_old_approval_on_a_task_with_no_known_owner_is_never_borrowed (an approval already on file from
+the old binary is never borrowed, by anyone), an_administrator_over_http_has_no_write_exemption_on_
+another_principals_task. The earlier test that asserted the administrator passes ensure_owner on an
+unowned task now asserts the opposite.
+2 (blocking): admin task assign accepted a /health answer from any URL instead of holding the state.
+Fixed: the health path is gone; assign --yes must take state/service.lock and holds it for the whole
+write (Store::try_service_lock returns a ServiceLock; Gate::assign_owner needs it to write), so a
+running service, a restarted one, or a second assignment all exclude it. The operator drains and
+stops the service first. Test (real binary): assign_writes_only_while_it_holds_the_state_lock.
+3 (non-blocking): CLI test for the writer check at start: serve_refuses_a_milestone_writer_that_is_
+not_an_enabled_principal (real binary; a valid writer starts).
+4 (non-blocking): read_admin_file checks the leaf and its direct parent only; the whole fixed path
+/etc/review-gate is to be checked at deployment (RUNBOOK, still BLOCKED).
+
+Mutants for version 3 (each alone, whole review-gate test suite):
+J1 unknown owner writable => KILLED | ALLT: KILLED exit=101 51.6s ['a_task_without_a_principal_has_no_owner_and_is_never_given_one', 'an_old_approval_on_a_task_with_no_known_owner_is_never_borrowed', 'nobody_writes_a_task_with_no_known_owner_not_even_an_administrator']
+J2 http admin write exemption => KILLED | ALLT: KILLED exit=101 48.2s ['an_administrator_over_http_has_no_write_exemption_on_another_principals_task']
+J3 check uses the read rule => KILLED | ALLT: KILLED exit=101 44.8s ['an_old_approval_on_a_task_with_no_known_owner_is_never_borrowed']
+J4 a held state lock is ignored => KILLED | ALLT: KILLED exit=101 44.5s ['the_service_lock_has_one_holder']
+J5 writers not checked at start => KILLED | ALLT: KILLED exit=101 54.4s ['serve_refuses_a_milestone_writer_that_is_not_an_enabled_principal']
+First run of the same list: J3 SURVIVED (no test had an old approval on file for an unowned task)
+and J5 TIMED OUT (the serve test waited without a bound); both tests were added/bounded, then all
+five were KILLED as above. J4 is killed by the unit test; cargo stops before the binary test then.
+
+Checks for version 3:
+
+== cargo fmt --check -p review-gate
+exit 0
+
+== cargo clippy -p review-gate --all-targets -- -D warnings
+exit 0
+
+== cargo clippy -p review-gate --all-targets --features fault-injection -- -D warnings
+exit 0
+
+== cargo test -p review-gate
+test result: ok. 271 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 30.71s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.12s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit 0
+
+== cargo test -p review-gate --features fault-injection
+test result: ok. 271 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 30.77s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.12s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.21s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit 0

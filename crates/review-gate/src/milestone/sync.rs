@@ -681,10 +681,19 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let a = Anon::for_cache(&cache).with_git(fake);
-        assert_eq!(
-            fetch_remote_with(&a, &cache, remote.to_str().unwrap()),
-            Remote::Missing
-        );
+        // A script written just now can fail to exec with ETXTBSY while another test thread
+        // forks (the child briefly holds the write descriptor). Only that error is retried.
+        let mut got = fetch_remote_with(&a, &cache, remote.to_str().unwrap());
+        for _ in 0..5 {
+            match &got {
+                Remote::Unreachable(why) if why.contains("Text file busy") => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    got = fetch_remote_with(&a, &cache, remote.to_str().unwrap());
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(got, Remote::Missing);
         let calls: Vec<Value> = std::fs::read_dir(&log)
             .unwrap()
             .map(|e| serde_json::from_slice(&std::fs::read(e.unwrap().path()).unwrap()).unwrap())

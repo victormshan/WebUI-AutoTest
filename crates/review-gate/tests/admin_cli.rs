@@ -39,6 +39,7 @@ fn a_write_without_yes_changes_nothing_and_with_yes_writes() {
         "runner_socket": root.join("runner.sock"), "runner_uid": 0, "runner_cgroup": "/x",
         "job_timeout_secs": 60, "auditor": "openai", "implementers": ["claude"],
         "bridge_url": "http://127.0.0.1:9", "bridge_token_file": bt,
+        "writers": ["legacy-claude"],
     });
     std::fs::write(root.join("m.json"), config.to_string()).unwrap();
     let mut table = review_gate::milestone::sources::Vendors::first();

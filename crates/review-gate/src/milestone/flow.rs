@@ -3299,7 +3299,9 @@ mod tests {
                 TOKEN.into(),
             );
             if let Some(f) = flow {
-                app = app.with_milestones(f);
+                app = app
+                    .with_milestone_writers(["legacy-claude".to_string()])
+                    .with_milestones(f);
             }
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -3636,6 +3638,7 @@ mod tests {
                 implementers: BTreeSet::from(["claude".to_string()]),
                 bridge_url: "http://127.0.0.1:9".into(),
                 bridge_token_file: fx.root.join("no-token"),
+                writers: vec!["legacy-claude".into()],
             }
         }
 

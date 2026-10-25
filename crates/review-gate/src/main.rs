@@ -5,7 +5,7 @@
 //! Standalone: `ask` (one question to an external AI), `verify`/`verify-range` (attestations, for CI).
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +15,7 @@ use clap::{Parser, Subcommand};
 use review_gate::attest::{self, Keypair};
 use review_gate::client::Client;
 use review_gate::gate::Gate;
+use review_gate::identity::{DEFAULT_CONFIG, Identity, IdentityConfig};
 use review_gate::milestone::cli as ms_cli;
 use review_gate::milestone::flow::Flow;
 use review_gate::milestone::serve::{self as ms_serve, MilestoneConfig};
@@ -46,9 +47,20 @@ enum Cmd {
         state: PathBuf,
         #[arg(long, default_value = "127.0.0.1:7878")]
         listen: String,
-        /// File with the bearer token clients must present
+        /// File with the legacy bearer token clients may present (only when no identity
+        /// configuration is used). It remains a plaintext credential file.
         #[arg(long, default_value = "/etc/review-gate/client.token")]
         token_file: PathBuf,
+        /// Administrator-managed identities: credential hashes → principal and canonical
+        /// family. Defaults to /etc/review-gate/identity.json when that file exists; if it
+        /// exists but does not load, the service refuses to start (no legacy fallback).
+        #[arg(long)]
+        identity_config: Option<PathBuf>,
+        /// The 2026-10-22 token -> family file. Kept as a command-line form only: it needs
+        /// --identity-config, and every entry must match an enabled credential of the same
+        /// family there (otherwise the service refuses to start). It creates no identity.
+        #[arg(long)]
+        agents_file: Option<PathBuf>,
         /// claude-step-relay data dir: the gate writes `traces/<exprId>.gate.md` there
         #[arg(long)]
         relay_dir: Option<PathBuf>,
@@ -69,6 +81,17 @@ enum Cmd {
     },
     /// Claude Code PreToolUse hook (Bash): blocks unreviewed `git commit` and unattested `git push`
     Hook,
+    /// Agent-neutral git pre-commit guard: block a commit the gate has not approved
+    Guard {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Install a `pre-commit` hook that runs this guard
+        #[arg(long)]
+        install: bool,
+        /// Overwrite an existing pre-commit hook
+        #[arg(long)]
+        force: bool,
+    },
     /// Print the gate's attestation public key (pin it in CI)
     Pubkey,
     /// Verify the attestation note on one commit (no service needed)
@@ -131,6 +154,9 @@ enum Cmd {
         /// auto | gemini-api | openai | web-gemini
         #[arg(long, default_value = "auto")]
         provider: String,
+        /// The implementer's model family; providers from the same family are skipped/refused
+        #[arg(long, default_value = "claude")]
+        implementer_family: String,
         /// Print {provider, model, family, channel, answer} as JSON
         #[arg(long)]
         json: bool,
@@ -158,6 +184,10 @@ enum TaskCmd {
         min_reviewer: String,
         #[arg(long, default_value = "auto")]
         review_provider: String,
+        /// Self-reported implementer family; only checked against the authenticated identity
+        /// (a mismatch is refused), never trusted as the frozen value.
+        #[arg(long)]
+        implementer_family: Option<String>,
     },
     Show {
         #[arg(long)]
@@ -273,6 +303,30 @@ enum AdminCmd {
         #[command(subcommand)]
         cmd: AdminMilestoneCmd,
     },
+    /// Tasks without a known owner (created before principals): list them, or give one its
+    /// first owner. Writes are dry runs unless --yes is given.
+    Task {
+        #[arg(long, default_value = "/var/lib/reviewgate/state")]
+        state: PathBuf,
+        #[command(subcommand)]
+        cmd: AdminTaskCmd,
+    },
+    /// Migration: write an identity configuration (hashes only) from token files, with the
+    /// legacy client token as the explicit legacy-claude entry, checked against the deployed
+    /// agents file. Prints no token; the output file is created 0600 and must not exist.
+    IdentityFromAgents {
+        /// principal=family=token-file (repeat for each principal)
+        #[arg(long = "credential", required = true)]
+        credentials: Vec<String>,
+        /// The legacy client token file (becomes principal legacy-claude, family claude)
+        #[arg(long)]
+        legacy: Option<PathBuf>,
+        /// The deployed --agents-file to check against
+        #[arg(long)]
+        agents: Option<PathBuf>,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Record a human verdict (the only way to use the `manual` channel)
     Manual {
         #[arg(long, default_value = "/var/lib/reviewgate/state")]
@@ -293,6 +347,33 @@ enum AdminCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum AdminTaskCmd {
+    /// Read only: every task with no known owner (id, times, family, status), to decide on
+    Unowned,
+    /// Give one task with no known owner its first owner. Refused if it has one, if it changed
+    /// since it was listed, or (with --yes) while a gate service holds the state.
+    Assign {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        principal: String,
+        /// Why this principal owns it (kept with the task)
+        #[arg(long)]
+        reason: String,
+        /// The task's `updated_at` as `unowned` listed it
+        #[arg(long)]
+        expect_updated_at: String,
+        /// The identity configuration the principal must be enabled in
+        #[arg(long, default_value = DEFAULT_CONFIG)]
+        identity_config: PathBuf,
+        /// Execute the write (needs the gate service stopped: it takes the state lock for the
+        /// whole write). Without it, only show what would be written.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     match run(Cli::parse()).await {
@@ -308,12 +389,30 @@ fn print(v: &impl serde::Serialize) {
     println!("{}", serde_json::to_string_pretty(v).expect("serializable"));
 }
 
+/// Whether the administrator identity configuration must be loaded from `path`.
+///
+/// Only a genuinely absent file permits the explicit legacy token. `Path::exists()` would report
+/// `false` for permission or other metadata errors and silently fall back to the plaintext token,
+/// so every other error refuses to start.
+fn default_config_present(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(anyhow::anyhow!(
+            "cannot inspect identity configuration {}: {e}",
+            path.display()
+        )),
+    }
+}
+
 async fn run(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
         Cmd::Serve {
             state,
             listen,
             token_file,
+            identity_config,
+            agents_file,
             relay_dir,
             milestones,
             drain_file,
@@ -321,21 +420,58 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let drain = review_gate::drain::Drain::new(drain_file);
             drain.check_at_start()?;
             drain.watch();
-            let token = std::fs::read_to_string(&token_file)
-                .with_context(|| format!("reading token {}", token_file.display()))?
-                .trim()
-                .to_string();
-            anyhow::ensure!(
-                token.len() >= 32,
-                "token in {} is too short (need >= 32 chars)",
-                token_file.display()
-            );
-            let mut gate =
-                Gate::new(Store::open(&state)?).with_signer(Keypair::load_or_create(&state)?);
+            // A configured identity map is authoritative. It exists but fails to load → refuse
+            // to start; never fall back to the legacy plaintext token.
+            let identities = match identity_config {
+                Some(path) => IdentityConfig::load(&path)?,
+                None if default_config_present(Path::new(DEFAULT_CONFIG))? => {
+                    IdentityConfig::load(Path::new(DEFAULT_CONFIG))?
+                }
+                None => {
+                    let token = std::fs::read_to_string(&token_file)
+                        .with_context(|| format!("reading token {}", token_file.display()))?
+                        .trim()
+                        .to_string();
+                    anyhow::ensure!(
+                        token.len() >= 32,
+                        "token in {} is too short (need >= 32 chars)",
+                        token_file.display()
+                    );
+                    IdentityConfig::legacy(token)
+                }
+            };
+            if let Some(path) = &agents_file {
+                // The legacy token is compared as the service reads it (trimmed), when present.
+                let legacy = match std::fs::read_to_string(&token_file) {
+                    Ok(t) => Some(t.trim().to_string()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "reading {}: {}",
+                            token_file.display(),
+                            e.kind()
+                        ));
+                    }
+                };
+                let n =
+                    review_gate::identity::check_agents_file(path, &identities, legacy.as_deref())?;
+                eprintln!(
+                    "review-gate: agents file {}: {n} entries match the identity configuration",
+                    path.display()
+                );
+            }
+            let store = Store::open(&state)?;
+            // Held for the service's whole life: local admin writes check it (n20).
+            let _service_lock = store
+                .try_service_lock()?
+                .context("another gate service holds this state")?;
+            let mut gate = Gate::new(store).with_signer(Keypair::load_or_create(&state)?);
             if let Some(dir) = relay_dir {
                 gate = gate.with_relay(RelayTrace::new(dir));
             }
-            let mut app = AppState::new(gate, ReviewerConfig::from_env(), token).with_drain(drain);
+            let mut app =
+                AppState::with_identities(gate, ReviewerConfig::from_env(), identities.clone())
+                    .with_drain(drain);
             let mut watched = None;
             if let Some(path) = milestones {
                 let mc = MilestoneConfig::load(&path)?;
@@ -353,7 +489,15 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 ms_serve::watch_halt(flow.clone(), tx);
                 #[cfg(feature = "fault-injection")]
                 ms_serve::fault::start(&flow, &mc.runner_socket);
-                app = app.with_milestones(flow.clone());
+                for w in &mc.writers {
+                    anyhow::ensure!(
+                        identities.has_enabled_principal(w),
+                        "milestone config: writer {w:?} is not an enabled principal of the identity configuration"
+                    );
+                }
+                app = app
+                    .with_milestone_writers(mc.writers.clone())
+                    .with_milestones(flow.clone());
                 watched = Some((flow, rx));
             }
             let app = Arc::new(app);
@@ -388,13 +532,16 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     repo,
                     min_reviewer,
                     review_provider,
+                    implementer_family,
                 } => {
                     let repo = std::fs::canonicalize(&repo)
                         .with_context(|| format!("repo {}", repo.display()))?;
                     c.post(
                         "/tasks",
                         json!({ "id": id, "goal": goal, "acceptance": acceptance, "iterations": iterations,
-                                "repo": repo, "min_reviewer": min_reviewer, "review_provider": review_provider }),
+                                "repo": repo, "min_reviewer": min_reviewer,
+                                "review_provider": review_provider,
+                                "implementer_family": implementer_family }),
                     )
                     .await?
                 }
@@ -495,6 +642,27 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 }
             })
         }
+        Cmd::Guard {
+            repo,
+            install,
+            force,
+        } => {
+            let repo =
+                std::fs::canonicalize(&repo).with_context(|| format!("repo {}", repo.display()))?;
+            if install {
+                let path = hook::install_guard(&repo, force)?;
+                println!("{}", path.display());
+                return Ok(ExitCode::SUCCESS);
+            }
+            let client = Client::from_env()?;
+            match hook::guard(&client, &repo).await? {
+                None => Ok(ExitCode::SUCCESS),
+                Some(reason) => {
+                    eprintln!("{reason}");
+                    Ok(ExitCode::from(1))
+                }
+            }
+        }
         Cmd::Pubkey => {
             let v: Value = Client::from_env()?.get("/pubkey").await?;
             println!("{}", v["key"].as_str().unwrap_or_default());
@@ -559,6 +727,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 .with_context(|| format!("reading {}", file.display()))?;
             print(&review::submit(
                 &gate,
+                &Identity::admin(),
                 &id,
                 &tree,
                 &base,
@@ -566,6 +735,123 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 &text,
             )?);
             Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Admin {
+            cmd:
+                AdminCmd::IdentityFromAgents {
+                    credentials,
+                    legacy,
+                    agents,
+                    out,
+                },
+        } => {
+            let mut specs = Vec::new();
+            for c in &credentials {
+                let mut it = c.splitn(3, '=');
+                let (Some(p), Some(f), Some(t)) = (it.next(), it.next(), it.next()) else {
+                    anyhow::bail!("--credential must be principal=family=token-file");
+                };
+                specs.push(review_gate::identity::CredentialSpec {
+                    principal: p.into(),
+                    family: f.into(),
+                    token_file: t.into(),
+                });
+            }
+            let text =
+                review_gate::identity::build_config(&specs, legacy.as_deref(), agents.as_deref())?;
+            {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&out)
+                    .with_context(|| format!("creating {} (it must not exist)", out.display()))?;
+                f.write_all(text.as_bytes())?;
+                f.sync_all()?;
+            }
+            let v: Value = serde_json::from_str(&text)?;
+            for p in v["principals"].as_array().into_iter().flatten() {
+                eprintln!(
+                    "{} {} sha256 {}…",
+                    p["id"].as_str().unwrap_or(""),
+                    p["family"].as_str().unwrap_or(""),
+                    &p["credentials"][0]["sha256"].as_str().unwrap_or("")[..12]
+                );
+            }
+            eprintln!(
+                "written {} (sha256 {})",
+                out.display(),
+                review_gate::identity::token_hash(&text)
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Admin {
+            cmd: AdminCmd::Task { state, cmd },
+        } => {
+            let store = Store::open(&state)?;
+            match cmd {
+                AdminTaskCmd::Unowned => {
+                    let list: Vec<Value> = store
+                        .list_tasks()?
+                        .into_iter()
+                        .filter(|t| t.owner_principal().is_none())
+                        .map(|t| {
+                            json!({ "id": t.id, "created_at": t.created_at, "updated_at": t.updated_at,
+                                    "implementer_family": t.implementer_family, "status": t.status,
+                                    "current_iteration": t.current_iteration, "repo": t.repo })
+                        })
+                        .collect();
+                    print(&list);
+                    Ok(ExitCode::SUCCESS)
+                }
+                AdminTaskCmd::Assign {
+                    id,
+                    principal,
+                    reason,
+                    expect_updated_at,
+                    identity_config,
+                    yes,
+                } => {
+                    let expect = chrono::DateTime::parse_from_rfc3339(&expect_updated_at)
+                        .context("--expect-updated-at must be RFC 3339")?
+                        .with_timezone(&chrono::Utc);
+                    let ids = IdentityConfig::load(&identity_config)?;
+                    anyhow::ensure!(
+                        ids.has_enabled_principal(&principal),
+                        "{principal:?} is not an enabled principal of {}",
+                        identity_config.display()
+                    );
+                    // The write holds the state lock throughout: drain the service, stop it, then
+                    // assign (Codex review of the integration, item 2).
+                    let lock = if yes {
+                        Some(store.try_service_lock()?.context(
+                            "a gate service holds this state: drain it, stop it, then assign",
+                        )?)
+                    } else {
+                        None
+                    };
+                    let task = Gate::new(store).assign_owner(
+                        &id,
+                        &principal,
+                        &reason,
+                        expect,
+                        lock.as_ref(),
+                    )?;
+                    eprintln!(
+                        "{}",
+                        if yes {
+                            "written"
+                        } else {
+                            "dry run: nothing written (add --yes)"
+                        }
+                    );
+                    print(&json!({ "id": task.id, "principal": task.principal,
+                                   "owner_assigned": task.owner_assigned }));
+                    Ok(ExitCode::SUCCESS)
+                }
+            }
         }
         Cmd::Admin {
             cmd:
@@ -580,9 +866,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Milestone { cmd } => milestone(cmd).await,
         Cmd::Ask {
             provider,
+            implementer_family,
             json,
             probe,
-        } => Ok(ask(&provider, json, probe).await),
+        } => Ok(ask(&provider, &implementer_family, json, probe).await),
     }
 }
 
@@ -707,7 +994,7 @@ fn load_pubkey(arg: &str) -> Result<ed25519_dalek::VerifyingKey> {
 }
 
 /// Exit codes: 0 answered · 3 no external AI available · 1 failed · 2 usage error.
-async fn ask(provider: &str, json: bool, probe: bool) -> ExitCode {
+async fn ask(provider: &str, implementer_family: &str, json: bool, probe: bool) -> ExitCode {
     let cfg = ReviewerConfig::from_env();
     if probe {
         let map: serde_json::Map<String, Value> = reviewer::probe(&cfg)
@@ -723,7 +1010,7 @@ async fn ask(provider: &str, json: bool, probe: bool) -> ExitCode {
         eprintln!("empty prompt on stdin");
         return ExitCode::from(2);
     }
-    match reviewer::ask(&cfg, prompt.trim(), provider).await {
+    match reviewer::ask(&cfg, prompt.trim(), provider, implementer_family).await {
         Ok(r) if json => {
             println!("{}", serde_json::to_string(&r).expect("serializable"));
             ExitCode::SUCCESS
@@ -740,5 +1027,27 @@ async fn ask(provider: &str, json: bool, probe: bool) -> ExitCode {
                 1
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn an_absent_default_config_is_the_only_state_that_allows_legacy() {
+        let d = tempfile::tempdir().unwrap();
+        let absent = d.path().join("identity.json");
+        assert!(!default_config_present(&absent).unwrap());
+
+        fs::write(&absent, "{}").unwrap();
+        assert!(default_config_present(&absent).unwrap());
+
+        // A path error that is not "not found" (here ENOTDIR) must not look like an absent file.
+        let file = d.path().join("not-a-dir");
+        fs::write(&file, "x").unwrap();
+        let err = default_config_present(&file.join("identity.json")).unwrap_err();
+        assert!(err.to_string().contains("cannot inspect"), "{err}");
     }
 }

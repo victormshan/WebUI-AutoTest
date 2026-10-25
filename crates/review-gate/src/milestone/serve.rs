@@ -44,6 +44,10 @@ pub struct MilestoneConfig {
     pub bridge_url: String,
     /// The observer token: used for nothing but reading the bridge.
     pub bridge_token_file: PathBuf,
+    /// Gate principals that may write milestones over HTTP (apply, request, cancel, published).
+    /// Required and non-empty: there is no default writer (Codex n20 ③). These are gate
+    /// principals, not bridge agent names; `implementers` stays the bridge-side set.
+    pub writers: Vec<String>,
 }
 
 impl MilestoneConfig {
@@ -72,6 +76,18 @@ impl MilestoneConfig {
         }
         if c.job_timeout_secs == 0 {
             bail!("milestone config: job_timeout_secs must be positive");
+        }
+        if c.writers.is_empty() {
+            bail!("milestone config: writers must list at least one gate principal");
+        }
+        let mut seen = BTreeSet::new();
+        for w in &c.writers {
+            if !crate::store::valid_id(w) {
+                bail!("milestone config: invalid writer principal {w:?}");
+            }
+            if !seen.insert(w.as_str()) {
+                bail!("milestone config: writer {w:?} is listed twice");
+            }
         }
         Ok(c)
     }
@@ -257,7 +273,8 @@ mod tests {
             "repo_id": "r", "repo": "/repo", "remote_url": "file:///remote",
             "runner_socket": "/run/a.sock", "runner_uid": 1, "runner_cgroup": "/x",
             "job_timeout_secs": 60, "auditor": "openai", "implementers": ["claude"],
-            "bridge_url": "http://127.0.0.1:7879", "bridge_token_file": "/etc/t"
+            "bridge_url": "http://127.0.0.1:7879", "bridge_token_file": "/etc/t",
+            "writers": ["claude"]
         });
         std::fs::write(&p, good.to_string()).unwrap();
         MilestoneConfig::load(&p).unwrap();
@@ -266,6 +283,9 @@ mod tests {
             ("auditor", serde_json::json!(" ")),
             ("implementers", serde_json::json!([])),
             ("job_timeout_secs", serde_json::json!(0)),
+            ("writers", serde_json::json!([])),
+            ("writers", serde_json::json!(["claude", "claude"])),
+            ("writers", serde_json::json!(["bad id"])),
         ] {
             let mut bad = good.clone();
             bad[k] = v;
@@ -276,5 +296,9 @@ mod tests {
         extra["unknown"] = serde_json::json!(1);
         std::fs::write(&p, extra.to_string()).unwrap();
         assert!(MilestoneConfig::load(&p).is_err(), "unknown field");
+        let mut missing = good.clone();
+        missing.as_object_mut().unwrap().remove("writers");
+        std::fs::write(&p, missing.to_string()).unwrap();
+        assert!(MilestoneConfig::load(&p).is_err(), "writers is required");
     }
 }

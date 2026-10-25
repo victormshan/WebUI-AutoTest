@@ -9,6 +9,7 @@ pub mod drain;
 pub mod gate;
 pub mod git;
 pub mod hook;
+pub mod identity;
 pub mod mcp;
 pub mod milestone;
 pub mod model;
@@ -28,6 +29,8 @@ pub enum GateError {
     Invalid(String),
     #[error("no such task: {0}")]
     NoSuchTask(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("no such review: {0}")]
     NoSuchReview(String),
     #[error("task {0} is {1:?}, not running")]

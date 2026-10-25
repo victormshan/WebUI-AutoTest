@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use axum::Extension;
 use axum::extract::{Path, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
@@ -21,6 +22,7 @@ use tokio::sync::Mutex;
 use crate::GateError;
 use crate::drain::{Drain, OpGuard};
 use crate::gate::{Gate, NewTask};
+use crate::identity::{Identity, IdentityConfig};
 use crate::milestone::flow::{Flow, FlowError, valid_job_id};
 use crate::model::{Channel, ReviewRecord};
 use crate::review::{self, ReviewError};
@@ -29,7 +31,7 @@ use crate::reviewer::{AskError, ReviewerConfig};
 pub struct AppState {
     pub gate: Gate,
     pub reviewers: ReviewerConfig,
-    token: String,
+    identities: IdentityConfig,
     jobs: Mutex<HashMap<String, Job>>,
     next_job: AtomicU64,
     /// Serializes state mutations (task files are read-modify-write).
@@ -38,19 +40,32 @@ pub struct AppState {
     milestones: Option<Arc<Flow>>,
     /// Maintenance drain: every external write is admitted through it.
     drain: Arc<Drain>,
+    /// Gate principals that may write milestones over HTTP (empty: nobody).
+    ms_writers: std::collections::BTreeSet<String>,
 }
 
 impl AppState {
+    /// Legacy constructor: one plaintext bearer token → `legacy-claude` / `claude`.
     pub fn new(gate: Gate, reviewers: ReviewerConfig, token: String) -> Self {
+        Self::with_identities(gate, reviewers, IdentityConfig::legacy(token))
+    }
+
+    /// Constructor with an administrator-managed identity map.
+    pub fn with_identities(
+        gate: Gate,
+        reviewers: ReviewerConfig,
+        identities: IdentityConfig,
+    ) -> Self {
         Self {
             gate,
             reviewers,
-            token,
+            identities,
             jobs: Mutex::new(HashMap::new()),
             next_job: AtomicU64::new(1),
             write: Mutex::new(()),
             milestones: None,
             drain: Drain::new(None),
+            ms_writers: Default::default(),
         }
     }
 
@@ -68,6 +83,13 @@ impl AppState {
 
     pub fn drain(&self) -> &Arc<Drain> {
         &self.drain
+    }
+
+    /// The principals that may write milestones (`milestones.json` `writers`, validated against
+    /// the identity configuration by the caller).
+    pub fn with_milestone_writers(mut self, writers: impl IntoIterator<Item = String>) -> Self {
+        self.ms_writers = writers.into_iter().collect();
+        self
     }
 }
 
@@ -91,6 +113,9 @@ pub struct Job {
     /// No external model was reachable (the caller should wait for a human, not downgrade).
     #[serde(default)]
     pub unavailable: bool,
+    /// The principal that started the job; only it (or the administrator) may read it.
+    #[serde(default)]
+    pub principal: String,
 }
 
 pub struct ApiError(StatusCode, String);
@@ -106,6 +131,7 @@ impl From<GateError> for ApiError {
         let code = match e {
             GateError::InvalidId(_) | GateError::Invalid(_) => StatusCode::BAD_REQUEST,
             GateError::NoSuchTask(_) | GateError::NoSuchReview(_) => StatusCode::NOT_FOUND,
+            GateError::Forbidden(_) => StatusCode::FORBIDDEN,
             GateError::NotRunning(..) | GateError::Conflict(_) | GateError::Mismatch(_) => {
                 StatusCode::CONFLICT
             }
@@ -142,30 +168,23 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// Constant-time comparison of the bearer token.
-fn token_ok(expected: &str, header_value: Option<&str>) -> bool {
-    let Some(given) = header_value.and_then(|h| h.strip_prefix("Bearer ")) else {
-        return false;
-    };
-    let (a, b) = (expected.as_bytes(), given.as_bytes());
-    if a.is_empty() || a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-async fn auth(State(s): State<Arc<AppState>>, req: Request, next: Next) -> Response {
-    let header = req
+/// Resolves the bearer token to a principal + family, and carries it in the request context.
+/// Unknown, disabled and (in hashed mode) legacy tokens are all simply unauthorized: there is
+/// no fallback from a configured identity map to the legacy token.
+async fn auth(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
+    let given = req
         .headers()
         .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-    if !token_ok(&s.token, header) {
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "));
+    let Some(who) = given.and_then(|t| s.identities.authenticate(t)) else {
         return ApiError(
             StatusCode::UNAUTHORIZED,
             "missing or wrong bearer token".into(),
         )
         .into_response();
-    }
+    };
+    req.extensions_mut().insert(who);
     next.run(req).await
 }
 
@@ -211,9 +230,16 @@ struct InitBody {
     min_reviewer: Option<String>,
     #[serde(default)]
     review_provider: Option<String>,
+    /// Optional self-report: only checked against the authenticated identity, never trusted.
+    #[serde(default)]
+    implementer_family: Option<String>,
 }
 
-async fn init_task(State(s): State<Arc<AppState>>, Json(b): Json<InitBody>) -> ApiResult<Value> {
+async fn init_task(
+    State(s): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
+    Json(b): Json<InitBody>,
+) -> ApiResult<Value> {
     let _op = admit(&s, "init task")?;
     let min = match b.min_reviewer.as_deref() {
         None => Channel::WebGemini,
@@ -223,6 +249,11 @@ async fn init_task(State(s): State<Arc<AppState>>, Json(b): Json<InitBody>) -> A
     let _w = s.write.lock().await;
     let task = s.gate.init(NewTask {
         id: b.id,
+        principal: who.principal.clone(),
+        implementer_family: who.family.clone(),
+        credential: who.credential.clone(),
+        config_digest: who.config_digest.clone(),
+        claimed_family: b.implementer_family,
         goal: b.goal,
         final_acceptance: b.acceptance,
         repo: b.repo,
@@ -233,17 +264,29 @@ async fn init_task(State(s): State<Arc<AppState>>, Json(b): Json<InitBody>) -> A
     Ok(Json(json!(task)))
 }
 
-async fn list_tasks(State(s): State<Arc<AppState>>) -> ApiResult<Value> {
+async fn list_tasks(
+    State(s): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
+) -> ApiResult<Value> {
     let tasks = s
         .gate
         .store()
         .list_tasks()
-        .map_err(|e| ApiError::from(GateError::Io(e)))?;
+        .map_err(|e| ApiError::from(GateError::Io(e)))?
+        .into_iter()
+        .filter(|t| s.gate.can_read(t, &who))
+        .collect::<Vec<_>>();
     Ok(Json(json!(tasks)))
 }
 
-async fn show_task(State(s): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResult<Value> {
-    Ok(Json(json!(s.gate.store().load_task(&id)?)))
+async fn show_task(
+    State(s): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
+    Path(id): Path<String>,
+) -> ApiResult<Value> {
+    let task = s.gate.store().load_task(&id)?;
+    s.gate.ensure_readable(&task, &who)?;
+    Ok(Json(json!(task)))
 }
 
 #[derive(Deserialize)]
@@ -253,12 +296,13 @@ struct LinkBody {
 
 async fn link_task(
     State(s): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
     Path(id): Path<String>,
     Json(b): Json<LinkBody>,
 ) -> ApiResult<Value> {
     let _op = admit(&s, "link task")?;
     let _w = s.write.lock().await;
-    Ok(Json(json!(s.gate.link(&id, &b.expr_id)?)))
+    Ok(Json(json!(s.gate.link(&who, &id, &b.expr_id)?)))
 }
 
 #[derive(Deserialize)]
@@ -274,12 +318,14 @@ struct ReviewBody {
 /// Starts an external review in the background (they take minutes) and returns the job.
 async fn request_review(
     State(s): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
     Path(id): Path<String>,
     Json(b): Json<ReviewBody>,
 ) -> ApiResult<Job> {
     let op = admit(&s, "review request")?;
     // Fail fast on bad input before spawning.
     let task = s.gate.store().load_task(&id)?;
+    s.gate.ensure_owner(&task, &who)?;
     review::staged_from(std::path::Path::new(&task.repo), &b.tree, &b.base)?;
     let job = Job {
         id: format!("{id}-{}", s.next_job.fetch_add(1, Ordering::Relaxed)),
@@ -288,6 +334,7 @@ async fn request_review(
         record: None,
         error: None,
         unavailable: false,
+        principal: who.principal.clone(),
     };
     s.jobs.lock().await.insert(job.id.clone(), job.clone());
     let state = s.clone();
@@ -298,6 +345,7 @@ async fn request_review(
     tokio::spawn(async move {
         let res = review::run(
             &state.gate,
+            &who,
             &id,
             &b.tree,
             &b.base,
@@ -326,14 +374,23 @@ async fn request_review(
     Ok(Json(job))
 }
 
-async fn job_status(State(s): State<Arc<AppState>>, Path(job): Path<String>) -> ApiResult<Job> {
-    s.jobs
-        .lock()
-        .await
-        .get(&job)
-        .cloned()
-        .map(Json)
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no such job {job}")))
+async fn job_status(
+    State(s): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
+    Path(job): Path<String>,
+) -> ApiResult<Job> {
+    let found = s.jobs.lock().await.get(&job).cloned();
+    match found {
+        Some(j) if who.admin || j.principal == who.principal => Ok(Json(j)),
+        Some(_) => Err(ApiError(
+            StatusCode::FORBIDDEN,
+            format!("job {job} belongs to another principal"),
+        )),
+        None => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no such job {job}"),
+        )),
+    }
 }
 
 #[derive(Deserialize)]
@@ -347,6 +404,7 @@ struct SubmitBody {
 /// Weaker channels only (claude-subagent, self-review). `manual` is refused over HTTP.
 async fn submit_review(
     State(s): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
     Path(id): Path<String>,
     Json(b): Json<SubmitBody>,
 ) -> ApiResult<ReviewRecord> {
@@ -367,8 +425,10 @@ async fn submit_review(
     };
     let _op = admit(&s, "review submit")?;
     let _w = s.write.lock().await;
+    let task = s.gate.store().load_task(&id)?;
+    s.gate.ensure_owner(&task, &who)?;
     Ok(Json(review::submit(
-        &s.gate, &id, &b.tree, &b.base, channel, &b.text,
+        &s.gate, &who, &id, &b.tree, &b.base, channel, &b.text,
     )?))
 }
 
@@ -381,11 +441,12 @@ struct CheckBody {
 
 async fn check_commit(
     State(s): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
     Json(b): Json<CheckBody>,
 ) -> ApiResult<crate::gate::CommitCheck> {
     // Not a write, but refused while draining all the same: a refusal never lets a commit by.
     let _op = admit(&s, "check")?;
-    Ok(Json(s.gate.check_commit(&b.repo, &b.tree, &b.base)?))
+    Ok(Json(s.gate.check_commit(&who, &b.repo, &b.tree, &b.base)?))
 }
 
 /// The attestation verification key (public; pin it in CI).
@@ -410,6 +471,7 @@ struct RecordBody {
 
 async fn record(
     State(s): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
     Path(id): Path<String>,
     Json(b): Json<RecordBody>,
 ) -> ApiResult<Value> {
@@ -417,7 +479,7 @@ async fn record(
     let _w = s.write.lock().await;
     let out = s
         .gate
-        .record(&id, &b.review, b.commit.as_deref(), b.tag.as_deref())?;
+        .record(&who, &id, &b.review, b.commit.as_deref(), b.tag.as_deref())?;
     let attestation = out.task.history.last().and_then(|h| h.attestation.clone());
     Ok(Json(
         json!({ "action": out.action, "task": out.task, "attestation": attestation }),
@@ -525,9 +587,21 @@ async fn guarded<T: Send + 'static>(
 /// (the flow carries that one on).
 async fn guarded_write<T: Send + 'static>(
     s: &AppState,
+    who: &Identity,
     what: &str,
     f: impl FnOnce(&Arc<Flow>) -> Result<T, FlowError> + Send + 'static,
 ) -> Result<T, Box<Response>> {
+    // Authorized before admission: a refused caller is never counted and changes nothing.
+    // No administrator exemption over HTTP.
+    if !s.ms_writers.contains(&who.principal) {
+        return Err(Box::new(
+            ApiError(
+                StatusCode::FORBIDDEN,
+                format!("principal {} may not write milestones", who.principal),
+            )
+            .into_response(),
+        ));
+    }
     let op = admit(s, what).map_err(|e| Box::new(e.into_response()))?;
     guarded(s, op, f).await
 }
@@ -560,11 +634,15 @@ struct ApplyBody {
     supersedes: Option<String>,
 }
 
-async fn ms_apply(State(s): State<Arc<AppState>>, Json(b): Json<ApplyBody>) -> Response {
+async fn ms_apply(
+    State(s): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
+    Json(b): Json<ApplyBody>,
+) -> Response {
     if let Err(r) = check_phase(&b.phase) {
         return *r;
     }
-    match guarded_write(&s, "milestone apply", move |f| {
+    match guarded_write(&s, &who, "milestone apply", move |f| {
         f.apply(
             &b.phase,
             &b.base,
@@ -589,13 +667,18 @@ struct RequestBody {
 
 async fn ms_request(
     State(s): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
     Path(phase): Path<String>,
     Json(b): Json<RequestBody>,
 ) -> Response {
     if let Err(r) = check_phase(&phase) {
         return *r;
     }
-    match guarded_write(&s, "milestone request", move |f| f.request(&phase, &b.head)).await {
+    match guarded_write(&s, &who, "milestone request", move |f| {
+        f.request(&phase, &b.head)
+    })
+    .await
+    {
         Ok(id) => ok_json(json!({ "request_id": id })),
         Err(r) => *r,
     }
@@ -619,6 +702,7 @@ async fn ms_status(State(s): State<Arc<AppState>>, Path(phase): Path<String>) ->
 
 async fn ms_cancel(
     State(s): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
     Path((phase, id)): Path<(String, String)>,
 ) -> Response {
     if let Err(r) = check_phase(&phase) {
@@ -631,7 +715,7 @@ async fn ms_cancel(
         )
         .into_response();
     }
-    match guarded_write(&s, "milestone cancel", move |f| f.cancel(&phase, &id)).await {
+    match guarded_write(&s, &who, "milestone cancel", move |f| f.cancel(&phase, &id)).await {
         Ok(()) => ok_json(json!({ "cancelled": true })),
         Err(r) => *r,
     }
@@ -651,8 +735,12 @@ struct PublishedBody {
     hash: String,
 }
 
-async fn ms_published(State(s): State<Arc<AppState>>, Json(b): Json<PublishedBody>) -> Response {
-    match guarded_write(&s, "milestone published", move |f| {
+async fn ms_published(
+    State(s): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
+    Json(b): Json<PublishedBody>,
+) -> Response {
+    match guarded_write(&s, &who, "milestone published", move |f| {
         f.published_then_archive(b.seq, &b.hash)
     })
     .await
@@ -686,6 +774,31 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn start_in(bridge: &str, drain: Arc<Drain>) -> Env {
+        let e = start_drained(bridge, IdentityConfig::legacy(TOKEN), TOKEN, drain).await;
+        e.client
+            .post::<Value>(
+                "/tasks",
+                json!({ "id": "t", "goal": "g", "acceptance": "a", "iterations": 1, "repo": e.repo }),
+            )
+            .await
+            .unwrap();
+        e
+    }
+
+    pub(crate) async fn start_with_identities(
+        bridge: &str,
+        identities: IdentityConfig,
+        client_token: &str,
+    ) -> Env {
+        start_drained(bridge, identities, client_token, Drain::new(None)).await
+    }
+
+    pub(crate) async fn start_drained(
+        bridge: &str,
+        identities: IdentityConfig,
+        client_token: &str,
+        drain: Arc<Drain>,
+    ) -> Env {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir(&repo).unwrap();
@@ -702,18 +815,12 @@ pub(crate) mod tests {
         let gate = Gate::new(Store::open(dir.path().join("state")).unwrap())
             .with_signer(crate::attest::Keypair::load_or_create(&dir.path().join("state")).unwrap())
             .with_relay(crate::relay::RelayTrace::new(dir.path().join("relay")));
-        let state = Arc::new(AppState::new(gate, cfg(bridge), TOKEN.into()).with_drain(drain));
+        let state =
+            Arc::new(AppState::with_identities(gate, cfg(bridge), identities).with_drain(drain));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(serve(state, listener));
-        let client = Client::new(&url, TOKEN);
-        client
-            .post::<Value>(
-                "/tasks",
-                json!({ "id": "t", "goal": "g", "acceptance": "a", "iterations": 1, "repo": repo }),
-            )
-            .await
-            .unwrap();
+        let client = Client::new(&url, client_token);
         Env {
             _dir: dir,
             repo,
@@ -905,16 +1012,117 @@ pub(crate) mod tests {
         assert!(job.unavailable, "{:?}", job.error);
     }
 
-    #[test]
-    fn bearer_token_check() {
-        assert!(token_ok("abc", Some("Bearer abc")));
-        assert!(!token_ok("abc", Some("Bearer abd")));
-        assert!(!token_ok("abc", Some("abc")));
-        assert!(!token_ok("abc", None));
-        assert!(
-            !token_ok("", Some("Bearer ")),
-            "an empty configured token never authenticates"
-        );
+    fn three_principals() -> IdentityConfig {
+        use crate::identity::token_hash;
+        let text = json!({
+            "version": 1,
+            "principals": [
+                {"id": "claude", "family": "claude", "credentials": [
+                    {"id": "claude-main", "sha256": token_hash("claude-token")}]},
+                {"id": "opencode", "family": "deepseek", "credentials": [
+                    {"id": "opencode-main", "sha256": token_hash("opencode-token")}]},
+                {"id": "codex", "family": "openai", "credentials": [
+                    {"id": "codex-main", "sha256": token_hash("codex-token")}]}
+            ]
+        })
+        .to_string();
+        IdentityConfig::parse(&text).unwrap()
+    }
+
+    #[tokio::test]
+    async fn three_credentials_freeze_their_principal_and_family_and_isolate_tasks() {
+        let (bridge, _prompts) = mock_bridge(vec![Ok("VERDICT: APPROVED")]).await;
+        let e = start_with_identities(&bridge, three_principals(), "claude-token").await;
+        let claude = Client::new(&e.url, "claude-token");
+        let opencode = Client::new(&e.url, "opencode-token");
+        let codex = Client::new(&e.url, "codex-token");
+
+        // In hashed mode the old plaintext token is not a fallback.
+        let legacy = Client::new(&e.url, TOKEN);
+        let err = legacy.get::<Value>("/tasks").await.unwrap_err().to_string();
+        assert!(err.contains("401"), "{err}");
+
+        let created: Value = opencode
+            .post(
+                "/tasks",
+                json!({ "id": "t", "goal": "g", "acceptance": "a", "iterations": 1,
+                        "repo": e.repo, "implementer_family": "deepseek" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["principal"], "opencode");
+        assert_eq!(created["implementer_family"], "deepseek");
+
+        // A self-reported family that conflicts with the authenticated family is refused.
+        let err = codex
+            .post::<Value>(
+                "/tasks",
+                json!({ "id": "u", "goal": "g", "acceptance": "a", "iterations": 1,
+                        "repo": e.repo, "implementer_family": "deepseek" }),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("409"), "{err}");
+
+        // Cross-identity read and write are refused; the list shows only your own tasks.
+        let err = codex
+            .get::<Value>("/tasks/t")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("403"), "{err}");
+        let err = codex
+            .post::<Value>(
+                "/tasks/t/reviews",
+                json!({ "tree": "x", "base": "y", "evidence": "" }),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("403"), "{err}");
+        let err = codex
+            .post::<Value>("/tasks/t/link", json!({ "expr_id": "x1" }))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("403"), "{err}");
+        let theirs: Vec<Value> = claude.get("/tasks").await.unwrap();
+        assert!(theirs.is_empty(), "{theirs:?}");
+        let own: Vec<Value> = opencode.get("/tasks").await.unwrap();
+        assert_eq!(own.len(), 1);
+
+        // A review job started by one principal is invisible to another.
+        fs::write(e.repo.join("a.txt"), "v1\n").unwrap();
+        let (tree, base) = git::stage_all(&e.repo).unwrap();
+        let job: Job = opencode
+            .post(
+                "/tasks/t/reviews",
+                json!({ "tree": tree, "base": base, "evidence": "" }),
+            )
+            .await
+            .unwrap();
+        let err = codex
+            .get::<Job>(&format!("/jobs/{}", job.id))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("403"), "{err}");
+        let seen: Job = opencode.get(&format!("/jobs/{}", job.id)).await.unwrap();
+        assert_eq!(seen.principal, "opencode");
+    }
+
+    #[tokio::test]
+    async fn a_broken_identity_config_never_falls_back_to_the_legacy_token() {
+        use crate::identity::token_hash;
+        let text = json!({
+            "version": 1,
+            "principals": [{"id": "opencode", "family": "openai-compatible",
+                "credentials": [{"id": "o", "sha256": token_hash("opencode-token")}]}]
+        })
+        .to_string();
+        assert!(IdentityConfig::parse(&text).is_err());
+        // And a valid map does not accept the legacy token (see the test above).
     }
 
     async fn health(url: &str) -> Value {

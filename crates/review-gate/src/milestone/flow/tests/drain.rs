@@ -18,6 +18,7 @@ async fn start(flow: Arc<Flow>, root: &Path, drain: Arc<Drain>) -> String {
         TOKEN.into(),
     )
     .with_drain(drain)
+    .with_milestone_writers(["legacy-claude".to_string()])
     .with_milestones(flow);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -195,4 +196,68 @@ async fn a_job_that_was_not_sent_is_a_failure_and_blocks_a_safe_stop() {
     );
     assert_eq!(h["m2_pending"], 1, "{h}");
     assert_eq!(fx.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// Milestone writes are limited to `writers` (Codex n20 ③): another authenticated principal is
+/// refused with 403 before admission (not counted, nothing written); a writer goes through.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_listed_writers_may_write_milestones() {
+    use crate::identity::{IdentityConfig, token_hash};
+    let (writer, other) = (
+        "claude-token-0123456789abcdef0123456789abcdef",
+        "opencode-token-0123456789abcdef0123456789abcdef",
+    );
+    let ids = IdentityConfig::parse(&format!(
+        r#"{{"version": 1, "principals": [
+            {{"id": "claude", "family": "claude", "credentials": [{{"id": "c1", "sha256": "{}"}}]}},
+            {{"id": "opencode", "family": "deepseek", "credentials": [{{"id": "o1", "sha256": "{}"}}]}}]}}"#,
+        token_hash(writer),
+        token_hash(other)
+    ))
+    .unwrap();
+    let fx = Fx::new();
+    let f = fx.service();
+    fx.register(&f);
+    let drain = Drain::new(None);
+    let gate = Gate::new(Store::open(fx.root.join("gate-state")).unwrap()).with_signer(kp());
+    let app =
+        AppState::with_identities(gate, crate::reviewer::tests::cfg("http://127.0.0.1:9"), ids)
+            .with_drain(drain.clone())
+            .with_milestone_writers(["claude".to_string()])
+            .with_milestones(f.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(serve(Arc::new(app), listener));
+    let post = |token: &'static str, path: &'static str, body: Value| {
+        let url = url.clone();
+        async move {
+            let r = reqwest::Client::new()
+                .post(format!("{url}{path}"))
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            (r.status().as_u16(), r.text().await.unwrap())
+        }
+    };
+    let n = records(&f);
+    let (c, v) = post(other, "/milestones/p/requests", json!({ "head": fx.head })).await;
+    assert_eq!(c, 403, "{v}");
+    assert!(v.contains("may not write milestones"), "{v}");
+    assert_eq!(records(&f), n, "nothing written");
+    assert_eq!(drain.snapshot().active_ops, 0, "not admitted, not counted");
+    // Reads stay open to any authenticated principal.
+    let r = reqwest::Client::new()
+        .get(format!("{url}/milestones/p"))
+        .bearer_auth(other)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let (c, v) = post(writer, "/milestones/p/requests", json!({ "head": fx.head })).await;
+    assert_eq!(c, 200, "{v}");
+    tokio::task::spawn_blocking(move || settled(&f, "p"))
+        .await
+        .unwrap();
 }

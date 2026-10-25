@@ -9,5 +9,6 @@
   "auditor": "openai",
   "implementers": ["claude", "opencode"],
   "bridge_url": "http://127.0.0.1:7879",
-  "bridge_token_file": "/etc/review-gate/bridge-observer.token"
+  "bridge_token_file": "/etc/review-gate/bridge-observer.token",
+  "writers": ["claude"]
 }

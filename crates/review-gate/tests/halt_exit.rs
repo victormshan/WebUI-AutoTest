@@ -60,6 +60,7 @@ fn setup() -> Env {
         "implementers": ["claude"],
         "bridge_url": "http://127.0.0.1:9",
         "bridge_token_file": bt,
+        "writers": ["legacy-claude"],
     });
     std::fs::write(root.join("milestones.json"), config.to_string()).unwrap();
     let port = TcpListener::bind("127.0.0.1:0")

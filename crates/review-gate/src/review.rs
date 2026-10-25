@@ -8,6 +8,7 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use crate::gate::{Gate, ReviewInput};
+use crate::identity::Identity;
 use crate::model::{Outcome, ReviewRecord, Status, Task, Verdict};
 use crate::reviewer::{self, AskError, Reply, ReviewerConfig};
 use crate::{GateError, git};
@@ -198,9 +199,12 @@ fn previous_rejections(gate: &Gate, task: &Task) -> Vec<String> {
 }
 
 /// Reviews the staged changes of the task's current version and stores the record.
-/// A chunk whose exact prompt was already answered (an interrupted earlier run) reuses that answer.
+/// A chunk whose exact prompt was already answered (an interrupted earlier run) reuses that
+/// answer only if that answer still satisfies the implementer-neutral family rule.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     gate: &Gate,
+    who: &Identity,
     task_id: &str,
     tree: &str,
     base: &str,
@@ -209,6 +213,7 @@ pub async fn run(
     cfg: &ReviewerConfig,
 ) -> Result<ReviewRecord, ReviewError> {
     let task = gate.store().load_task(task_id)?;
+    gate.ensure_owner(&task, who)?;
     if task.status != Status::Running {
         return Err(GateError::NotRunning(task.id.clone(), task.status).into());
     }
@@ -251,7 +256,23 @@ pub async fn run(
         } else {
             String::new()
         };
-        if let Some(cached) = gate.store().cache_get::<Reply>(&task.id, &key)? {
+        let cached = gate.store().cache_get::<Reply>(&task.id, &key)?;
+        let cached = match cached {
+            Some(c) if reply_eligible(&task, &c).is_ok() => Some(c),
+            Some(c) => {
+                // Old cache entries from before the family rule, or from a same-family endpoint,
+                // are invalid: never silently reused, never treated as independent.
+                eprintln!(
+                    "[review-gate] discarding cached chunk {} answer from {} family {}: not eligible",
+                    i + 1,
+                    c.provider,
+                    c.family
+                );
+                None
+            }
+            None => None,
+        };
+        if let Some(cached) = cached {
             if parse_verdict(&cached.answer) == Some(Verdict::Rejected) {
                 verdict = Verdict::Rejected;
             }
@@ -265,10 +286,12 @@ pub async fn run(
         if n > 1 {
             eprintln!("[review-gate] reviewing chunk {}/{n}", i + 1);
         }
-        let mut reply = reviewer::ask(cfg, &prompt, &provider).await?;
+        let mut reply = reviewer::ask(cfg, &prompt, &provider, &task.implementer_family).await?;
+        reply_eligible(&task, &reply)?;
         if parse_verdict(&reply.answer).is_none() {
             let again = format!("{prompt}\n\n（上一次回复缺少首行 VERDICT。请严格按格式重答。）");
-            reply = reviewer::ask(cfg, &again, &reply.provider).await?;
+            reply = reviewer::ask(cfg, &again, &reply.provider, &task.implementer_family).await?;
+            reply_eligible(&task, &reply)?;
         }
         let v = parse_verdict(&reply.answer).ok_or(ReviewError::NoVerdict(i + 1))?;
         if v == Verdict::Rejected {
@@ -297,6 +320,7 @@ pub async fn run(
         String::new()
     };
     let record = gate.add_review(
+        who,
         &task,
         ReviewInput {
             tree: staged.tree,
@@ -311,6 +335,24 @@ pub async fn run(
         },
     )?;
     Ok(record)
+}
+
+/// The same rule as the gate uses, applied to one chunk's answer before it can influence the
+/// verdict, the weakest-channel summary, or the cache.
+fn reply_eligible(task: &Task, reply: &Reply) -> Result<(), GateError> {
+    crate::model::review_eligibility(
+        &task.implementer_family,
+        reply.channel,
+        &reply.family,
+        false,
+    )
+    .map(|_| ())
+    .map_err(|e| {
+        GateError::Mismatch(format!(
+            "reviewer {} family {} is not eligible for implementer family {}: {e}",
+            reply.provider, reply.family, task.implementer_family
+        ))
+    })
 }
 
 /// Keeps the reply with the weakest channel (the first one on a tie).
@@ -343,6 +385,7 @@ fn fallback_note(fallbacks: &[String]) -> String {
 /// carry a VERDICT line; the record is bound to the given staged tree like any other.
 pub fn submit(
     gate: &Gate,
+    who: &Identity,
     task_id: &str,
     tree: &str,
     base: &str,
@@ -356,11 +399,13 @@ pub fn submit(
         ));
     }
     let task = gate.store().load_task(task_id)?;
+    gate.ensure_owner(&task, who)?;
     let staged = staged_from(Path::new(&task.repo), tree, base)?;
     let verdict = parse_verdict(text).ok_or_else(|| {
         GateError::Invalid("review text needs a `VERDICT: APPROVED|REJECTED` line".into())
     })?;
     gate.add_review(
+        who,
         &task,
         ReviewInput {
             tree: staged.tree,
@@ -464,6 +509,11 @@ mod tests {
         let gate = Gate::new(Store::open(dir.join("state")).unwrap());
         gate.init(NewTask {
             id: "t".into(),
+            principal: crate::identity::LEGACY_PRINCIPAL.into(),
+            implementer_family: crate::identity::LEGACY_FAMILY.into(),
+            credential: "test".into(),
+            config_digest: None,
+            claimed_family: None,
             goal: "目标".into(),
             final_acceptance: "验收".into(),
             repo: repo.to_string_lossy().into(),
@@ -482,9 +532,18 @@ mod tests {
         fs::write(repo.join("a.txt"), "v1-change\n").unwrap();
         let (url, prompts) = mock_bridge(vec![Ok("VERDICT: APPROVED\n\n无")]).await;
         let (tree, base) = git::stage_all(&repo).unwrap();
-        let r = run(&gate, "t", &tree, &base, "tests: ok", None, &cfg(&url))
-            .await
-            .unwrap();
+        let r = run(
+            &gate,
+            &Identity::legacy(),
+            "t",
+            &tree,
+            &base,
+            "tests: ok",
+            None,
+            &cfg(&url),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             (r.verdict, r.channel),
             (Verdict::Approved, Channel::WebGemini)
@@ -512,9 +571,18 @@ mod tests {
         ])
         .await;
         let (tree, base) = git::stage_all(&repo).unwrap();
-        let r = run(&gate, "t", &tree, &base, "", None, &cfg(&url))
-            .await
-            .unwrap();
+        let r = run(
+            &gate,
+            &Identity::legacy(),
+            "t",
+            &tree,
+            &base,
+            "",
+            None,
+            &cfg(&url),
+        )
+        .await
+        .unwrap();
         assert_eq!(r.verdict, Verdict::Rejected);
         let p = prompts.lock().unwrap();
         assert_eq!(p.len(), 2);
@@ -543,14 +611,32 @@ mod tests {
         .await;
         let (tree, base) = git::stage_all(&repo).unwrap();
         assert!(
-            run(&gate, "t", &tree, &base, "", None, &cfg(&url))
-                .await
-                .is_err()
+            run(
+                &gate,
+                &Identity::legacy(),
+                "t",
+                &tree,
+                &base,
+                "",
+                None,
+                &cfg(&url)
+            )
+            .await
+            .is_err()
         );
         assert_eq!(prompts.lock().unwrap().len(), 5);
-        let r = run(&gate, "t", &tree, &base, "", None, &cfg(&url))
-            .await
-            .unwrap();
+        let r = run(
+            &gate,
+            &Identity::legacy(),
+            "t",
+            &tree,
+            &base,
+            "",
+            None,
+            &cfg(&url),
+        )
+        .await
+        .unwrap();
         assert_eq!(prompts.lock().unwrap().len(), 6, "chunk 1 reused");
         assert!(r.text.contains("复用先前对同一提示的审核"));
         assert_eq!(r.verdict, Verdict::Approved);
@@ -565,7 +651,9 @@ mod tests {
         let mut c = cfg(&url);
         c.gemini_api_key = Some("k".into()); // configured, but its endpoint is down
         let (tree, base) = git::stage_all(&repo).unwrap();
-        let r = run(&gate, "t", &tree, &base, "", None, &c).await.unwrap();
+        let r = run(&gate, &Identity::legacy(), "t", &tree, &base, "", None, &c)
+            .await
+            .unwrap();
         assert_eq!(r.channel, Channel::WebGemini);
         assert!(
             r.text.starts_with("【通道回退】") && r.text.contains("gemini-api"),
@@ -594,5 +682,82 @@ mod tests {
             }
             assert_eq!(w.unwrap().channel, Channel::WebGemini, "{order:?}");
         }
+    }
+    fn rewrite_cached_families(gate: &Gate, task: &str, families: &[&str]) {
+        let dir = gate.store().root().join("cache").join(task);
+        let mut paths: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        paths.sort();
+        assert_eq!(paths.len(), families.len(), "one cache entry per chunk");
+        for (p, family) in paths.iter().zip(families) {
+            let mut v: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap();
+            v["family"] = serde_json::json!(family);
+            v["channel"] = serde_json::json!("external-api");
+            v["answer"] = serde_json::json!("VERDICT: REJECTED");
+            fs::write(p, serde_json::to_string(&v).unwrap()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_same_family_answers_are_discarded_not_reused() {
+        let d = tempfile::tempdir().unwrap();
+        let (gate, repo) = setup(d.path());
+        fs::write(repo.join("a.txt"), "v1-change\n").unwrap();
+        let (url, prompts) =
+            mock_bridge(vec![Ok("VERDICT: APPROVED"), Ok("VERDICT: APPROVED")]).await;
+        let c = cfg(&url);
+        let (tree, base) = git::stage_all(&repo).unwrap();
+        let first = run(&gate, &Identity::legacy(), "t", &tree, &base, "", None, &c)
+            .await
+            .unwrap();
+        assert_eq!(first.verdict, Verdict::Approved);
+        assert_eq!(prompts.lock().unwrap().len(), 1);
+
+        // Simulate an old cache entry: the same family as the implementer.
+        rewrite_cached_families(&gate, "t", &["claude"]);
+        let second = run(&gate, &Identity::legacy(), "t", &tree, &base, "", None, &c)
+            .await
+            .unwrap();
+        assert_eq!(prompts.lock().unwrap().len(), 2, "cache was not trusted");
+        assert_eq!(second.verdict, Verdict::Approved);
+        assert!(!second.text.contains("复用先前"));
+    }
+
+    #[tokio::test]
+    async fn every_chunk_is_rechecked_not_only_the_weakest_summary() {
+        let d = tempfile::tempdir().unwrap();
+        let (gate, repo) = setup(d.path());
+        fs::write(repo.join("a.txt"), "A".repeat(CHUNK_CHARS - 500) + "\n").unwrap();
+        fs::write(repo.join("b.txt"), "B".repeat(CHUNK_CHARS - 500) + "\n").unwrap();
+        let (url, prompts) = mock_bridge(vec![
+            Ok("VERDICT: APPROVED"),
+            Ok("VERDICT: APPROVED"),
+            Ok("VERDICT: APPROVED"),
+            Ok("VERDICT: APPROVED"),
+        ])
+        .await;
+        let c = cfg(&url);
+        let (tree, base) = git::stage_all(&repo).unwrap();
+        let first = run(&gate, &Identity::legacy(), "t", &tree, &base, "", None, &c)
+            .await
+            .unwrap();
+        assert_eq!(first.verdict, Verdict::Approved);
+        assert_eq!(prompts.lock().unwrap().len(), 2);
+
+        // One same-family chunk, one unknown protocol family: both are invalid per chunk.
+        rewrite_cached_families(&gate, "t", &["claude", "openai-compatible"]);
+        let second = run(&gate, &Identity::legacy(), "t", &tree, &base, "", None, &c)
+            .await
+            .unwrap();
+        assert_eq!(
+            prompts.lock().unwrap().len(),
+            4,
+            "both chunks were asked again; a summary-only check would reuse both"
+        );
+        assert_eq!(second.verdict, Verdict::Approved);
+        assert!(!second.text.contains("复用先前"));
     }
 }

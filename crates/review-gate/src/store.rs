@@ -18,6 +18,9 @@ pub fn valid_id(id: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Proof of holding `state/service.lock` (released when dropped).
+pub struct ServiceLock(#[allow(dead_code)] fs::File);
+
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
@@ -35,6 +38,22 @@ impl Store {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The exclusive hold on this state (`state/service.lock`): the service keeps it for its
+    /// whole life, and a local administrator write needs it for the whole write.
+    /// `Ok(None)`: someone else holds it.
+    pub fn try_service_lock(&self) -> Result<Option<ServiceLock>> {
+        let f = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.root.join("service.lock"))?;
+        match f.try_lock() {
+            Ok(()) => Ok(Some(ServiceLock(f))),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(e)) => Err(e.into()),
+        }
     }
 
     fn task_path(&self, id: &str) -> Result<PathBuf, GateError> {

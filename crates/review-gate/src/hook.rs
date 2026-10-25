@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::client::Client;
@@ -231,6 +231,85 @@ async fn check_push(client: &Client, repo: &Path) -> Result<Option<String>> {
     }))
 }
 
+/// Agent-neutral pre-commit guard: `None` lets `git commit` run, `Some(reason)` blocks it.
+/// Unlike the Claude Code hook this never inspects a shell command: it checks the very index
+/// the commit is about to write, so Claude, opencode and Codex all get the same rule.
+pub async fn guard(client: &Client, repo: &Path) -> Result<Option<String>> {
+    check_commit(client, repo, false).await
+}
+
+/// Writes `.git/hooks/pre-commit` to run [`guard`], so every `git commit` in `repo` is checked
+/// regardless of which agent runs it. Refuses to replace an existing hook unless `force`.
+pub fn install_guard(repo: &Path, force: bool) -> Result<PathBuf> {
+    let repo =
+        std::fs::canonicalize(repo).with_context(|| format!("repository {}", repo.display()))?;
+    let raw = git::git(&repo, &["rev-parse", "--git-path", "hooks"])?;
+    let raw = raw.trim();
+    let hooks = if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        repo.join(raw)
+    };
+    if !hooks.is_dir() {
+        anyhow::bail!(
+            "{} is not an existing directory; refusing to install a hook there",
+            hooks.display()
+        );
+    }
+    let hooks = std::fs::canonicalize(&hooks)?;
+    let git_dir =
+        std::fs::canonicalize(git::git(&repo, &["rev-parse", "--absolute-git-dir"])?.trim())?;
+    let common_raw = git::git(&repo, &["rev-parse", "--git-common-dir"])?;
+    let common = if Path::new(common_raw.trim()).is_absolute() {
+        PathBuf::from(common_raw.trim())
+    } else {
+        repo.join(common_raw.trim())
+    };
+    let common = std::fs::canonicalize(&common)?;
+    if !(hooks.starts_with(&git_dir) || hooks.starts_with(&common) || hooks.starts_with(&repo)) {
+        anyhow::bail!(
+            "hooks dir {} is outside the repository; refusing to install (check core.hooksPath)",
+            hooks.display()
+        );
+    }
+    let path = hooks.join("pre-commit");
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) => {
+            if !force {
+                anyhow::bail!(
+                    "{} already exists; pass --force to replace it",
+                    path.display()
+                );
+            }
+            if meta.file_type().is_dir() {
+                anyhow::bail!("{} is a directory", path.display());
+            }
+            // Remove the leaf (a symlink is removed, not followed) and create a fresh file.
+            std::fs::remove_file(&path)?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    // create_new never follows a symlink that raced into place.
+    let mut script = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    use std::io::Write;
+    writeln!(script, "#!/bin/sh")?;
+    writeln!(
+        script,
+        "exec review-gate guard --repo \"$(git rev-parse --show-toplevel)\""
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        script.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+    }
+    drop(script);
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +454,109 @@ mod tests {
             )
             .await,
             None
+        );
+    }
+
+    fn guarded_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let repo = d.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        git::git(&repo, &["init", "-q"]).unwrap();
+        fs::create_dir_all(repo.join(".git/hooks")).unwrap();
+        (d, repo)
+    }
+
+    #[test]
+    fn install_guard_writes_a_pre_commit_hook_and_requires_force() {
+        let (_d, repo) = guarded_repo();
+        let p = install_guard(&repo, false).unwrap();
+        assert_eq!(
+            p,
+            std::fs::canonicalize(&repo)
+                .unwrap()
+                .join(".git/hooks/pre-commit")
+        );
+        let body = fs::read_to_string(&p).unwrap();
+        assert!(body.starts_with("#!/bin/sh\n"));
+        assert!(body.contains("review-gate guard --repo"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        assert!(install_guard(&repo, false).is_err(), "must not overwrite");
+        install_guard(&repo, true).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_guard_does_not_follow_a_symlinked_pre_commit() {
+        use std::os::unix::fs::symlink;
+        let (d, repo) = guarded_repo();
+        let outside = d.path().join("outside-target");
+        fs::write(&outside, "keep\n").unwrap();
+        let hook = repo.join(".git/hooks/pre-commit");
+        symlink(&outside, &hook).unwrap();
+        assert!(install_guard(&repo, false).is_err());
+        install_guard(&repo, true).unwrap();
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep\n");
+        assert!(
+            !fs::symlink_metadata(&hook)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn install_guard_refuses_a_hooks_dir_outside_the_repo() {
+        let (d, repo) = guarded_repo();
+        let outside = d.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        git::git(
+            &repo,
+            &["config", "core.hooksPath", outside.to_str().unwrap()],
+        )
+        .unwrap();
+        let err = install_guard(&repo, true).unwrap_err().to_string();
+        assert!(err.contains("outside the repository"), "{err}");
+        assert!(!outside.join("pre-commit").exists());
+    }
+
+    #[tokio::test]
+    async fn guard_checks_the_index_for_every_agent() {
+        let (bridge, _) = mock_bridge(vec![Ok("VERDICT: APPROVED\n\n无")]).await;
+        let e = start(&bridge).await;
+        let c = &e.client;
+        fs::write(e.repo.join("a.txt"), "v1\n").unwrap();
+        let (tree, base) = git::stage_all(&e.repo).unwrap();
+        let blocked = guard(c, &e.repo).await.unwrap();
+        assert!(
+            blocked
+                .as_deref()
+                .unwrap_or_default()
+                .contains("commit blocked"),
+            "{blocked:?}"
+        );
+        c.review(
+            "t",
+            &tree,
+            &base,
+            "",
+            None,
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+        assert_eq!(guard(c, &e.repo).await.unwrap(), None, "approved tree");
+        fs::write(e.repo.join("a.txt"), "v1 + more\n").unwrap();
+        git::git(&e.repo, &["add", "-A"]).unwrap();
+        assert!(
+            guard(c, &e.repo).await.unwrap().is_some(),
+            "changed after the review"
         );
     }
 }
