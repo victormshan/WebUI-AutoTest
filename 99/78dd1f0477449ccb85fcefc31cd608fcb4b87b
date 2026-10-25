@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-step8-identity
+version: 1/3
+commit: 9978dd1f0477449ccb85fcefc31cd608fcb4b87b
+tree: 78bbcfa35b102f3f9c30353e77ddcc96cd2048e3
+parent: fd34eae74984dfc6de7405660743e4d58d2b4f2a
+review: v1-3
+reviewer: manual/manual
+verdict: approved
+at: 2026-10-25T18:51:37Z
+signature: bJVt+zc8zyNQocwUDonwE1EH5S0jWskf4/2oWBkkZrXUuA0RPBiGukt1qAgTwoG2UZ4TsSD2iU+vaxLnGYAhAA==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
