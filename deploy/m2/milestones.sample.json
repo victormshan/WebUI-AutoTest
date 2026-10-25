@@ -1,0 +1,13 @@
+{
+  "repo_id": "github.com/victormshan/WebUI-AutoTest",
+  "repo": "/home/administrator/projects/Chrome-MCP",
+  "remote_url": "https://github.com/victormshan/WebUI-AutoTest.git",
+  "runner_socket": "/run/audit-runner/runner.sock",
+  "runner_uid": 997,
+  "runner_cgroup": "/system.slice/audit-runner.service",
+  "job_timeout_secs": 1800,
+  "auditor": "openai",
+  "implementers": ["claude", "opencode"],
+  "bridge_url": "http://127.0.0.1:7879",
+  "bridge_token_file": "/etc/review-gate/bridge-observer.token"
+}
