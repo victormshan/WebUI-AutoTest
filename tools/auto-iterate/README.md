@@ -134,6 +134,36 @@ Run the adapter test without calling a model:
 tools/auto-iterate/test-codex-agent.sh
 ```
 
+## opencode adapter
+
+`opencode-agent.sh` is the same contract for opencode: it builds the version prompt
+from the task, goal, acceptance, per-version acceptance and previous review, and
+passes it as the message to `opencode run`. It appends stdout/stderr to the driver's
+`--evidence` path, refuses an evidence path inside the repo, and refuses to hand a
+tree to the driver when opencode changed `HEAD`, changed a tag name or object id,
+or made no change to the worktree/index/untracked-file snapshot. Every exported
+`REVIEW_GATE_*` variable is unset before opencode starts. The adapter never stages,
+commits, tags, records or writes a verdict; the driver still owns git.
+
+```bash
+tools/auto-iterate/auto-iterate.sh --task <task-id> \
+  --agent-cmd tools/auto-iterate/opencode-agent.sh \
+  --evidence /tmp/opencode-evidence.txt
+```
+
+`OPENCODE_BIN` overrides the binary; otherwise the adapter uses `opencode` on
+`PATH`, then `~/.local/bin/opencode`, then `~/.opencode/bin/opencode`. Neither a
+Windows `.cmd` shim nor a `.exe` on a WSL-only repository is accepted.
+`OPENCODE_FLAGS` defaults to `--auto`, which is what lets an unattended round apply
+its edits; override it to tighten permissions (for example `--pure`). `OPENCODE_MODEL`
+(map to `-m provider/model`) and `OPENCODE_AGENT` (map to `--agent`) are optional.
+
+Run the adapter test without calling a model:
+
+```bash
+tools/auto-iterate/test-opencode-agent.sh
+```
+
 ## Run log, timeout and tests
 
 `--agent-timeout S` bounds a hung agent command (0 disables it); the driver exits 1
