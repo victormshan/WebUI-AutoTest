@@ -2501,4 +2501,37 @@ elapsed=$(( $(date +%s) - start ))
 grep -q "verify-range timed out after 1s" "$tmp/out74" || fail "no verify-range timeout message"
 [ "$(git -C "$repo74" rev-list --count HEAD)" -eq 2 ] || fail "verify-range timeout lost the commit"
 
+# --adapter: a sibling adapter is resolved, announced and run end to end.
+repo77=$tmp/repo77
+state77=$tmp/state77
+adir=$tmp/adir77
+mkdir -p "$repo77" "$adir"
+git -C "$repo77" init -q
+git -C "$repo77" config user.email test@example.com
+git -C "$repo77" config user.name test
+echo base > "$repo77/f"
+git -C "$repo77" add f
+git -C "$repo77" commit -qm base
+echo 0 > "$state77"
+cp "$here/auto-iterate.sh" "$adir/auto-iterate.sh"
+cat > "$adir/opencode-agent.sh" <<'AG'
+#!/bin/sh
+set -eu
+[ -n "${AUTO_ITERATE_REPO:-}" ] || exit 1
+echo adapter-ran > "$AUTO_ITERATE_REPO/adapter.out"
+printf 'fake opencode round %s\n' "${AUTO_ITERATE_ITERATION:-}" >> "${AUTO_ITERATE_EVIDENCE:?}"
+AG
+chmod +x "$adir/opencode-agent.sh"
+STUB_REPO=$repo77 STUB_STATE=$state77 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
+    sh "$adir/auto-iterate.sh" --task adapter77 --adapter opencode \
+    --message "adapter v1" --evidence "$tmp/ev77" --log "$tmp/log77" \
+    >"$tmp/out77" 2>&1 || { cat "$tmp/out77"; fail "adapter run exited $?"; }
+[ "$(cat "$repo77/adapter.out")" = adapter-ran ] || fail "sibling adapter did not run"
+[ "$(git -C "$repo77" rev-list --count HEAD)" -eq 2 ] || fail "adapter run did not commit one version"
+grep -q "adapter=opencode path=$adir/opencode-agent.sh" "$tmp/log77" \
+    || fail "log misses the resolved adapter"
+grep -q "adapter=opencode path=$adir/opencode-agent.sh" "$tmp/out77" \
+    || fail "stdout misses the resolved adapter"
+grep -q "fake opencode round 1" "$tmp/ev77" || fail "adapter evidence was not forwarded"
+
 echo "test-driver: ok"

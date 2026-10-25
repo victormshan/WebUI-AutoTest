@@ -55,7 +55,9 @@ tools/auto-iterate/auto-iterate.sh \
 ```
 
 `--adapter codex|opencode` resolves `<driver dir>/<name>-agent.sh` and is exclusive
-with `--agent-cmd`. A shell command still works for any other host:
+with `--agent-cmd`. Each round prints and logs `adapter=<name> path=<absolute>`, so
+the chosen host is visible in the log/report trail. A shell command still works for
+any other host:
 
 ```bash
 tools/auto-iterate/auto-iterate.sh --task my-task \
