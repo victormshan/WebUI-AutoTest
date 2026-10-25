@@ -81,7 +81,9 @@ phase change (task, phase, iteration, timestamps, exit code, review, commit, tag
 The file is telemetry, not recovery state; the durable recovery file remains
 `<gitdir>/auto-iterate/<task>.json`.
 
-CI runs the four test scripts via `.github/workflows/auto-iterate-tests.yml`.
+CI runs the five test scripts via `.github/workflows/auto-iterate-tests.yml` on
+every push and pull request (plus manual `workflow_dispatch`), so a branch push
+that touches the tool is verified without needing the gate or a model.
 
 ## Manifest integrity
 
