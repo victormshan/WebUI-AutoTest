@@ -680,12 +680,19 @@ async fn without_the_cgroup_sweep_an_escaped_process_survives_the_group_kill() {
     );
 }
 
+/// `--own-cgroup` refuses to start outside a systemd service cgroup. The child inherits this
+/// test's cgroup, so which side of the check it lands on depends on where the tests run: on a
+/// developer shell (a session scope) it must refuse; under a service (a CI runner is one) it must
+/// get past the check. Both outcomes are asserted; the test never skips.
 #[tokio::test]
 async fn own_cgroup_refuses_to_start_outside_a_service() {
+    let here = audit_runner::cgroup_of(std::process::id() as i32).unwrap();
+    let in_service = here.ends_with(".service");
     let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("x.sock");
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_audit-runner"))
         .arg("--socket")
-        .arg(dir.path().join("x.sock"))
+        .arg(&sock)
         .args(["--allow-uid", "1", "--codex", "/x", "--codex-home", "/x"])
         .args(["--run-home", "/x", "--workdir"])
         .arg(dir.path().join("jobs"))
@@ -694,14 +701,44 @@ async fn own_cgroup_refuses_to_start_outside_a_service() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let mut err = String::new();
-    let mut stderr = child.stderr.take().unwrap();
-    let status = tokio::time::timeout(Duration::from_secs(5), async {
-        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut err).await;
-        child.wait().await
-    })
-    .await
-    .expect("the runner started outside a service cgroup");
-    assert!(!status.unwrap().success());
-    assert!(err.contains("not in a systemd service cgroup"), "{err}");
+    if in_service {
+        // Past the cgroup check the runner binds its socket: wait for that (bounded), with the
+        // child still running, then stop and reap it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !sock.exists() {
+            if let Some(status) = child.try_wait().unwrap() {
+                let mut err = String::new();
+                let _ = tokio::io::AsyncReadExt::read_to_string(
+                    child.stderr.as_mut().unwrap(),
+                    &mut err,
+                )
+                .await;
+                panic!("the runner exited in {here} before listening ({status}): {err}");
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the runner did not listen within 5 s in {here}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "still running while listening"
+        );
+        child.kill().await.unwrap();
+    } else {
+        let mut err = String::new();
+        let mut stderr = child.stderr.take().unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut err).await;
+            child.wait().await
+        })
+        .await
+        .expect("the runner started outside a service cgroup");
+        assert!(!status.unwrap().success());
+        assert!(
+            err.contains("not in a systemd service cgroup"),
+            "{here}: {err}"
+        );
+    }
 }

@@ -1,0 +1,116 @@
+# M2 step 8: the audit-runner own_cgroup test is environment-aware (m2-step8-identity v2)
+
+Base 9978dd1f0477449ccb85fcefc31cd608fcb4b87b. Only crates/audit-runner/tests/runner.rs changes (one test).
+
+## Why
+CI (webtest) on m2-step1 has been red since 2026-10-19: own_cgroup_refuses_to_start_outside_a_service assumed the tests never run inside a systemd service cgroup. A GitHub runner runs as a service, so the child inherited a .service cgroup, got past the check, and the test timed out (runner.rs:704 Elapsed). Example: run 40167145278 on fd34eae.
+
+## Reproduced before the fix (old test, inside a user service via systemd-run --user)
+thread 'own_cgroup_refuses_to_start_outside_a_service' panicked at crates/audit-runner/tests/runner.rs:704:6: the runner started outside a service cgroup: Elapsed(())
+
+## The fix
+The test reads its own cgroup (audit_runner::cgroup_of). Outside a .service cgroup it asserts the refusal, as before. Inside one it asserts the runner got past the check (still running after 5 s, or stopped without the refusal message). It never skips. Production code unchanged.
+
+## Both branches run
+- outside (developer shell, 0::/non-systemd): ok
+- inside (systemd-run --user, .../run-p...service): ok, 5.00 s
+
+## Mutants (production check flipped; restored byte-identical, cmp)
+== M1 never checks (outside a service)
+-            path.ends_with(".service"),
++            true || path.ends_with(".service"),
+thread 'own_cgroup_refuses_to_start_outside_a_service' (1119108) panicked at crates/audit-runner/tests/runner.rs:719:27:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 5.00s
+== M2 always refuses (inside a service)
+-            path.ends_with(".service"),
++            false && path.ends_with(".service"),
+Running as unit: run-p1119276-i1128314.service; invocation ID: 0edc316a9faa46df98901107f894c5de
+thread 'own_cgroup_refuses_to_start_outside_a_service' (1119280) panicked at crates/audit-runner/tests/runner.rs:713:13:
+refused although in /user.slice/user-1000.slice/user@1000.service/app.slice/run-p1119276-i1128314.service: Error: --own-cgroup: not in a systemd service cgroup (/user.slice/user-1000.slice/user@1000.service/app.slice/run-p1119276-i1128314.service)
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.01s
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 810ms
+             CPU time consumed: 45ms
+                   Memory peak: 3.8M (swap: 0B)
+restored identical
+
+## Checks
+
+== cargo fmt --check -p audit-runner
+exit 0
+
+== cargo clippy -p audit-runner --all-targets -- -D warnings
+exit 0
+
+== cargo clippy -p audit-runner --all-targets --features fault-injection -- -D warnings
+exit 0
+
+== cargo test -p audit-runner
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit 0
+
+== cargo test -p audit-runner --features fault-injection
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.85s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit 0
+
+== Version 2 attempt 2 (answering gate v2-1, web-gemini, REJECTED, recorded: streak 1) ==
+1 "the child is not killed in the in-service branch": it had kill_on_drop(true), so it was killed
+when the test ended; it is now stopped and reaped explicitly.
+2 "the in-service branch waits a fixed 5 s and asserts nothing positive": right. It now waits
+(bounded, 5 s) for the runner's socket to appear, which it binds only after the cgroup check,
+fails if the child exits first, asserts it is still running, then kills it. Inside a user service
+the test takes 0.02 s (was 5.00 s) and leaves no runner process (pgrep count 0).
+Mutants rerun on this test:
+== M1 never checks (outside a service)
+-            path.ends_with(".service"),
++            true || path.ends_with(".service"),
+thread 'own_cgroup_refuses_to_start_outside_a_service' (1122979) panicked at crates/audit-runner/tests/runner.rs:737:10:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 5.00s
+== M2 always refuses (inside a service)
+-            path.ends_with(".service"),
++            false && path.ends_with(".service"),
+Running as unit: run-p1123142-i1132223.service; invocation ID: d8af9ef71508447abd76cf906aa4729b
+thread 'own_cgroup_refuses_to_start_outside_a_service' (1123146) panicked at crates/audit-runner/tests/runner.rs:716:17:
+the runner exited in /user.slice/user-1000.slice/user@1000.service/app.slice/run-p1123142-i1132223.service before listening (exit status: 1): Error: --own-cgroup: not in a systemd service cgroup (/user.slice/user-1000.slice/user@1000.service/app.slice/run-p1123142-i1132223.service)
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.02s
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 194ms
+             CPU time consumed: 33ms
+                   Memory peak: 3.3M (swap: 0B)
+restored identical
+Checks:
+
+== cargo fmt --check -p audit-runner
+exit 0
+
+== cargo clippy -p audit-runner --all-targets -- -D warnings
+exit 0
+
+== cargo clippy -p audit-runner --all-targets --features fault-injection -- -D warnings
+exit 0
+
+== cargo test -p audit-runner
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.39s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit 0
+
+== cargo test -p audit-runner --features fault-injection
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.68s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit 0
