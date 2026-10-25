@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: self-v23-1792892883
+version: 3/3
+commit: 3b527551feda48bf6beaa1a375ec0fc2e7ee1619
+tree: cfbf32c9c9dae6a6fb69d95bdee687ec256f2a42
+parent: ab1249a3624d04539829f8888acb8776a57d58f9
+review: v3-1
+reviewer: external-api/gemini-api
+verdict: approved
+at: 2026-10-25T07:39:18Z
+signature: KWwuOih8STZGrU0fO/mFuZPZujs6oeXQwGStcsMfa09HAv9vbRXlSxoprEFtzEj7EcdMSBNxwK/TDn46WitGCg==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
