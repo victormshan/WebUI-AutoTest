@@ -1,0 +1,65 @@
+# review-gate: a rate-limited provider is skipped by auto during a cooldown (m2-step8-identity v3)
+
+Base b423a579139fb5e7f47e64e976755a900ade547c (X). Only crates/review-gate/src/reviewer.rs.
+
+## Why (user, 2026-10-26)
+Every chunk of a review called reviewer::ask, which tried gemini-api first each time: while the API was rate limited, each of 20-40 chunks waited through the same retries (15 s + 45 s + the calls, about 90 s) before falling back to web-gemini. The user: 连续审核时，遇到Gemini-api限流时后，后续的审核应该直接走web-gemini，不要再去无意义地重复试API。
+
+## The change
+- gemini-api still answering 429 after its retries returns a typed RateLimited error (other failures unchanged).
+- ask() starts a cooldown for that provider (REVIEW_GATE_RATE_LIMIT_COOLDOWN_SECS, default 900 s; 0 disables), kept in an in-memory map shared by every clone of the service's ReviewerConfig.
+- With provider=auto, a provider in its cooldown is skipped (no request), and the skip is listed in the reply's fallbacks (so the review record says so). An explicitly requested provider is still tried. Expired entries are dropped.
+- Eligibility, family checks and the order of providers are unchanged.
+
+## Tests
+a_rate_limited_provider_is_skipped_by_auto_during_the_cooldown (first ask: 3 attempts then web-gemini; next asks and a clone: gemini-api not called, fallback says skipped; explicit gemini-api still called; after expiry gemini-api is tried and answers), only_a_rate_limit_starts_a_cooldown (400 and 503 start none).
+
+## Mutants (restored byte-identical, cmp)
+== C1 auto never skips
+-        if provider == "auto"
++        if provider == "never"
+reviewer::tests::a_rate_limited_provider_is_skipped_by_auto_during_the_cooldown --- FAILED
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 4.37s
+== C2 no cooldown after 429
+-                if e.downcast_ref::<RateLimited>().is_some() {
++                if false && e.downcast_ref::<RateLimited>().is_some() {
+reviewer::tests::a_rate_limited_provider_is_skipped_by_auto_during_the_cooldown --- FAILED
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 4.40s
+== C3 other errors start a cooldown
+-        if status.as_u16() == 429 {
++        if status.as_u16() == 429 || status.as_u16() == 503 || status.as_u16() == 400 {
+reviewer::tests::only_a_rate_limit_starts_a_cooldown --- FAILED
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 4.36s
+restored identical
+
+## Checks
+
+== cargo fmt --check -p review-gate
+exit 0
+
+== cargo clippy -p review-gate --all-targets -- -D warnings
+exit 0
+
+== cargo clippy -p review-gate --all-targets --features fault-injection -- -D warnings
+exit 0
+
+== cargo test -p review-gate
+test result: ok. 273 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 41.38s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.12s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit 0
+
+== cargo test -p review-gate --features fault-injection
+test result: ok. 273 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 37.49s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.12s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.17s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit 0
+
+## Deployment
+Not part of the X deployment now under review (Y on m2-step1 stays pinned to X=b423a57). It goes in a later deployment of X+1, which can use the drain of X (no planned interruption).
