@@ -1,0 +1,123 @@
+# M2 step 8 deploy files, version 4 (deployment artifacts Y on code revision X)
+
+Base (code X): b423a579139fb5e7f47e64e976755a900ade547c. Only deploy/m2/ and scripts/m2-e2e/ change.
+Codex: n8 (REWORK of b7a3a91: R1 stop race, R2 anonymity, R3 printing, R4 sandbox), n10 (boundaries), n12/n14/n18/n20 (identity), n32 (bootstrap REWORK), n34 (planned interruption: wording, risk box, runner separate, stop behaviour). User: 「倾向 2。」 (planned interruption preferred; RUNBOOK 0.3 asks the user to confirm the concrete plan before execution).
+
+## What changed, against those points
+- Two revisions recorded separately (RUNBOOK 0.1): X for the binaries and E4, Y for these files.
+- Risk box (0.2): what an interruption can leave (unfinished accepted requests, lost in-memory jobs, external audit possibly paid, single-file replace only: no multi-file transaction, no fsync, .tmp possible), the actual stop behaviour of the live unit (KillMode=control-group, SIGTERM, TimeoutStopUSec=1min 30s, SendSIGKILL=yes), interrupted reviews not redone automatically. The earlier claim 'tmp+rename so no half-written state' is withdrawn.
+- Old gate and runner handled separately (4.3-4.5): after the gate stops, a bounded runner check; if a codex process or connection remains, stop and report, no kill.
+- Inventory after stop (4.4): .tmp listed and kept; a full sha256 manifest M0 of /var/lib/reviewgate; M1 after the new start (7.2); tasks/ reviews/ keys/ cache/ relay/ must be unchanged.
+- Rollback (10): failure -> stop, keep all state, forward fix; never start a binary without principals after the new gate wrote a task (compat evidence m2-tools/compat-ident.txt); restoring the old binary needs a separate user decision and the original unit/config.
+- Identity migration (3.1-3.2): principal/token/bridge-name table; identity.json from the converter as root, checked against the live agents.json; namei trust chain of /etc/review-gate; every client token checked against identity.json (names only). Claude switches to tokens/claude.token (writers = [claude]); E4 uses it.
+- Drop-in: --identity-config, --agents-file (consistency check), --milestones, --drain-file /etc/review-gate/drain; agents.conf moved away (two ExecStart drop-ins do not combine).
+- Future stops of X use the drain file and /health drain.idle + m2_pending (4.6).
+- Unowned tasks after deployment (8.2): listed read-only, assignment per user decision, only with the service stopped.
+- E2 (R3/R4): one read-only root script; names only (Environment= counted; PassEnvironment names; EnvironmentFiles paths; /proc environ names); the gate's own fetch via one status call (sync; Stop(...) stops the script); sandbox properties parsed from the running unit into systemd-run --property arguments; set -euo pipefail; verify with the deployed binary and pinned key; RestrictAddressFamilies listed as not mirrored.
+- E1: writers cases (empty, not an enabled principal); the deploy build must refuse the file:// fixture remote, the fault build must read it (detected from the binary, strict both ways).
+- E4 default head = X.
+
+## Self-test on the X builds (raw: deploy/m2/selftest-output.txt)
+== verify-range 3cc5491..b423a57
+30 verified, 0 failed
+== E1, gr build (69b3d3a6b5e0)
+ok - relative-path: exit 2, no listener, stderr matched
+ok - empty-field: exit 2, no listener, stderr matched
+ok - unknown-field: exit 2, no listener, stderr matched
+ok - empty-implementers: exit 2, no listener, stderr matched
+ok - empty-writers: exit 2, no listener, stderr matched
+ok - writer-not-a-principal: exit 2, no listener, stderr matched
+ok - token-mode-0644: exit 2, no listener, stderr matched
+ok - token-too-short: exit 2, no listener, stderr matched
+ok - good isolated instance is healthy on 127.0.0.1:35975
+ok - never-applied phase: 200, registered=false, released=false, reason says unregistered
+ok - deploy build refuses the file:// remote for the gate's own read: Stop("remote unreachable: the remote must be an https URL without credentials")
+ok - applied but not confirmed: same 200/registered=false shape; pending is not in the signed log
+exit 0
+== E1, fault build (3b564eab6557)
+ok - relative-path: exit 2, no listener, stderr matched
+ok - empty-field: exit 2, no listener, stderr matched
+ok - unknown-field: exit 2, no listener, stderr matched
+ok - empty-implementers: exit 2, no listener, stderr matched
+ok - empty-writers: exit 2, no listener, stderr matched
+ok - writer-not-a-principal: exit 2, no listener, stderr matched
+ok - token-mode-0644: exit 2, no listener, stderr matched
+ok - token-too-short: exit 2, no listener, stderr matched
+ok - good isolated instance is healthy on 127.0.0.1:55751
+ok - never-applied phase: 200, registered=false, released=false, reason says unregistered
+ok - fault build reads the file:// fixture remote: Equal
+ok - applied but not confirmed: same 200/registered=false shape; pending is not in the signed log
+exit 0
+== observer e2e on the agent-bridge to deploy
+ALL OK
+exit 0
+== E4 preflight
+30 verified, 0 failed
+===== caveat =====
+exit 0
+
+## Not run here (need root or the deployment)
+- E2, the RUNBOOK root steps, the migration converter on the live files: listed for the user, not executed.
+
+== Attempt 2 (answering v4-1, web-gemini, REJECTED, recorded: streak 1) ==
+1 "section 6 installs agent-bridge from -target-gr": not so. RUNBOOK §6 installs
+  /home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-bridge/release/agent-bridge
+  (the only agent-bridge install line); -target-gr appears only for review-gate and audit-runner.
+2 "8.1 replaced the exact link/ignore commands with prose": right. The 14 commands (dry run and
+  --yes for each of the 2 link and 5 ignore tasks) and the read-only status check are back, verbatim
+  task ids and reasons citing U-g; the status check uses token.claude.
+
+== Attempt 3 (answering v4-2, web-gemini, REJECTED, recorded: streak 2) ==
+"sudo REVIEW_GATE_TOKEN_FILE=... without -E: the variable is dropped": sudo VAR=value cmd sets a
+variable on the command line (allowed when the sudoers entry is ALL); -E is about keeping the
+caller's environment, a different thing. Still, the read-only status check needs no root at all:
+token.claude belongs to administrator, so sudo is dropped there. E2 now takes the head as an
+argument (sudo bash e2_anonymous.sh <X>), so nothing depends on sudo's environment handling.
+The streak is now 2 of 3: per the user's rule this version is not resubmitted to the gate; it goes
+to a manual review (Codex, as for the identity integration), recorded by the user.
+
+== Revision after Codex's manual review of tree 2d69ea38 (VERDICT: REJECTED, n36) ==
+Codex's text: reviews/m2-step8-deploy/v4-2d69ea38/codex-review.md, sha256
+37b59e76b82a704642b406255e878a4126b12fdf06b27bde2a910ebc1c5ae134. Whether it is recorded in the gate
+(it would be the third rejection: the task would pause for good) is the user's decision.
+1 (blocking) identity migration on the live 0640 client.token: identity.rs:466 (mode & 0o077)
+  refuses it. §3.2 now copies it 0600 into the root-only /root/m2-id, converts with the copy, and
+  removes the copy (also when the converter fails). Rehearsal with the deploy binary and the live
+  permissions: tests/test_identity_migration.sh (0640 refused with no output; 0600 copy succeeds;
+  5 hashes = sha256 of the trimmed tokens; no token in the output; originals unchanged).
+2 (blocking) M0/M1 redirect outside sudo: scripts/m2-e2e/state_manifest.sh, run with sudo bash, writes
+  inside the root shell; set -euo pipefail; every regular file hashed, *.tmp included and listed;
+  any unreadable file or failing step exits non-zero with no output; never overwrites.
+  tests/test_state_manifest.sh (complete + .tmp, verifies with sha256 -c, unreadable file fails with
+  no partial output, existing output refused, unwritable output dir fails).
+3 (blocking) unbounded drain wait: scripts/m2-e2e/drain_wait.sh: total deadline, curl connect/total
+  timeouts, strict schema and exact types; exit 0 only for draining+idle+0 active+0 failures+0
+  pending; 2 on any read/parse/schema error (no retry); 3 at the deadline; never touches the drain
+  file. tests/test_drain_wait.sh: 9 cases (idle after not-idle, HTTP 500, bad JSON, pending null,
+  missing field, bool as int, idle with a failure, deadline, connection refused).
+Tightened: E2 captures systemctl/parser output before mapfile (producer failures stop the script),
+  requires User/Group/ProtectSystem/ProtectHome/ReadWritePaths, states exactly which properties are
+  mirrored; sync must be a string and one of Equal/Missing/RemoteBehind{..}/RemoteAhead{..} (Stop or
+  anything else stops; checked against 8 sample values); curl timeouts; invocation with pipefail
+  before tee. §4.5 runner check: scripts/m2-e2e/runner_wait.sh with an explicit deadline, read errors
+  exit 2, deadline exit 3, no kill (tests/test_runner_wait.sh, 5 cases). §6 spelled out: hash checks
+  that really stop, backup/install/rename, restart, health, and a full rollback. Wording: the planned
+  interruption is "拟采用" (proposed).
+All rehearsals and E1/observer/E4 preflight: deploy/m2/selftest-output.txt.
+
+== m2-step8-deploy-2 v1 attempt 2 (answering v1-1, web-gemini, REJECTED, recorded: streak 1) ==
+1 "the AUDIT_RUNNER_FAULT check of the fault build was removed": right; §1 now checks both fault
+  binaries (1 and 3 occurrences on this build).
+2 "runner_wait.sh 30: seconds or minutes?": the argument is minutes and the text says 30 minutes;
+  the unit is now written next to both commands (runner_wait.sh and drain_wait.sh).
+3 "sections 9 and 10 were deleted": not so; §9 (验收脚本) and §10 (失败与回滚) are in the file.
+
+== m2-step8-deploy-2 v1 attempt 3 (answering v1-2, web-gemini, REJECTED, recorded: streak 2) ==
+1 "§0.2 is cut off after its first item": not so; the risk box is complete (items 1-5 and the
+  handling rules); the segment ended there.
+2 "§3.2 client token check names one hard-coded path": partly right; the command now checks the
+  current Claude token and all four token files of the package, with the expected six lines, and
+  says how to add any other token file a client really uses.
+3 "drain_wait.sh treats 60 as seconds": not so; DEADLINE = START + TOTAL_MIN * 60 (minutes), as
+  the comment says; tests/test_drain_wait.sh uses minutes too.
+The streak is 2 of 3: per the user's rule this version goes to a manual review (Codex).

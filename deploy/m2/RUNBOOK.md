@@ -1,232 +1,210 @@
 # M2 第 8 步运行手册：部署 review-gate + audit-runner + agent-bridge 并做 E1/E2/E4
 
-> **BLOCKED（2026-10-25）：不要执行本手册的任何步骤。**
->
-> 1. Codex 实现复核 n8 为 REWORK（停机竞态、gate 自身拉取的匿名性、E2 打印与沙箱）。代码部分
->    （drain、匿名 git）已在后续提交修复；本手册的停机、E2 与构建段尚未按修复重写。
-> 2. **新发现，待核实**：线上 `/usr/local/bin/review-gate` 已不是第 2 节记录的 `0b4f1e1e…`，而是
->    2026-10-22 01:03 安装的 `d7a030cb…`，ExecStart 带 `--agents-file /etc/review-gate/agents.json`
->    （来源待核实：opencode 的身份绑定构建）。按本手册部署会回退线上身份绑定。Codex n12：先在隔离
->    分支整合并核实来源，重写第 2 节、unit、回滚与状态兼容矩阵。
-> 3. 线上旧 gate 不支持 drain，首次安装的排空（bootstrap）仍无可核验方案：部署段在解决前保持阻断。
+> **状态：待审（2026-10-26）。未经 Codex 复核本版、且用户未在第 0.3 节逐项确认之前，不要执行任何步骤。**
+> 本版取代 b7a3a91 的手册（Codex n8 REWORK）。拟采用的部署方式是用户倾向的**计划内中断**
+> （见第 0.2 节风险框），**不是**已证明的无损排空：旧 gate（d7a030cb）没有可核验的应用层接纳边界。
 
-状态：**待用户执行**。本目录的文件由 opencode 准备并自测；所有 `sudo`/root 命令只在这里列出，
-**没有执行过**。线上服务、`/etc`、`/usr/local`、`/var/lib/reviewgate`、`~/.local/bin` 均未改动。
+## 0. 执行前
 
-固定提交（完整 40 位）：`bbc5aeb74005d76ad8fde20b89a5e9337f5c7aec`
-这是 **`m2-step1` 分支的 head**（`git -C /home/administrator/projects/Chrome-MCP rev-parse m2-step1`
-应输出该值）。它包含线上 bridge 线 `4e34e25` 与只读 observer 的整合（提交 `4951e92`）。
-`deploy/m2/` 与 `scripts/m2-e2e/` 的产物提交在它之上（worktree `Chrome-MCP-m2-deploy`，分支
-`m2-step8-deploy-final`，基线 `1ff89a8`），**不改变二进制对应的源码**，所以三个二进制都对应
-`bbc5aeb…`。
+### 0.1 两个修订（分开记录）
 
-## 0. 执行前：记录日志、确认仍未变的事
+| | 修订 | 内容 |
+|---|---|---|
+| **代码 X**（二进制来源） | `b423a579139fb5e7f47e64e976755a900ade547c`（tree `b68f064fa0f8dcbdf6f71ec0e64b3bd5b1072a5c`），`m2-step1` 与 `m2-identity-integration` 的 head | M2 里程碑审计；drain；gate 自身匿名 git；身份整合（主体、属主、/check 不借用、agents-file 一致性校验、管理员文件检查、writers、`admin task assign`、迁移转换器、guard）；audit-runner 测试的 CI 修复 |
+| **部署产物 Y** | 本手册所在的提交（在 X 之上，只改 `deploy/m2/` 与 `scripts/m2-e2e/`） | 本手册、drop-in、配置样例、E1/E2/E4 脚本 |
 
-**必须记录全过程**：在维护窗口开始时先打开一个记录会话（二选一），把每条命令和**完整输出**
-保存下来；出现任何与本手册预期不符的输出，**立即停止并报告**，不要继续下一步。
+三个二进制都从 X 构建（第 1 节）。E4 的自举 head = X，结论只能称"X 代码修订的自举"，**不**审计 Y 自身。
+
+gate 签名链：`review-gate verify-range --pubkey ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw= 3cc5491..b423a57` → 30 verified, 0 failed（截至 b423a57）。
+
+### 0.2 风险框：计划内中断（必须先读）
+
+用户 2026-10-26 在两条路之间表达的偏好，原话：「倾向 2。」——即接受计划内中断的风险，而不是继续设计无损排空。这是**偏好**，不是对下面具体方案的批准；执行前必须按 0.3 逐项确认。
+
+停旧 gate 时可能发生、**不能**排除的情况（Codex n32、n34）：
+1. 已被旧进程接纳的 M1 请求可能没有完成；客户端可能不知道请求是否成功。
+2. 旧进程的 jobs 表在内存中，停服后丢失；`GET /jobs/<id>` 不再可查。
+3. 外部审计（gemini-api / web-gemini）可能已经调用，甚至已经产生费用，但结果未落盘。
+4. store 的单个 JSON 用"临时文件 + rename"替换，**只**降低该文件被截断的风险：没有跨文件事务，没有 fsync。可能残留 `.tmp`，可能 review 已写入而任务/作业状态不一致，task/cache/review/relay/Git 相关操作可能部分完成。
+5. `systemctl stop` 的实际行为（线上 unit，2026-10-26 读取）：`KillMode=control-group`、`KillSignal=15`、`TimeoutStopUSec=1min 30s`、`SendSIGKILL=yes`：先对整个 cgroup（gate 及其 git、curl 子进程）发 SIGTERM，90 秒后仍未退出的进程被 SIGKILL。
+
+处理原则：停服后**先记录、再判断**；保留全部 state、`.tmp`、日志，不删除、不截断、不恢复旧快照。被中断的审查**不自动重做**：先核对已有 review、cache、任务记录和外部作业，再由用户决定恢复或重新审查，不能当作普通重试，也不能为了拿到 APPROVE 而重做。
+
+不在本风险范围内（不因此授权）：中断仍在运行的 audit-runner/Codex 审计、强杀子进程、恢复旧二进制作为常规回滚（见第 10 节）。
+
+### 0.3 执行前，用户逐项确认（写进日志）
+
+- [ ] 接受 0.2 列出的中断风险，维护窗口为 ____（开始/结束时间）。
+- [ ] 受影响的客户端清单（4.1）已知，并同意在窗口内停用。
+- [ ] `milestones.json` 的 `writers` 用 `["claude"]`（建议值；`implementers` 仍是 `["claude","opencode"]`）。
+- [ ] 部署后，属主未知的旧任务一律保持只读，直到用户逐个决定 `admin task assign`（第 8.2 节）。
+- [ ] 执行者：用户本人，或用户指定的代理（逐行执行，记录全部输出，遇到与预期不符的输出立即停止）。
+
+### 0.4 记录
 
 ```
 script -a /home/administrator/m2-step8-$(date -u +%Y%m%dT%H%M%SZ).log
 ```
 
-或每条命令使用 `2>&1 | tee -a <log>`。日志里不得出现任何令牌或 `/etc/review-gate/env` 的内容。
+日志里不得出现任何令牌、`/etc/review-gate/env` 的内容或 `Environment=` 的取值。用 `| tee` 记录脚本输出时先 `set -o pipefail`，否则脚本失败会被 tee 的成功掩盖。
 
-仍需用户确认/已知的偏离：
+### 0.5 仍然有效的用户决定与偏离
 
-1. **U-d 厂商语义**：用户已于 2026-10-20 明确批准保留现有标签
-   （`codex-collab` → `codex`、`opencode` → `opencode`），并接受“标签判定与实际厂商不一致”的偏离：
-   `codex-collab` 与 `auditor=openai` 实际同为 OpenAI；`opencode` 实际运行 DeepSeek。
-   E4 的结论必须写成“**按批准的标签判为独立，实际厂商相同**”，不得写成“厂商独立”。
-   换其他厂商审计者也不在本 runner 范围内。
-2. **`repo_id`**：bridge q1 已答复（2026-10-20）：用 `github.com/victormshan/WebUI-AutoTest`。
-   样例已按此值写好。它进入每一条签名记录，**首次登记后不能改**；用户在安装 `/etc` 前做最终确认。
-3. **implementers**：按已知事实配置为 `["claude","opencode"]`（Codex n5 第 3 条）。
-   缩减为 `["claude"]` 是来源完整性标准的变更，须用户明确决定，不能当作等价配置。
-4. **U-a=1 部署基线**：部署 `m2-step1` 的固定提交
-   `bbc5aeb74005d76ad8fde20b89a5e9337f5c7aec`，**不合并 main**。main 上的 CI 不检查这个修订；
-   不要把 main 的 CI 结果当作本次部署的验收。
-5. **维护窗口**：第 6 节替换 agent-bridge 会中断所有 agent 的 worker turn（之后会自动重连）。
-   整个第 4–7 节必须在同一维护窗口内完成。
-6. 本手册不包含任何 `safe.directory=*` 的用户侧命令；只允许精确仓库路径。
+1. **U-d 厂商语义**：保留标签（`codex-collab`→`codex`、`opencode`→`opencode`），并接受"标签判定与实际厂商不一致"的偏离：`codex-collab` 与 `auditor=openai` 实际同为 OpenAI；`opencode` 实际运行 DeepSeek。E4 结论写成"**按批准的标签判为独立，实际厂商相同**"。
+2. **repo_id** = `github.com/victormshan/WebUI-AutoTest`，首次登记后不可改。
+3. **implementers** = `["claude","opencode"]`（bridge agent 名，来源完整性用）。gate 主体与 bridge 名的对照见第 3.1 节。
+4. **U-a**：部署 m2-step1 的固定修订（现为 X），**不合并 main**。
+5. 身份：Codex 选项 (i)，保留线上 `--agents-file` 的命令行形式，身份以 `--identity-config` 为准；ai-neutral step B 不在本次。
+6. 不使用 `safe.directory=*`；只用精确路径。
 
-## 1. 构建清单（manifest，三个二进制，两次独立构建）
+## 1. 构建清单（manifest）
 
-**三个二进制由两次独立构建产生，每次都用新的空 `CARGO_TARGET_DIR`**，两次都在同一个
-**干净的 detached worktree**、HEAD 为 `bbc5aeb…`：
+三个二进制来自**两次独立构建**，都在 X 的干净 detached worktree 上、各用**新的空** `CARGO_TARGET_DIR`；另有一次 fault-injection 对照构建（第三个空目录，不部署）。agent-bridge 必须单包构建：与 gate/runner 一起构建时 Cargo 合并共享依赖的 feature，会得到另一个从未验收过的二进制。
 
-- (a) `cargo build --release --locked -p review-gate -p audit-runner` → gate + runner；
-- (b) `cargo build --release --locked -p agent-bridge` → 待部署的 agent-bridge。
-
-**为什么 agent-bridge 必须单独构建**：把它和 review-gate/audit-runner 放在同一次 Cargo 调用里，
-Cargo 会合并共享依赖的 feature，产出另一个二进制（`04a2260e…`）；那个二进制**从未经过**
-observer 的真实二进制验收。通过验收、必须部署的是 (b) 的单包产物 `d9ab3e50…`。
-两个构建可以共用 worktree，但**不能共用 target 目录**。
-
-（Cargo 产物不保证跨目录/跨机器逐字节可复现，部署只能安装本清单记录的那次构建。）
-
-**本次已经完成这两次构建并记录了下面的值；不要重跑下面的命令块**（它只是可从零复现的记录），
-直接核对表格和 sha256 即可。只有需要独立复核时，才另建**新的空** target 目录重跑。
+已完成的构建（不要重跑；要独立复核就另建新的空目录）：
 
 ```
-git -C /home/administrator/projects/Chrome-MCP-m2-deploy worktree add --detach /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb bbc5aeb74005d76ad8fde20b89a5e9337f5c7aec
-cd /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb
-source ~/.cargo/env
-test -z "$(ls -A /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-gr 2>/dev/null)" || { echo 'target-gr not empty'; exit 1; }
-test -z "$(ls -A /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-bridge 2>/dev/null)" || { echo 'target-bridge not empty'; exit 1; }
-CARGO_TARGET_DIR=/home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-gr cargo build --release --locked -p review-gate -p audit-runner
-CARGO_TARGET_DIR=/home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-bridge cargo build --release --locked -p agent-bridge
+git -C /home/administrator/projects/Chrome-MCP-m2 worktree add --detach /home/administrator/projects/Chrome-MCP-m2-build-b423a57 b423a579139fb5e7f47e64e976755a900ade547c
+cd /home/administrator/projects/Chrome-MCP-m2-build-b423a57
+CARGO_TARGET_DIR=/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-gr cargo build --release --locked -p review-gate -p audit-runner
+CARGO_TARGET_DIR=/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-bridge cargo build --release --locked -p agent-bridge
+CARGO_TARGET_DIR=/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-fault cargo build --release --locked -p review-gate -p audit-runner --features review-gate/fault-injection,audit-runner/fault-injection
 ```
-
-如果 worktree 或 target 目录已经存在（本次准备的产物），**不要删除或重建**，直接核对下面的值；
-要独立复核，另建两个新的空 target 目录重跑。
-
-固定提交与构建身份（本清单的实际值）：
 
 | 项 | 值 |
 |---|---|
-| commit | `bbc5aeb74005d76ad8fde20b89a5e9337f5c7aec` |
-| tree | `5f264f4d0b1237d271cdc48084e6f24c151e621f` |
+| commit / tree | `b423a579139fb5e7f47e64e976755a900ade547c` / `b68f064fa0f8dcbdf6f71ec0e64b3bd5b1072a5c` |
 | `git status --porcelain --untracked-files=all` | 空 |
-| `rustc -Vv` | `rustc 1.99.0 (b940084d7 2026-09-28)` / `host: x86_64-unknown-linux-gnu` / `LLVM 23.1.1` |
-| `cargo -V` | `cargo 1.99.0 (5f94df478 2026-08-27)` |
+| rustc / cargo | `rustc 1.99.0 (b940084d7 2026-09-28)` / `cargo 1.99.0 (5f94df478 2026-08-27)` |
+| 实际启用的 features | gate/runner/bridge 的 release 构建都没加 `--features`；三个 crate 都没有 `default` feature，所以启用集合为空 |
 
-`rustc -Vv` 的完整输出：
-
-```
-rustc 1.99.0 (b940084d7 2026-09-28)
-binary: rustc
-commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
-commit-date: 2026-09-28
-host: x86_64-unknown-linux-gnu
-release: 1.99.0
-LLVM version: 23.1.1
-```
-
-`cargo -V`：`cargo 1.99.0 (5f94df478 2026-08-27)`。
-
-本次构建结果：
-
-| 产物 | 路径 | 字节 | sha256 |
+| 产物（部署） | 路径（`…` = `/home/administrator/projects/Chrome-MCP-m2-build-b423a57`） | 字节 | sha256 |
 |---|---|---|---|
-| review-gate | `…-target-gr/release/review-gate` | 12864728 | `378af8c0b5c3e44ce22463321dc9c00c9a6fb31b43811bbcfd11eb358f364ae5` |
+| review-gate | `…-target-gr/release/review-gate` | 13167568 | `69b3d3a6b5e0b5e982a8191d47a5dcfde6d6d34f5caa0accade53e7c07184f07` |
 | audit-runner | `…-target-gr/release/audit-runner` | 1675296 | `c9a66da9442758d85c8411064d1a67753339efab854fe491bcfc79b2293940b3` |
 | agent-bridge | `…-target-bridge/release/agent-bridge` | 11748640 | `d9ab3e50895ed729b076d031719738e8157516084b3ae8e2aa2620366b41bca2` |
 
-（表中 `…` 指 `/home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb`。）
+| 对照（不部署） | 路径 | sha256 |
+|---|---|---|
+| review-gate（fault） | `…-target-fault/release/review-gate` | `3b564eab65571034489bfa67c0f45db3b2f211358244b806295d096b734390ee` |
+| audit-runner（fault） | `…-target-fault/release/audit-runner` | `2b60911447f85d178b60d07d19a80bc8e65d1738fc8890bee73825fe24dc42a0` |
 
-**判定规则**：待部署的 agent-bridge **必须**是 `d9ab3e50…`；(a) 的 gate/runner 必须与上表一致。
-本次 (a) 的 gate/runner 值与三包构建相同。任何一项不同：**停止并报告**，不要用参考值或旧的
-target 目录顶替。`04a2260e…` 是三包一起构建的产物，**不要部署**，只作为“为什么必须分两次构建”的说明。
-
-**实际启用的 features**（不是把“默认”当成空）：
-
-```
-cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; [print(p["name"], p["features"]) for p in json.load(sys.stdin)["packages"] if p["name"] in ("review-gate","audit-runner","agent-bridge")]'
-```
-
-本次输出：`agent-bridge {}`、`audit-runner {"fault-injection": []}`、`review-gate {"fault-injection": []}`。
-三个 crate 都**没有声明 `default` feature**；review-gate / audit-runner 唯一的 feature 是
-`fault-injection`，上面的 release 构建没有加 `--features`，所以**实际启用集合为空**。
-Cargo.toml 可复核：`crates/{review-gate,audit-runner,agent-bridge}/Cargo.toml`。
-
-部署前逐项复核（必须与上表完全一致；不一致就停止，不要安装）：
+部署前复核（任何一项不符就停止）：
 
 ```
-cd /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb
+cd /home/administrator/projects/Chrome-MCP-m2-build-b423a57
 git rev-parse HEAD HEAD^{tree}
 git status --porcelain --untracked-files=all
-sha256sum \
-  /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-gr/release/review-gate \
-  /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-gr/release/audit-runner \
-  /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-bridge/release/agent-bridge
-strings -a /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-gr/release/review-gate | grep -c REVIEW_GATE_FAULT
-strings -a /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-gr/release/audit-runner | grep -c AUDIT_RUNNER_FAULT
+sha256sum ../Chrome-MCP-m2-build-b423a57-target-gr/release/review-gate ../Chrome-MCP-m2-build-b423a57-target-gr/release/audit-runner ../Chrome-MCP-m2-build-b423a57-target-bridge/release/agent-bridge
+strings -a ../Chrome-MCP-m2-build-b423a57-target-gr/release/review-gate | grep -c REVIEW_GATE_FAULT
+strings -a ../Chrome-MCP-m2-build-b423a57-target-gr/release/audit-runner | grep -c AUDIT_RUNNER_FAULT
+strings -a ../Chrome-MCP-m2-build-b423a57-target-fault/release/review-gate | grep -c REVIEW_GATE_FAULT
+strings -a ../Chrome-MCP-m2-build-b423a57-target-fault/release/audit-runner | grep -c AUDIT_RUNNER_FAULT
 ```
 
-预期：HEAD/tree 与上表一致；status 无输出；三个 sha256 与上表一致；两个 `grep -c` 都是 `0`
-（找不到字符串时 grep 退出 1，`grep -c` 仍会打印 0，可忽略它的退出码）。
+预期：HEAD/tree 如上；status 空；三个 sha256 如表；部署产物的两个 `grep -c` 为 `0`；fault 构建的两个为非 0（本次分别为 1 与 3，证明检查有效）。
 
-**observer 真实二进制自检（部署前必跑）**：`scripts/m2-e2e/bridge_observer_e2e.sh` 是
-`/home/administrator/projects/m2-tools/bridge-observer-e2e.sh` 的原样副本（sha256
-`c2e1887c8087bd93a7200dc8ae2d93d8d902820ab21ffcd60f1f74b1e88adb5d`），用临时 HOME 和独立端口，
-不需要 sudo，不碰线上 bridge。第 6.3 节安装前必须对 (b) 的二进制跑一次，见该节。
-
-**对照：带 fault-injection 的独立构建**（同一修订、另一个**空** target 目录；绝不覆盖待部署产物）：
+observer 真实二进制自检（不需要 sudo，临时 HOME 与端口，不碰线上 bridge），安装 agent-bridge 前必跑：
 
 ```
-test -z "$(ls -A /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-fault 2>/dev/null)" || { echo 'fault target dir not empty'; exit 1; }
-cd /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb
-CARGO_TARGET_DIR=/home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-fault cargo build --release --locked -p review-gate -p audit-runner --features review-gate/fault-injection,audit-runner/fault-injection
-strings -a /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-fault/release/review-gate | grep -c REVIEW_GATE_FAULT
-strings -a /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-fault/release/audit-runner | grep -c AUDIT_RUNNER_FAULT
-sha256sum /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-fault/release/review-gate /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-fault/release/audit-runner
+bash /home/administrator/projects/Chrome-MCP-m2/scripts/m2-e2e/bridge_observer_e2e.sh /home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-bridge/release/agent-bridge
 ```
 
-本次对照结果：review-gate 有 1 处 `REVIEW_GATE_FAULT`
-（sha256 `f8cb7c7977684104673ccad0923d671993af64514f404a82813a38e6f2244e90`），
-audit-runner 有 3 处 `AUDIT_RUNNER_FAULT`
-（sha256 `2b60911447f85d178b60d07d19a80bc8e65d1738fc8890bee73825fe24dc42a0`）。
-这证明第 1 节的字符串检查确实能查出来。fault 变量名来自源码：
-`REVIEW_GATE_FAULT`（`crates/review-gate/src/milestone/serve.rs`），
-`AUDIT_RUNNER_FAULT`（`crates/audit-runner/src/lib.rs`，`cleanup-unconfirmed` / `sweep-procs=`）。
-fault 构建只用于自测/字符串对照，**不部署**。
+预期最后一行 `ALL OK`，`binary sha256:` 等于上表 agent-bridge。
 
-注意：Cargo 的产物不保证跨目录/跨机器逐字节可复现。**部署时必须安装本次构建的这三个文件**，
-并在 `install` 前再次比对 sha256；不要重新构建后继续用上面的哈希。
+## 2. 线上现状（2026-10-26 已核实；执行前再读一次，不同就停止）
 
-## 2. 需要记住的线上现状（只读核对）
+- **review-gate**：`/usr/local/bin/review-gate` sha256 `d7a030cb0bcad51337f49a217297288c5ba4ea858ba5949bc9ad865299307865`，即 opencode 的身份绑定构建（`9a19094`/`50e0546`/`1e04741`；从 `1e04741` 干净重建得到同一 sha256）。运行中进程 `/proc/<MainPID>/exe` 同为 d7a030cb（用户 2026-10-26 执行 `sha256sum` 得到）。同目录备份：`review-gate.bak-20261022010102`（= 原 `0b4f1e1e…`）、`review-gate.bak-20261022010350`（= d7a030cb）。证据：`m2-tools/live-gate-provenance-20261025/`。
+- **unit**：`/etc/systemd/system/review-gate.service`（User/Group reviewgate，`EnvironmentFile=-/etc/review-gate/env`，ProtectSystem=strict，ProtectHome=read-only，ReadWritePaths=/var/lib/reviewgate，PrivateTmp，NoNewPrivileges）＋ drop-in `review-gate.service.d/agents.conf`（ExecStart 带 `--agents-file /etc/review-gate/agents.json`）。`Environment=` 赋值 0 条。停服行为见 0.2 第 5 条。
+- **/etc/review-gate**：目录 `root root 755`；`agents.json`、`client.token`、`env` 均为 `root reviewgate 640`；另有 `agents.json.bak-20261022010350`。
+- **令牌原件**：`/home/administrator/projects/m2-tools/review-gate-deploy-20261021/tokens/{claude,opencode,codex,dsh}.token`（0600，属 administrator；明文，所有 agent 同一 OS 用户可读，只能凭据追责）。
+- **audit-runner**：`audit-runner.socket`（`/run/audit-runner/runner.sock`，auditor:reviewgate 0660）、`audit-runner.service`（User=auditor，常驻监听；`active` 不等于有作业）。旧 gate 没有 milestone 路由，**不会**向 runner 发作业。
+- **agent-bridge**：`/home/administrator/.local/bin/agent-bridge` sha256 `dbca255f1a9bfb0b7256f481515070ab25fda2c1cda8b23b8be5abbe6c5bb31b`（bridge 线 `4e34e25`，不含 observer）。
 
-- `review-gate.service`：`User=reviewgate`（uid 999），当前 ExecStart 为
-  `/usr/local/bin/review-gate serve --state /var/lib/reviewgate/state --listen 127.0.0.1:7878 --token-file /etc/review-gate/client.token --relay-dir /var/lib/reviewgate/relay`；
-  `Restart=on-failure`、`RestartSec=3`、`ProtectSystem=strict`、`ProtectHome=read-only`、
-  `ReadWritePaths=/var/lib/reviewgate`、`UMask=0022`。安装本目录的 drop-in 后，重启/退避参数
-  按第 7 节的 U-c=1 设置覆盖。
-- `audit-runner.socket`：`/run/audit-runner/runner.sock`，`auditor:reviewgate 0660`。
-- `audit-runner.service`：`User=auditor`（uid 997），`Requires=audit-runner.socket`，
-  `--allow-uid 999 --allow-cgroup /system.slice/review-gate.service --own-cgroup`。
-- `audit-runner.service` 是**常驻监听循环**：空闲时 `active` 是正常的，`active` 不等于有在途作业；
-  它只在“作业进程组未能确认清空”后退出，由 systemd 清理 cgroup。不要等它变 inactive。
-- 作业目录：`/home/auditor/jobs/<job_id>/`，每个作业一个目录且**完成后不删除**；
-  运行中的作业可能还没有 `answer.md`。因此“有目录”不等于“在途”，要结合进程、连接和目录时间判断。
-- 当前远端是 https（无需改写 ssh）：`https://github.com/victormshan/WebUI-AutoTest.git`
-  （`git -C /home/administrator/projects/Chrome-MCP remote get-url origin`）。
-- 当前旧二进制 sha256（**仅供备份命名参考，执行前再算**）：
-  `/usr/local/bin/review-gate` 为 `0b4f1e1effbd…`，
-  `/usr/local/lib/audit-runner/audit-runner` 为 `69983378df3b…`。
-- **agent-bridge 线上现状**：`/home/administrator/.local/bin/agent-bridge`，
-  当前 sha256 `dbca255f1a9bfb0b7256f481515070ab25fda2c1cda8b23b8be5abbe6c5bb31b`，
-  `agent-bridge --version` 为 `agent-bridge 0.1.0`，服务 `agent-bridge.service` 为 `active`，
-  ExecStart 为 `serve --listen 127.0.0.1:7879 --mirror /mnt/d/cc-tasks/claude-bridge/tasks --step-relay-dir /home/administrator/.claude/step-relay`。
-  这个二进制对应 bridge 线 **`4e34e25e77165af3689b13a1b0835568d643988a`**，**不包含** observer
-  （所以 observer 只能在第 6 节替换后生效）。第 6 节会先证明线上二进制确实是该构建；证不出来就停止。
-- `agent-bridge-cli@codex-collab.service`、`agent-bridge-cli@opencode.service` 是 agent-bridge 的
-  原生 CLI worker，均为 `active`；替换 bridge 时按第 6 节一起重启。
-- `job_timeout_secs=1800` 取自 `crates/audit-runner/src/main.rs` 的
-  `--timeout-secs` 默认值 `1800`；gate 发给 runner 的等待是 `job_timeout + 60s`。
-
-## 3. 准备 /etc 文件、drop-in 与 observer 配置
-
-核对 `repo_id`（bridge q1 已定；用户在安装前最终确认，首次登记后不可改）：
+核对命令：
 
 ```
-grep -n repo_id /home/administrator/projects/Chrome-MCP-m2-deploy/deploy/m2/milestones.sample.json
+sudo sha256sum /usr/local/bin/review-gate /proc/$(systemctl show -p MainPID --value review-gate.service)/exe
+systemctl cat review-gate.service
+systemctl show review-gate.service -p KillMode -p KillSignal -p TimeoutStopUSec -p SendSIGKILL
+sudo ls -l /etc/review-gate
+sha256sum /home/administrator/.local/bin/agent-bridge
 ```
 
-核对现有配置目录并安装 `milestones.json`（root:reviewgate 0640）。目录已存在，**不要**用
-`install -d` 改写它的 owner/mode：
+## 3. 准备 /etc（服务仍在运行；这些步骤不影响旧 gate）
+
+### 3.1 主体与令牌对照
+
+| gate 主体 | family | 令牌文件 | bridge agent 名 |
+|---|---|---|---|
+| `claude` | claude | `tokens/claude.token` | `claude` |
+| `opencode` | deepseek | `tokens/opencode.token` | `opencode` |
+| `codex` | openai | `tokens/codex.token` | `codex` / `codex-collab` |
+| `dsh` | deepseek | `tokens/dsh.token` | `dsh` |
+| `legacy-claude`（显式 legacy 条目） | claude | `/etc/review-gate/client.token` | — |
+
+M2 的 implementers/vendors 比较 bridge 名；gate 的属主与 writers 比较主体名。两者不同名是已知事实，E4 报告照此表写。
+
+### 3.2 生成 identity.json（root；不打印令牌）
+
+转换器只接受 0600 或更严格的令牌文件，而线上 `client.token` 是 `root reviewgate 640`（服务要读它，原文件不改），所以先在 root 专属目录建一个 0600 副本作为 `--legacy`，转换后立即删除：
 
 ```
-sudo stat -c '%U %G %a %n' /etc/review-gate
-sudo install -m 0640 -o root -g reviewgate /home/administrator/projects/Chrome-MCP-m2-deploy/deploy/m2/milestones.sample.json /etc/review-gate/milestones.json
+sudo install -d -m 0700 -o root -g root /root/m2-id
+sudo install -m 0600 -o root -g root /etc/review-gate/client.token /root/m2-id/client.token.copy
+sudo /home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-gr/release/review-gate admin identity-from-agents \
+  --credential claude=claude=/home/administrator/projects/m2-tools/review-gate-deploy-20261021/tokens/claude.token \
+  --credential opencode=deepseek=/home/administrator/projects/m2-tools/review-gate-deploy-20261021/tokens/opencode.token \
+  --credential codex=openai=/home/administrator/projects/m2-tools/review-gate-deploy-20261021/tokens/codex.token \
+  --credential dsh=deepseek=/home/administrator/projects/m2-tools/review-gate-deploy-20261021/tokens/dsh.token \
+  --legacy /root/m2-id/client.token.copy \
+  --agents /etc/review-gate/agents.json \
+  --out /root/m2-id/identity.json
+sudo rm -f /root/m2-id/client.token.copy
+sudo ls -l /root/m2-id
+```
+
+最后的 `ls` 里不应再有 `client.token.copy`。转换器若报错退出：**先**执行 `sudo rm -f /root/m2-id/client.token.copy`，再停止报告，不留明文副本。演练（同样的权限，用待部署的二进制，无 root）：`REVIEW_GATE_BIN=…-target-gr/release/review-gate bash scripts/m2-e2e/tests/test_identity_migration.sh`：直接用 0640 的 legacy 文件被拒、用 0600 副本成功、5 个哈希等于去首尾空白后的令牌 sha256、输出里没有令牌、原文件内容与权限不变（结果见 selftest-output.txt）。
+
+预期：5 行 `<主体> <family> sha256 <前 12 位>…`，最后一行 `written … (sha256 …)`，exit 0。它同时证明线上 agents.json 的令牌集合与 family 和这 4 个令牌文件完全一致；不一致时它会按条目序号报错并退出非 0：此时**停止**（说明线上映射已变），不要手改。
+
+```
+sudo install -m 0640 -o root -g reviewgate /root/m2-id/identity.json /etc/review-gate/identity.json
+sudo stat -c '%U %G %a %n' /etc/review-gate/identity.json
+namei -l /etc/review-gate/identity.json
+```
+
+预期 `root reviewgate 640`；`namei -l` 列出的 `/`、`/etc`、`/etc/review-gate` 都属 root，且组和其他用户都**没有写位**（Codex：`read_admin_file` 只检查文件与直接父目录，整条路径在这里核验）。
+
+**客户端令牌核对**（root；只输出名字与结论，不输出令牌或哈希全文）：每个会在部署后访问 gate 的客户端令牌文件，都必须能被 identity.json 认证。
+
+```
+T=/home/administrator/projects/m2-tools/review-gate-deploy-20261021/tokens
+sudo python3 - /etc/review-gate/identity.json /home/administrator/.config/review-gate/token "$T/claude.token" "$T/opencode.token" "$T/codex.token" "$T/dsh.token" <<'PY'
+import hashlib, json, sys
+ids = json.load(open(sys.argv[1]))
+known = {c["sha256"]: p["id"] for p in ids["principals"] for c in p["credentials"]}
+for f in sys.argv[2:]:
+    h = hashlib.sha256(open(f).read().strip().encode()).hexdigest()
+    print(f, "->", known.get(h, "NOT IN identity.json"))
+PY
+```
+
+预期 6 行：`/home/administrator/.config/review-gate/token -> legacy-claude`（Claude 当前用的令牌），以及 `claude.token -> claude`、`opencode.token -> opencode`、`codex.token -> codex`、`dsh.token -> dsh`。部署后 Claude 改用 `tokens/claude.token`（主体 `claude`，见第 7.3 节），因为 `writers` 只列 `claude`。如果 opencode、Codex 或 DSH 实际使用的令牌文件不是上面这几个，把它的路径追加到命令末尾一并核对；任何一行 `NOT IN identity.json` 都要先由用户决定（换用登记过的令牌，或补登记），再继续。
+
+### 3.3 milestones.json
+
+```
+grep -n '"writers"\|"implementers"\|"repo_id"' /home/administrator/projects/Chrome-MCP-m2/deploy/m2/milestones.sample.json
+sudo install -m 0640 -o root -g reviewgate /home/administrator/projects/Chrome-MCP-m2/deploy/m2/milestones.sample.json /etc/review-gate/milestones.json
 sudo stat -c '%U %G %a %n' /etc/review-gate/milestones.json
 ```
 
-预期目录仍为原来的 owner/mode；文件为 `root reviewgate 640 /etc/review-gate/milestones.json`。
-失败时：若 owner/mode 不符，重新执行 `sudo chown root:reviewgate …` 和
-`sudo chmod 0640 …`；gate 会拒绝 group/other 可读的令牌文件，但配置文件只做字段检查。
+预期 `"writers": ["claude"]`（0.3 已确认）、implementers `["claude","opencode"]`、repo_id 如 0.5；文件 `root reviewgate 640`。
 
-**observer 令牌**（owner 必须是服务的有效 UID `reviewgate`，mode 0600）。
-全程**只打印哈希，不打印令牌**：令牌在同一个 root shell 里生成、写入并计算 SHA-256。
+### 3.4 observer 令牌与注册
+
+（与上一版相同：令牌在同一个 root shell 中生成、写入、只打印 sha256；把哈希写进 `~/.config/agent-bridge/observers.json`；不复用任何 agent 令牌。）
 
 ```
 sudo install -m 0600 -o reviewgate -g reviewgate /dev/null /etc/review-gate/bridge-observer.token
@@ -236,128 +214,78 @@ printf "%s" "$T" > /etc/review-gate/bridge-observer.token
 printf "observer token sha256: %s\n" "$(printf "%s" "$T" | sha256sum | cut -d" " -f1)"
 unset T'
 sudo stat -c '%u %U %G %a %n' /etc/review-gate/bridge-observer.token
-sudo sha256sum /etc/review-gate/bridge-observer.token
-```
-
-预期 uid 999、`reviewgate reviewgate 600`；文件内容至少 32 字符；`sha256sum` 打印的哈希与上面
-`observer token sha256:` 一致。第一条 `install` 先以 0600 建空文件，第二条在 `umask 077` 下写入，
-**不存在**内容先以 0644 暴露的窗口。
-
-哈希格式与 `agent-bridge hash-token` 一致：该命令读取 stdin 后先 `trim`，再取 SHA-256 的
-64 位小写十六进制（`crates/agent-bridge/src/main.rs` 的 `Cmd::HashToken`）。这里的令牌是
-`base64 -w0` 的输出，不含首尾空白，所以 `printf '%s' "$T" | sha256sum` 的字节与 `hash-token`
-所见完全相同。这里已经直接算出同一个值，不需要再通过该命令读取令牌文件。
-
-把该哈希加入 `~/.config/agent-bridge/observers.json`（只读 observer，不是 agent；observer 只能用
-`GET /v1/observe/tasks[/<id>]`，不能收发任务）。当前该文件不存在；若已存在，用同一段代码合并：
-
-```
 read -r -p 'observer hash: ' HASH
 HASH="$HASH" python3 -c 'import json,os,pathlib; p=pathlib.Path(os.path.expanduser("~/.config/agent-bridge/observers.json")); d=json.loads(p.read_text()) if p.exists() else {}; d["review-gate"]=os.environ["HASH"]; p.write_text(json.dumps(d,indent=2,ensure_ascii=False)+"\n")'
 chmod 0600 ~/.config/agent-bridge/observers.json
-python3 -m json.tool ~/.config/agent-bridge/observers.json
 ```
 
-预期 `review-gate` 的值就是上面的哈希；文件不包含任何令牌明文。
-observer 名字/token 哈希不能与任何 agent 相同（`check_distinct`），所以必须用新令牌，不要复用
-`opencode.token`。观察者令牌只用于 `sources::read_bridge` 的元数据读取；它不授予任何写权限。
-**这里不重启 bridge**：线上 bridge（`4e34e25`）还不认识 observer；第 6 节替换二进制后重启，
-启动日志才会出现 `read-only observers ["review-gate"]`。
+预期 uid 999、`reviewgate reviewgate 600`；observers.json 里 `review-gate` 的值就是打印的哈希。
 
-安装 drop-in（清空并重写 ExecStart，并加入 U-c=1 的重启限制；其余参数保持现状）：
+### 3.5 drain 文件的位置（不要创建）
 
-```
-sudo mkdir -p /etc/systemd/system/review-gate.service.d
-sudo install -m 0644 -o root -g root /home/administrator/projects/Chrome-MCP-m2-deploy/deploy/m2/review-gate.service.d-milestones.conf /etc/systemd/system/review-gate.service.d/milestones.conf
-sudo systemctl cat review-gate.service
-```
+drain 文件是 `/etc/review-gate/drain`（drop-in 里的 `--drain-file`）。目录 `/etc/review-gate` 属 root、755，gate 只能读；只有 root 能创建或删除它。**现在不要创建**：它一旦存在，新 gate 启动后立即进入排空，拒绝一切写入。它只在以后停新 gate 时使用（第 4.6 节）。gate 启动时若该路径不可检查（非 NotFound 的错误）会拒绝启动。
 
-预期最后一段包含 `ExecStart=`（空）和带 `--milestones /etc/review-gate/milestones.json` 的新行，
-且旧参数一个不少；同时应看到 `[Unit]` 的 `StartLimitIntervalSec=3600`、`StartLimitBurst=5`
-和 `[Service]` 的 `Restart=on-failure`、`RestartSec=10`、`RestartSteps=5`、
-`RestartMaxDelaySec=300`。失败时不要启动服务：`sudo systemctl cat review-gate.service` 对照第 2 节；
-参数写错会导致 gate 启动失败（`--milestones` 文件不存在或字段错误都会拒绝启动）。
-
-## 4. 停机排空（gate / audit-runner；回退也走这一节）
-
-原则：先阻止新请求，再排空 gate 的两条作业通道（M2 milestone 与 M1 review），stop gate，
-再确认 runner 无在途作业；等待有上限，**到时不强杀活动审计**，停止操作并报告。
-
-1. 通知各客户端暂停（Claude/opencode/DSH/webtest 等），不要再发起 review 或 milestone 请求。
-2. 确认没有客户端操作：
+### 3.6 drop-in（暂不 reload）
 
 ```
-pgrep -af 'review-gate (review|milestone)'
+sudo install -m 0644 -o root -g root /home/administrator/projects/Chrome-MCP-m2/deploy/m2/review-gate.service.d-milestones.conf /etc/systemd/system/review-gate.service.d/milestones.conf
+sudo cp -p /etc/systemd/system/review-gate.service.d/agents.conf /root/m2-id/agents.conf.bak
+sudo rm /etc/systemd/system/review-gate.service.d/agents.conf
+ls -l /etc/systemd/system/review-gate.service.d/
 ```
 
-预期无输出（只有这条 `pgrep` 自身可能匹配时也会显示；排除即可）。
+两个 drop-in 都写 `ExecStart=` 时只有最后一个生效，所以旧的 `agents.conf` 必须移走（原件保存在 `/root/m2-id/agents.conf.bak`）。**这里不执行 `daemon-reload`**：运行中的旧 gate 不受影响，新 unit 在第 7 节才加载。
 
-3. 确认 milestone 各阶段没有 Pending，M1 review 通道也没有在跑的作业。
-   对每个已登记阶段执行（示例为 `m2`；其余阶段逐个替换）：
+## 4. 计划内停机
 
-```
-sudo REVIEW_GATE_TOKEN_FILE=/etc/review-gate/client.token /usr/local/bin/review-gate milestone status --phase m2 | python3 -m json.tool
-```
-
-预期 `.state.current` 为 null，或 `.state.current.state` 不是 `Pending`；`.released` 可以为 false。
-CLI 在未释放时**退出码为 1**，这是“尚未 released”的诊断结果，不是查询失败；以 JSON 为准。
-若出现 `Pending`，等它的 job 完成或被取消，不要停服务。
-
-M1 的在途 review 作业没有列表接口；用日志和连接核对：
+### 4.1 受影响的客户端（全部停用，记录 PID 与时间）
 
 ```
-sudo journalctl -u review-gate.service --since '-30 min' --no-pager | grep -Ei 'job|review'
-sudo ss -tnp | grep ':7878'
+systemctl --user stop agent-bridge-cli@codex-collab.service agent-bridge-cli@opencode.service
+systemctl --user is-active agent-bridge-cli@codex-collab.service agent-bridge-cli@opencode.service
 ```
 
-预期日志里最近没有仍在运行的 job；`:7878` 上允许客户端的空闲 keep-alive 连接，但不能有正在等待
-review 的请求。拿不准就继续等，并在报告里写明。
+另外：Claude 会话不发起 gate 请求（执行者负责通知）；DSH 停止使用 gate；用户本人不运行 `review-gate` 客户端命令。预期两个 worker `inactive`。
 
-注意：这里与 `stop` 之间仍有竞态（n5 第 1 条）：检查之后、服务停止之前，客户端仍可能提交一个
-请求。本节的第 1 步“通知暂停”是主要防线；**权威检查是 stop 之后本节第 6 步的 runner 检查**。
-若本节第 6 步发现竞态期间被接纳的作业，按本节第 7 步等它完成（上限 30 分钟），不要把它当成
-泄漏或强杀。
-
-4. 建立排空时间标记（供本节第 6 步找“新作业”）：
+### 4.2 停服前的记录（不作为排空证明）
 
 ```
-sudo touch /run/m2-drain-marker
+date -u +%FT%TZ
+systemctl show review-gate.service -p MainPID -p ActiveEnterTimestamp
+sudo ss -tnp '( sport = :7878 or dport = :7878 )'
+ps -ef | grep -E '[r]eview-gate (review|task|record|stage|guard|mcp)'
+sudo journalctl -u review-gate.service --since '-60 min' --no-pager | tail -40
 ```
 
-5. 停止 gate：
+记录所有仍然存在的连接与客户端进程。这些只是记录：它们不能证明旧进程里没有已接纳但未完成的请求（0.2 第 1–4 条）。
+
+### 4.3 停旧 gate
 
 ```
 sudo systemctl stop review-gate.service
-sudo systemctl is-active review-gate.service
+systemctl is-active review-gate.service
+sudo journalctl -u review-gate.service --since '-5 min' --no-pager | tail -20
 ```
 
-预期 `inactive`。`stop` 成功后不会再有新请求；gate 进程退出时不会等 detached 的作业线程，
-所以必须继续查 runner。
+预期 `inactive`。journal 里有没有 `Killing process … with signal SIGKILL` 要照实记录（有就说明 90 秒内没退出）。
 
-6. 确认 runner 无活动作业（`active` 不算证据）：
-
-```
-pgrep -u auditor -af codex
-sudo ss -xp | grep -F /run/audit-runner/runner.sock
-sudo find /home/auditor/jobs -mindepth 1 -maxdepth 1 -type d -newer /run/m2-drain-marker -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n'
-sudo find /home/auditor/jobs -mindepth 1 -maxdepth 1 -type d ! -exec test -e '{}/answer.md' ';' -print
-```
-
-预期：没有 codex 进程；runner.sock 上没有 `ESTAB`/`CLOSE-WAIT`（gate 已停，仍在作业的连接会留在
-这两个状态之一）；没有比 marker 更新的作业目录；最后一条只列出历史失败/超时作业（无 `answer.md`），
-其时间应早于 marker。runner 是常驻监听循环，**不要**以 `systemctl is-active` 判断在途。
-
-7. 等待排空，**上限 30 分钟**（从本节第 5 步 stop 完成算起）。每 30 秒重复本节第 6 步；
-   也可以直接跑这个无 sudo 的循环：
+### 4.4 停服后的盘点（先记录，什么都不删）
 
 ```
-end=$((SECONDS+1800)); while pgrep -u auditor -f codex >/dev/null || ss -xp | grep -F /run/audit-runner/runner.sock | grep -Eq 'ESTAB|CLOSE-WAIT'; do [ $SECONDS -ge $end ] && { echo 'CAP REACHED: stop and report'; break; }; date; sleep 30; done
+sudo bash /home/administrator/projects/Chrome-MCP-m2/scripts/m2-e2e/state_manifest.sh /var/lib/reviewgate /root/m2-id/state-M0.sha256
 ```
 
-到 30 分钟仍未排空：**停止操作并报告**（附 `pgrep -u auditor -af codex`、`sudo ss -xp | grep runner.sock`、
-最新 job 目录和 `journalctl -u audit-runner.service`），不要 `kill` 审计进程，也不要继续本节第 8 步。
+脚本在 root 的 shell 里写清单（重定向在 sudo 之内），对**每个**普通文件（包括 `*.tmp`）取 sha256，另把 `*.tmp` 列出；任何文件读不了或任何一步失败都退出非 0，且不留下清单文件；已存在的清单不覆盖。`.tmp` 若存在：记录、保留原样、报告用户（可能有写入被中断）。M0 是停服时的全量清单，第 7.2 节用它判断新 gate 写了什么。
 
-8. 排空后停止 runner 的 socket 与 service（先 socket，防止新连接激活）：
+### 4.5 runner 与外部审计（有上限，不强杀）
+
+旧 gate 不向 runner 发作业；这里确认没有残留：
+
+```
+sudo bash /home/administrator/projects/Chrome-MCP-m2/scripts/m2-e2e/runner_wait.sh 30   # 参数单位是分钟：总上限 30 分钟
+```
+
+退出 0：没有 auditor 的 codex 进程，runner.sock 上没有 `ESTAB`/`CLOSE-WAIT`。退出 2：`pgrep` 或 `ss` 读取失败。退出 3：30 分钟到时仍有活动（脚本打印起止时间与仍在的进程/连接）。2 或 3：**停止并报告**，不 kill，不继续第 5 节。只有退出 0 才继续：
 
 ```
 sudo systemctl stop audit-runner.socket
@@ -365,260 +293,134 @@ sudo systemctl stop audit-runner.service
 systemctl is-active audit-runner.socket audit-runner.service
 ```
 
-预期两个 `inactive`。失败时：`sudo systemctl status audit-runner.socket audit-runner.service`，
-不要用 `kill -9`；把状态记下来报告。
+预期两个 `inactive`。
+
+### 4.6 以后停新 gate（X 起）：用 drain
+
+```
+sudo touch /etc/review-gate/drain
+bash /home/administrator/projects/Chrome-MCP-m2/scripts/m2-e2e/drain_wait.sh http://127.0.0.1:7878 60   # 第二个参数单位是分钟：总上限 60 分钟
+```
+
+只有退出 0 才执行 `sudo systemctl stop review-gate.service`。脚本有总截止时间，每次请求有连接/总时限，严格校验字段与类型（`drain.draining`、`drain.idle` 为布尔，`active_ops`、`failure_count`、`m2_pending` 为整数，null 拒绝），只有 draining、idle、0 在途、0 失败、0 Pending 才算可停。退出 2 = 读取或解析失败（不重试），退出 3 = 到时仍未 idle：都**停止并报告**（`drain.failures`），不停服务。drain 文件不会被脚本删除：它保留到新服务验证通过、用户决定恢复接纳时，由 root `rm /etc/review-gate/drain` 后再重启。演练：`bash scripts/m2-e2e/tests/test_drain_wait.sh`（idle、HTTP 500、坏 JSON、pending 为 null、缺字段、布尔冒充整数、有失败、到时、连接被拒，共 9 种）。
 
 ## 5. 原子替换 review-gate 与 audit-runner
 
-两个二进制都在**同一文件系统内** rename，避免半写状态。目标：
-`/usr/local/bin/review-gate`、`/usr/local/lib/audit-runner/audit-runner`。
-
-1. 备份旧文件（名字含日期和旧 sha 前 12 位）：
-
 ```
-sudo cp -p /usr/local/bin/review-gate /usr/local/bin/review-gate.bak-20261020-$(sha256sum /usr/local/bin/review-gate | cut -c1-12)
-sudo cp -p /usr/local/lib/audit-runner/audit-runner /usr/local/lib/audit-runner/audit-runner.bak-20261020-$(sha256sum /usr/local/lib/audit-runner/audit-runner | cut -c1-12)
-ls -l /usr/local/bin/review-gate.bak-20261020-* /usr/local/lib/audit-runner/audit-runner.bak-20261020-*
-```
-
-记录实际文件名，回退时要用。预期每个目录只有一个备份。
-
-2. **安装源**再验一次 sha256（必须与第 1 节 manifest 完全一致）：
-
-```
-sha256sum /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-gr/release/review-gate
-sha256sum /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-gr/release/audit-runner
-```
-
-预期分别为 `378af8c0b5c3…` 和 `c9a66da94427…`。不一致就停止，不要安装。
-
-3. 写到同目录的隐藏 `.new` 文件：
-
-```
-sudo stat -c '%U %G %a %n' /usr/local/lib/audit-runner
-sudo install -o root -g root -m 0755 /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-gr/release/review-gate /usr/local/bin/.review-gate.new
-sudo install -o root -g root -m 0755 /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-gr/release/audit-runner /usr/local/lib/audit-runner/.audit-runner.new
-```
-
-预期 `/usr/local/lib/audit-runner` 为 `root root 755` 且已存在（旧二进制就在里面）；不存在或
-owner/mode 不符就停止，不要用 `install -d` 改写一个已有目录。
-
-4. 核对新文件的 owner、mode、sha256：
-
-```
-sudo stat -c '%U %G %a %s %n' /usr/local/bin/.review-gate.new /usr/local/lib/audit-runner/.audit-runner.new
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+sudo cp -p /usr/local/bin/review-gate /usr/local/bin/review-gate.bak-$TS-$(sha256sum /usr/local/bin/review-gate | cut -c1-12)
+sudo cp -p /usr/local/lib/audit-runner/audit-runner /usr/local/lib/audit-runner/audit-runner.bak-$TS-$(sha256sum /usr/local/lib/audit-runner/audit-runner | cut -c1-12)
+sha256sum /home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-gr/release/review-gate /home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-gr/release/audit-runner
+sudo install -o root -g root -m 0755 /home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-gr/release/review-gate /usr/local/bin/.review-gate.new
+sudo install -o root -g root -m 0755 /home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-gr/release/audit-runner /usr/local/lib/audit-runner/.audit-runner.new
 sudo sha256sum /usr/local/bin/.review-gate.new /usr/local/lib/audit-runner/.audit-runner.new
-```
-
-预期 `root root 755`，sha256 与第 1 节一致。不符就删除 `.new` 并停止。
-
-5. 同一文件系统内原子替换：
-
-```
 sudo mv -f /usr/local/bin/.review-gate.new /usr/local/bin/review-gate
 sudo mv -f /usr/local/lib/audit-runner/.audit-runner.new /usr/local/lib/audit-runner/audit-runner
-sudo stat -c '%U %G %a %s %n' /usr/local/bin/review-gate /usr/local/lib/audit-runner/audit-runner
 sudo sha256sum /usr/local/bin/review-gate /usr/local/lib/audit-runner/audit-runner
 ```
 
-## 6. 替换 agent-bridge（维护窗口；会中断所有 agent worker turn）
+预期：备份名记下（第 10 节用）；安装源、`.new`、替换后的 sha256 都等于第 1 节；任何一处不符就删除 `.new` 并停止。
 
-**在维护窗口内执行**。先完成第 4 节的排空（gate 已停、runner 无在途作业）。这一步只动
-`/home/administrator/.local/bin/agent-bridge`（属主是 `administrator`，**不要 sudo**）和三个
-`systemctl --user` 单元。
+## 6. 替换 agent-bridge
 
-### 6.1 预检（任一项不符就停止并报告，不覆盖）
+只动 `/home/administrator/.local/bin/agent-bridge`（属 administrator，**不用 sudo**）与 `systemctl --user` 单元。
 
-```
-BIN=/home/administrator/.local/bin/agent-bridge
-ls -l "$BIN"
-sha256sum "$BIN"
-"$BIN" --version
-systemctl --user show agent-bridge.service -p ExecStart -p ActiveState -p MainPID
-systemctl --user is-active agent-bridge.service agent-bridge-cli@codex-collab.service agent-bridge-cli@opencode.service
-```
-
-记录实际输出。预期：sha256 为 `dbca255f1a9bfb0b7256f481515070ab25fda2c1cda8b23b8be5abbe6c5bb31b`，
-版本 `agent-bridge 0.1.0`，服务均为 `active`。
-
-**怎么判断线上二进制确实是 bridge 线 `4e34e25`**：从 `4e34e25` 做一次**单包** release 构建，
-构建目录必须是干净的 detached worktree、target 目录必须是新的空目录；然后把它的 sha256 与
-线上文件比较。**本次已经用下面的目录完成构建并比对；不要重建**，直接看后面的结论；命令块只是
-可从零复现的记录。
-
-```
-git -C /home/administrator/projects/Chrome-MCP-m2-deploy worktree add --detach /home/administrator/projects/Chrome-MCP-live-4e34e25 4e34e25e77165af3689b13a1b0835568d643988a
-test -z "$(ls -A /home/administrator/projects/Chrome-MCP-live-4e34e25-target 2>/dev/null)" || { echo 'target dir not empty'; exit 1; }
-cd /home/administrator/projects/Chrome-MCP-live-4e34e25
-source ~/.cargo/env
-CARGO_TARGET_DIR=/home/administrator/projects/Chrome-MCP-live-4e34e25-target cargo build --release --locked -p agent-bridge
-sha256sum /home/administrator/projects/Chrome-MCP-live-4e34e25-target/release/agent-bridge
-git status --porcelain --untracked-files=all
-git rev-parse HEAD HEAD^{tree}
-```
-
-本次已核对：该构建的 sha256 是
-`dbca255f1a9bfb0b7256f481515070ab25fda2c1cda8b23b8be5abbe6c5bb31b`，与线上文件**完全一致**
-（HEAD `4e34e25e77165af3689b13a1b0835568d643988a`，tree `4a8e785907a067fd988f1b4c6b6549ca117d65b0`，
-worktree clean）。如果线上 sha256 不同，说明有人部署了更新的版本：**停止，报告用户，不要覆盖**
-（项目 CLAUDE.md：不要用旧分支的二进制覆盖线上版本）。如果无法完成这个构建/比较，也**停止**，
-不要凭版本字符串或日期判断。
-
-### 6.2 排空 agent-bridge worker turn
-
-确认没有正在执行的 `opencode run` / `codex exec`（它们是 `agent-bridge-cli@*.service` 的子进程）。
-**不要 kill**；有就等它结束。
-
-```
-systemctl --user status agent-bridge-cli@codex-collab.service agent-bridge-cli@opencode.service --no-pager
-pgrep -af 'opencode run --format json|codex(\.exe)? exec'
-```
-
-预期：`status` 的进程树里只有 python worker（`bridge_agents.py worker ...`），没有
-`opencode run` / `codex exec` 行；`pgrep` 无输出。如果正在执行的恰好是你自己（从 bridge worker
-里跑本手册），先换到普通终端；否则等待，不要把在途 turn 杀掉。
-
-同时确认第 4 节的 gate/runner 排空仍成立（gate `inactive`、无 audit 作业）。
-
-### 6.3 observer 自检、备份与原子替换
-
-安装前先对**即将安装的二进制**跑一次隔离的 observer 真实二进制自检（临时 HOME、独立端口、
-不需要 sudo、不碰线上 bridge，见第 1 节）：
-
-```
-bash /home/administrator/projects/Chrome-MCP-m2-deploy/scripts/m2-e2e/bridge_observer_e2e.sh \
-  /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-bridge/release/agent-bridge
-```
-
-预期最后一行 `ALL OK`，且 `binary sha256:` 等于 `d9ab3e50…`。若脚本的 sha256 不是
-`c2e1887c8087bd93a7200dc8ae2d93d8d902820ab21ffcd60f1f74b1e88adb5d`，或自检失败，**停止**，
-不要安装。
+### 6.1 预检（不符就停止，不覆盖）
 
 ```
 BIN=/home/administrator/.local/bin/agent-bridge
-TS=$(date -u +%Y%m%dT%H%M%SZ)
+OLD=dbca255f1a9bfb0b7256f481515070ab25fda2c1cda8b23b8be5abbe6c5bb31b
+NEW_SRC=/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-bridge/release/agent-bridge
+NEW=d9ab3e50895ed729b076d031719738e8157516084b3ae8e2aa2620366b41bca2
+[ "$(sha256sum "$BIN" | cut -d' ' -f1)" = "$OLD" ] || { echo 'STOP: the live agent-bridge is not dbca255f'; false; }
+[ "$(sha256sum "$NEW_SRC" | cut -d' ' -f1)" = "$NEW" ] || { echo 'STOP: the build is not d9ab3e50'; false; }
+ps -ef | grep -E '[o]pencode run --format json|[c]odex(\.exe)? exec' || echo 'no worker turn in progress'
+bash /home/administrator/projects/Chrome-MCP-m2/scripts/m2-e2e/bridge_observer_e2e.sh "$NEW_SRC"
+```
+
+预期：两个 `[ … ]` 都不打印 STOP（打印了就停止，不往下）；没有在途的 worker turn（worker 已在 4.1 停止；有就等它结束，不 kill）；自检最后一行 `ALL OK`。
+
+### 6.2 备份与原子替换
+
+```
+TS=$(date -u +%Y%m%dT%H%M%SZ); echo "$TS"
 cp -p "$BIN" "$BIN.bak-$TS"
-sha256sum "$BIN.bak-$TS"
-install -m 0755 /home/administrator/projects/Chrome-MCP-m2-build-bbc5aeb-target-bridge/release/agent-bridge "$BIN.new-$TS"
-sha256sum "$BIN.new-$TS"
+[ "$(sha256sum "$BIN.bak-$TS" | cut -d' ' -f1)" = "$OLD" ] || { echo 'STOP: backup differs'; false; }
+install -m 0755 "$NEW_SRC" "$BIN.new-$TS"
+[ "$(sha256sum "$BIN.new-$TS" | cut -d' ' -f1)" = "$NEW" ] || { echo 'STOP: .new differs'; rm -f "$BIN.new-$TS"; false; }
 mv -f "$BIN.new-$TS" "$BIN"
 sha256sum "$BIN"
-```
-
-预期：备份 sha256 等于 6.1 记录的旧值；新文件 sha256 等于第 1 节 manifest 的
-`d9ab3e50895ed729b076d031719738e8157516084b3ae8e2aa2620366b41bca2`；
-替换后 `$BIN` 的 sha256 与新文件一致。备份文件名要记录下来，回退时用。不符就停止（此时旧文件
-仍未动；若 `install` 后 sha 不符，删除 `.new-*` 并停止）。
-
-### 6.4 重启顺序与健康检查
-
-按 `agent-bridge.service` → 两个 CLI worker 的顺序重启；observer 配置（第 3 节）在启动时读取。
-
-```
 systemctl --user restart agent-bridge.service
 systemctl --user is-active agent-bridge.service
-curl -fsS -o /tmp/agent-bridge-health.json -w '%{http_code}\n' http://127.0.0.1:7879/v1/health
-python3 -m json.tool /tmp/agent-bridge-health.json | head -20
-systemctl --user restart agent-bridge-cli@codex-collab.service
-systemctl --user restart agent-bridge-cli@opencode.service
-systemctl --user is-active agent-bridge.service agent-bridge-cli@codex-collab.service agent-bridge-cli@opencode.service
+curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7879/v1/health
 journalctl --user -u agent-bridge.service -n 30 --no-pager | grep -i 'read-only observers'
 ```
 
-预期：`/v1/health` 返回 200 且 JSON 的 `ok` 为 true；三个单元都 `active`；日志出现
-`agent-bridge: read-only observers ["review-gate"]`。若没有这一行，检查
-`~/.config/agent-bridge/observers.json` 的名字/哈希与第 3 节是否一致；observer 名字不能与 agent 重名。
-**在确认这一行之前，不要进入第 7 节启动 review-gate。**
+预期：没有 STOP；替换后 sha256 = `d9ab3e50…`；`active`；health `200`；日志有 `read-only observers ["review-gate"]`。记下 `TS`（回退用）。worker 不在这里重启（第 7.3 节）。
 
-### 6.5 agent-bridge 回退
+### 6.3 agent-bridge 回退（与 gate 独立；bridge 不读 gate 的 state）
 
 ```
 BIN=/home/administrator/.local/bin/agent-bridge
-ls -l "$BIN".bak-*
-sha256sum "$BIN".bak-*
-read -r -p 'UTC timestamp of the backup to restore: ' TS
+TS=<6.2 记下的值>
+OLD=dbca255f1a9bfb0b7256f481515070ab25fda2c1cda8b23b8be5abbe6c5bb31b
+[ "$(sha256sum "$BIN.bak-$TS" | cut -d' ' -f1)" = "$OLD" ] || { echo 'STOP: backup differs'; false; }
 install -m 0755 "$BIN.bak-$TS" "$BIN.rollback-$TS"
-sha256sum "$BIN.rollback-$TS"
+[ "$(sha256sum "$BIN.rollback-$TS" | cut -d' ' -f1)" = "$OLD" ] || { echo 'STOP'; rm -f "$BIN.rollback-$TS"; false; }
 mv -f "$BIN.rollback-$TS" "$BIN"
 sha256sum "$BIN"
-systemctl --user restart agent-bridge.service
-systemctl --user restart agent-bridge-cli@codex-collab.service
-systemctl --user restart agent-bridge-cli@opencode.service
+systemctl --user restart agent-bridge.service agent-bridge-cli@codex-collab.service agent-bridge-cli@opencode.service
 systemctl --user is-active agent-bridge.service agent-bridge-cli@codex-collab.service agent-bridge-cli@opencode.service
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7879/v1/health
+curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7879/v1/health
 ```
 
-先 `install` 到 `.rollback-$TS` 再 rename，**不消耗备份**：`.bak-$TS` 保留，之后仍可再次回退。
-预期 `.rollback-$TS` 和替换后的 `$BIN` 的 sha256 都等于 6.1/6.3 备份记录的旧值 `dbca255f…`，
-三个单元 `active`，健康检查 200。`observers.json` 可以保留（旧 bridge 不读它，留着无害）。
+先 install 到 `.rollback-$TS` 再 rename，备份 `.bak-$TS` 保留。`observers.json` 可以留着（旧 bridge 不读）。
 
-## 7. 启动顺序与健康检查
+## 7. 启动与验证（恢复接纳前）
 
-**顺序不能颠倒**：bridge 必须先完成 observer 注册且健康，review-gate（带 `--milestones`）才能启动；
-否则 sources 检查读 bridge 会失败。第 6.4 节的日志已确认 observer；这里再快速核对一次。
+### 7.1 启动
 
 ```
-systemctl --user is-active agent-bridge.service agent-bridge-cli@codex-collab.service agent-bridge-cli@opencode.service
-journalctl --user -u agent-bridge.service -n 30 --no-pager | grep -i 'read-only observers'
-curl -fsS http://127.0.0.1:7879/v1/health >/dev/null && echo 'bridge health ok'
-sudo systemctl start audit-runner.socket
-systemctl is-active audit-runner.socket
 sudo systemctl daemon-reload
+systemctl cat review-gate.service | tail -5
+sudo systemctl start audit-runner.socket
 sudo systemctl start review-gate.service
-systemctl is-active review-gate.service
-curl -fsS http://127.0.0.1:7878/health
-curl -fsS http://127.0.0.1:7878/pubkey
+systemctl is-active audit-runner.socket review-gate.service
 sudo journalctl -u review-gate.service -n 30 --no-pager
+curl -fsS http://127.0.0.1:7878/health | python3 -m json.tool
+curl -fsS http://127.0.0.1:7878/pubkey
 ```
 
-预期：三个 agent-bridge 单元 `active`，日志仍有 `read-only observers ["review-gate"]`；
-socket `active`；gate `active`；`/health` 200；`/pubkey` 与 CI 中 pin 的
-`ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=` 一致；日志有
-`review-gate listening on 127.0.0.1:7878`。启动失败时先看 journal：
-配置字段错误/令牌 owner 或 mode 错误都会在绑定端口前拒绝启动；修正后重试，不要跳过。
+预期：生效的 ExecStart 带 `--identity-config`、`--agents-file`、`--milestones`、`--drain-file`；两个单元 `active`；journal 有 `agents file /etc/review-gate/agents.json: 4 entries match the identity configuration` 与 `review-gate listening on 127.0.0.1:7878`；`/health` 的 `drain.configured=true`、`drain.draining=false`、`m1_jobs_running=0`、`m2_pending=0`；pubkey 等于 `ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=`。启动失败：看 journal（身份配置、agents-file、writers、令牌文件 owner/mode 都在监听之前检查），修正后再启；不要跳过检查，不要回到旧 drop-in。
 
-**重启策略（U-c=1）**：drop-in 设置 `Restart=on-failure`、`RestartSec=10`、
-`RestartSteps=5`、`RestartMaxDelaySec=300`，并在 `[Unit]` 限制
-`StartLimitIntervalSec=3600`、`StartLimitBurst=5`。gate 以 exit 3 退出（例如账本/磁盘写入失败）
-会自动退避重启；但**1 小时内超过 5 次**后 unit 会停在 `failed`。此时不要反复 `start`：
-先查清账本或磁盘故障是否已消除，再执行
-`sudo systemctl reset-failed review-gate.service`，然后重新启动。永久故障不会被无限重启掩盖。
-
-milestone 路由已启用的证据（认证后不是 404）：
+### 7.2 新 gate 写了什么
 
 ```
-sudo REVIEW_GATE_TOKEN_FILE=/etc/review-gate/client.token /usr/local/bin/review-gate milestone status --phase m2 > /tmp/m2-status.json
-python3 -m json.tool /tmp/m2-status.json
+sudo bash /home/administrator/projects/Chrome-MCP-m2/scripts/m2-e2e/state_manifest.sh /var/lib/reviewgate /root/m2-id/state-M1.sha256
+sudo diff /root/m2-id/state-M0.sha256 /root/m2-id/state-M1.sha256
 ```
 
-预期 JSON 中 `.state.registered=false`，`reasons` 含
-`phase not registered (or not confirmed by the user)`；这是“阶段不存在”的实际返回，不是 404。
-CLI 在未释放时退出 1，不是查询失败。若路由未启用，CLI 会报 `review-gate 404`，不会产出该 JSON。
-“已申请未 confirm”同样返回 `registered=false`（pending 文件不在签名日志里）。
-精确的 HTTP 200 断言由 E1 在隔离实例完成。
+预期差异只有新增：`state/service.lock` 与 `state/milestones/` 下的初始化文件（owner.lock、owner.json、日志与检查点、`remote.git`、`anon-home`）。`tasks/`、`reviews/`、`keys/`、`cache/`、`relay/` **不应有任何变化**；有就停止并报告。从这一刻起回滚受第 10 节约束。
 
-## 8. 部署后的管理步骤（用户已决定；由 DSH 执行）
+### 7.3 恢复接纳
 
-前提：第 7 节全部通过；E4 的 `register` 已执行并写入了 `/var/lib/reviewgate/state/milestones/pending/m2.json`
-（没有 pending 时 `confirm` 的 dry run 会显示 `none on file`，此时**停止**，先执行 E4 register）。
+```
+install -m 0600 /home/administrator/projects/m2-tools/review-gate-deploy-20261021/tokens/claude.token /home/administrator/.config/review-gate/token.claude
+REVIEW_GATE_TOKEN_FILE=/home/administrator/.config/review-gate/token.claude review-gate task list | head -3
+systemctl --user start agent-bridge-cli@codex-collab.service agent-bridge-cli@opencode.service
+systemctl --user is-active agent-bridge.service agent-bridge-cli@codex-collab.service agent-bridge-cli@opencode.service
+```
 
-**规则**：下列每条写命令都必须**先跑一次不带 `--yes` 的 dry run，把完整输出记录到日志；核对无误后
-再加 `--yes` 执行一次**。`--yes` 是 `admin milestone` 子命令的选项，位置在操作子命令之前。
-`admin milestone` 是离线操作：它以 `reviewgate` 用户读写 state，并读取 bridge observer 令牌；
-不要用 root 直接跑（会写出 root 属主的文件）。link/ignore 的 reason 都引用用户决定 **U-g**
-（2026-10-20，“U-g 按建议”：link 这 2 个、ignore 这 5 个）；`confirm` 没有 `--reason`，
-它对应的是 **U-b**（phase m2 只有一个 condition，任务书 `plans/M2-design.md`，base `3cc5491`），
-这一点只在下面的说明里写给日志读者，不写入签名日志。
+预期 `task list` 正常返回（`claude` 主体只看到自己的任务；属主未知的任务不在列表中，见 8.2）；三个单元 `active`。Claude 之后用 `token.claude`。
 
-先看 dry run 的实际结构（必须能读到 pending 申请）：
+## 8. 部署后的管理步骤
+
+### 8.1 milestone（用户已决定 U-b、U-g；dry run 后再 `--yes`）
+
+`admin milestone` 以 `reviewgate` 身份离线读写 state，命令与上一版相同（confirm m2；link 2 个；ignore 5 个）。前提：E4 register 已执行。每条先不带 `--yes` 记录输出，核对后再加 `--yes`。
 
 ```
 sudo -u reviewgate /usr/local/bin/review-gate admin milestone --state /var/lib/reviewgate/state --config /etc/review-gate/milestones.json confirm m2
-```
-
-记录输出。确认 `application` 不是 `"none on file"` 后执行：
-
-```
 sudo -u reviewgate /usr/local/bin/review-gate admin milestone --state /var/lib/reviewgate/state --config /etc/review-gate/milestones.json --yes confirm m2
 ```
 
@@ -631,7 +433,7 @@ sudo -u reviewgate /usr/local/bin/review-gate admin milestone --state /var/lib/r
 sudo -u reviewgate /usr/local/bin/review-gate admin milestone --state /var/lib/reviewgate/state --config /etc/review-gate/milestones.json --yes link-task m2 --task dsh-review-m2s6b-20261019 --reason 'user decision U-g (2026-10-20): link dsh-review-m2s6b-20261019 to phase m2'
 ```
 
-ignore-task（用户决定 U-g，2026-10-20）。每个任务先 dry run，再加 `--yes`：
+ignore-task（用户决定 U-g，2026-10-20，ignore 这 5 个）。每个任务先 dry run，再加 `--yes`：
 
 ```
 sudo -u reviewgate /usr/local/bin/review-gate admin milestone --state /var/lib/reviewgate/state --config /etc/review-gate/milestones.json ignore-task m2 --task auto-iterate-generic-proposal-20261019 --reason 'user decision U-g (2026-10-20): ignore auto-iterate-generic-proposal-20261019 for phase m2'
@@ -646,91 +448,54 @@ sudo -u reviewgate /usr/local/bin/review-gate admin milestone --state /var/lib/r
 sudo -u reviewgate /usr/local/bin/review-gate admin milestone --state /var/lib/reviewgate/state --config /etc/review-gate/milestones.json --yes ignore-task m2 --task unified-bridge-source-provenance-20261019 --reason 'user decision U-g (2026-10-20): ignore unified-bridge-source-provenance-20261019 for phase m2'
 ```
 
-做完后核对状态（只读）：
+做完后只读核对：
 
 ```
-sudo REVIEW_GATE_TOKEN_FILE=/etc/review-gate/client.token /usr/local/bin/review-gate milestone status --phase m2 > /tmp/m2-status-after-admin.json
+REVIEW_GATE_TOKEN_FILE=/home/administrator/.config/review-gate/token.claude /usr/local/bin/review-gate milestone status --phase m2 > /tmp/m2-status-after-admin.json
 python3 -m json.tool /tmp/m2-status-after-admin.json
 ```
 
-预期 `.state.registered=true`。如果 `reasons` 里出现本清单以外任务名的
-`unmatched bridge task <id>`，**不要处理**：记录该任务 id 和完整输出，停止并要求用户决定。
-本清单只覆盖上面 2 个 link 和 5 个 ignore；其他任务一律不自动 link/ignore。
+预期 `.state.registered=true`。`reasons` 里出现本清单以外任务名的 `unmatched bridge task <id>`：**不要处理**，记录该任务 id 与完整输出，停止，问用户。
+
+### 8.2 属主未知的旧任务
+
+```
+sudo -u reviewgate /usr/local/bin/review-gate admin task --state /var/lib/reviewgate/state unowned
+```
+
+所有旧任务（包括 `m2-step8-deploy`、`m2-step8-identity` 等正在用的）都会列在这里，部署后**不能**被任何主体写入。逐个由用户决定是否认领；认领必须在新 gate **停止**时进行（assign 需要 state 锁）：
+
+```
+sudo -u reviewgate /usr/local/bin/review-gate admin task --state /var/lib/reviewgate/state assign --id <task> --principal <p> --reason '<用户的决定>' --expect-updated-at '<unowned 列出的 updated_at>' --identity-config /etc/review-gate/identity.json
+sudo -u reviewgate /usr/local/bin/review-gate admin task --state /var/lib/reviewgate/state assign --id <task> --principal <p> --reason '<用户的决定>' --expect-updated-at '<同上>' --identity-config /etc/review-gate/identity.json --yes
+```
+
+服务在运行时，带 `--yes` 的 assign 会报 `a gate service holds this state` 并拒绝：先按 4.6 drain、停服，再 assign，再启动。
 
 ## 9. 验收脚本
 
-脚本在 `scripts/m2-e2e/`，均为 bash、`set -euo pipefail`，只读或只操作临时隔离目录；
-需要 root 的地方只打印命令。默认 HEAD 已改为 `bbc5aeb74005d76ad8fde20b89a5e9337f5c7aec`。
+- `scripts/m2-e2e/e1_failclosed.sh`（无 root）：隔离 state/端口/令牌。坏配置（相对路径、空字段、未知字段、空 implementers、**空 writers**、**writer 不是已启用主体**、令牌 0644、令牌过短）都必须非 0 退出且不监听；好实例上两种"未登记"都是 200 + `registered=false`；部署构建对 file:// 远端的 `sync` 是 `Stop("remote unreachable: the remote must be an https URL without credentials")`（匿名读取只接受 https），fault 构建则能读这个夹具远端（脚本按二进制里是否有 `REVIEW_GATE_FAULT` 区分并严格断言）。分别对第 1 节的部署构建与 fault 构建各跑一次：`REVIEW_GATE_BIN=<path> bash scripts/m2-e2e/e1_failclosed.sh`。
+- 演练（无 root，部署前跑，原始输出在 selftest-output.txt）：`tests/test_drain_wait.sh`、`tests/test_state_manifest.sh`、`tests/test_runner_wait.sh`、`tests/test_identity_migration.sh`（需 `REVIEW_GATE_BIN` 指向待部署构建）。
+- `scripts/m2-e2e/e2_anonymous.sh`（root，只读，部署后执行一次）：`sudo bash scripts/m2-e2e/e2_anonymous.sh b423a579139fb5e7f47e64e976755a900ade547c 2>&1 | tee -a <log>`（head 作为参数传入，不依赖 sudo 的环境变量处理）。环境只输出名字（`Environment=` 只计数）；用一次只读 status 让 gate 自己做匿名读取，报告 `sync`（`Stop(…)` 即读取失败，脚本停止）；读取在按运行中 unit 解析出的沙箱属性（`systemd-run --property=…`）下执行，每条命令检查退出码，用部署的二进制和固定公钥验签。未镜像的属性如实列出（RestrictAddressFamilies）。
+- `scripts/m2-e2e/e4_preflight.sh`、`e4_run.sh`：默认 HEAD = X。E4 的 register/request 是 milestone 写入，只有 `writers` 里的主体可以：用 `REVIEW_GATE_TOKEN_FILE=/home/administrator/.config/review-gate/token.claude bash scripts/m2-e2e/e4_run.sh …`（`client.token` 是 `legacy-claude`，会得到 403）。E4 结论按 0.5 第 1 条措辞；publish 需显式 `--publish`。
 
-- `bridge_observer_e2e.sh`：observer 真实二进制自检。临时 HOME/端口，无 sudo，不碰线上 bridge；
-  断言 observer 只读任务元数据、其余路由 403/401，最后打印 `ALL OK`。安装 agent-bridge 前必跑，
-  参数是待安装二进制路径。
-- `e1_failclosed.sh`：用隔离 state/端口/令牌跑坏配置，断言非零退出且不监听端口；
-  再启动一个隔离实例，断言“阶段不存在”和“已申请未 confirm”都是 200 + `registered=false` + 未放行。
-  不连接真实 runner。可用 `REVIEW_GATE_BIN=…` 指向第 1 节的 fault 构建。
-- `e2_anonymous.sh`：只打印命令。用 `systemd-run`/`sudo -u reviewgate` 在真实沙箱里验证匿名 fetch，
-  留 `remote.git` 的 FETCH_HEAD/refs 证据，并读取 base 的任务书、证据目录和
-  `refs/notes/review-gate` 的审核 note。`safe.directory` 只加精确仓库路径。
-- `e4_preflight.sh`：只读，输出完整 base/head、任务书完整 sha256、提交数/merges、
-  `verify-range` 每条原始输出和完整公钥及来源、`git diff | wc -c`。
-- `e4_run.sh`：按 register →（用户/DSH `admin milestone confirm --yes`，见第 8 节）→ request →
-  轮询 status → publish → status 驱动；每步保存原始 JSON；单独提取 job 的 sender（uid/pid/cgroup）。
-  publish 会写公开 notes，脚本要求显式 `--publish` 才执行。REWORK 如实记录，不重复请求。
-  E4 结论必须按第 0 节写成“按批准的标签判为独立，实际厂商相同”，不能写成“厂商独立”。
+## 10. 失败与回滚
 
-## 10. 回退（明确命令，不用“按相反顺序”代替）
+**常规路径不是恢复旧二进制。** 新 gate 启动失败、或第 7 节任何检查不符：
 
-回退**必须先走第 4 节的停机排空**（包括 30 分钟上限），不能只 reverse。
-agent-bridge 的回退单独在第 6.5 节（同样要在排空后、用同样的重启顺序）。
+1. 保持客户端停用；`sudo systemctl stop review-gate.service`（若已启动）。
+2. 保留全部 state、`.tmp`、日志、M0/M1 清单；不删除、不截断、不恢复快照、不回滚远端 notes。
+3. 记录失败输出，报告用户，前向修复（修配置或修代码、重建、重审）。
 
-1. 按第 4 节停掉客户端、确认 Pending/runner 排空、stop gate、stop socket/service。
-2. 恢复 gate/runner 旧二进制（备份名用第 5 节记录的实际名字；下面是按本次旧 sha 的示例）：
+**禁止**在新 gate 写入任何任务之后启动旧二进制（d7a030cb 或更早）：旧二进制不认识 `principal`，读改写任务时会丢掉它，并重新允许跨身份操作（实证：`m2-tools/compat-ident.txt`）。"写入"按全量清单判断：只要 M1 之后的清单与 M0 相比，`tasks/`、`reviews/`、`keys/`、`cache/`、`relay/` 有任何变化，就不能恢复旧二进制。即使没有变化，恢复旧二进制也需要用户另行明确决定，并且要同时恢复原 unit/config 组合（`/root/m2-id/agents.conf.bak` 放回、移除 `milestones.conf`、`daemon-reload`），`milestones/` 目录保留不删。
 
-```
-ls -l /usr/local/bin/review-gate.bak-20261020-* /usr/local/lib/audit-runner/audit-runner.bak-20261020-*
-sudo install -o root -g root -m 0755 /usr/local/bin/review-gate.bak-20261020-0b4f1e1effbd /usr/local/bin/.review-gate.rollback
-sudo install -o root -g root -m 0755 /usr/local/lib/audit-runner/audit-runner.bak-20261020-69983378df3b /usr/local/lib/audit-runner/.audit-runner.rollback
-sudo sha256sum /usr/local/bin/.review-gate.rollback /usr/local/lib/audit-runner/.audit-runner.rollback
-sudo mv -f /usr/local/bin/.review-gate.rollback /usr/local/bin/review-gate
-sudo mv -f /usr/local/lib/audit-runner/.audit-runner.rollback /usr/local/lib/audit-runner/audit-runner
-```
-
-若备份名不同，用 `ls` 的唯一结果替换，不要猜。sha256 应为旧值
-`0b4f1e1effbd…` / `69983378df3b…`（以你实际记录为准）。
-
-3. 移除 drop-in（旧 gate 不认识 `--milestones`，必须去掉）：
-
-```
-sudo rm -f /etc/systemd/system/review-gate.service.d/milestones.conf
-sudo systemctl cat review-gate.service
-```
-
-4. 启动并核对：
-
-```
-sudo systemctl daemon-reload
-sudo systemctl start audit-runner.socket
-sudo systemctl start review-gate.service
-systemctl is-active audit-runner.socket review-gate.service
-curl -fsS http://127.0.0.1:7878/health
-sudo journalctl -u review-gate.service -n 20 --no-pager
-```
-
-预期 gate 回到旧参数、`active`；旧 gate 的 milestone 路由返回 404（功能停用），这是预期行为，
-不是自动降级。
-
-**保留**：`/var/lib/reviewgate/state/`、`/var/lib/reviewgate/state/milestones/`（含 `remote.git`、
-`log.jsonl`、检查点）和远端 notes。回退**不删除、不修改检查点、不回滚远端 notes、不删除观察者
-注册**（observer 只读，留着无害；若用户要求撤销，单独决定）。`/etc/review-gate/milestones.json`
-与 observer 令牌也保留，便于下次启动；旧 gate 不读它们。
+agent-bridge 的回退见第 6 节（与 gate 独立；bridge 不读 gate 的 state）。
 
 ## 11. 本手册明确不做的事
 
-- **编写和自测本手册时**没有执行任何 `sudo`，没有改 `/etc`、`/usr/local`、`/var/lib/reviewgate`，
-  也没有 push。执行者只运行本手册列出的 `sudo` 命令，一行一行执行，不运行清单以外的 `sudo`。
-- 不在真实环境做故障注入；fault 构建只用于自测和字符串对照。
-- 不用 `safe.directory=*`；遇到 git 所有权检查只加精确仓库路径。
-- 不为得到 APPROVE 而重复请求；E4 的审计结论与链路验收分开记录。
-- 不读取、打印或记录任何令牌内容，也不 `cat`/打印 `/etc/review-gate/env`；`/etc/review-gate/env`
-  只允许按变量名过滤（见 `e2_anonymous.sh`）。
-- E3（反向认证）由 Claude 在 Rust 测试里完成，不在本手册内。
+- 编写本手册时没有执行任何 `sudo`，没有改 `/etc`、`/usr/local`、`/var/lib/reviewgate`。
+- 不在真实环境做故障注入；fault 构建只用于对照。
+- 不用 `safe.directory=*`；不读取或打印令牌、`/etc/review-gate/env` 或 `Environment=` 的取值。
+- 不为得到 APPROVE 重复请求；被中断的审查不自动重做（0.2）。
+- 不中断仍在运行的 runner/Codex 审计；不强杀进程。
+- 不把 n31 被拒绝的"防火墙排空"当作已证明的排空。

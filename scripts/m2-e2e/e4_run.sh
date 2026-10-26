@@ -15,7 +15,7 @@ set -euo pipefail
 PHASE=${PHASE:-m2}
 REPO=${REPO:-/home/administrator/projects/Chrome-MCP}
 BASE=${BASE:-3cc549109c700409b8069dbe920a96759cb47faa}
-HEAD=${HEAD:-bbc5aeb74005d76ad8fde20b89a5e9337f5c7aec}
+HEAD=${HEAD:-b423a579139fb5e7f47e64e976755a900ade547c}
 TASK_BOOK=${TASK_BOOK:-plans/M2-design.md}
 EVIDENCE=${EVIDENCE:-plans/M2-evidence}
 REPO_ID=${REPO_ID:-github.com/victormshan/WebUI-AutoTest}

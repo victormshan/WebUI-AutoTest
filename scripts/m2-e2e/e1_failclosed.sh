@@ -94,6 +94,7 @@ json.dump({
     "implementers": ["claude", "opencode"],
     "bridge_url": "http://127.0.0.1:1",
     "bridge_token_file": token,
+    "writers": ["legacy-claude"],
 }, open(out, "w"))
 PY
 }
@@ -167,6 +168,12 @@ case_bad unknown-field "unknown field" "$BAD"
 BAD=$TMP/empty-impl.json; mkcfg "$BAD" "$REPO" "$REMOTE_URL" "$BRIDGE"; mutate "$BAD" 'd["implementers"]=[]'
 case_bad empty-implementers "every field must be set" "$BAD"
 
+BAD=$TMP/empty-writers.json; mkcfg "$BAD" "$REPO" "$REMOTE_URL" "$BRIDGE"; mutate "$BAD" 'd["writers"]=[]'
+case_bad empty-writers "writers must list at least one gate principal" "$BAD"
+
+BAD=$TMP/ghost-writer.json; mkcfg "$BAD" "$REPO" "$REMOTE_URL" "$BRIDGE"; mutate "$BAD" 'd["writers"]=["ghost"]'
+case_bad writer-not-a-principal "is not an enabled principal" "$BAD"
+
 BADTOKEN=$TMP/token-0644
 head -c 48 /dev/urandom | base64 -w0 > "$BADTOKEN"
 chmod 0644 "$BADTOKEN"
@@ -201,13 +208,27 @@ api() { # path out
 
 CODE=$(api /milestones/ghost "$TMP/ghost.json")
 [ "$CODE" = 200 ] || { cat "$TMP/ghost.json" >&2; fail "unregistered phase: HTTP $CODE, expected 200"; }
+FAULT_STRINGS=$(strings -a "$BIN" | grep -c REVIEW_GATE_FAULT || true)
+E1_FAULT_BUILD=$([ "${FAULT_STRINGS:-0}" -gt 0 ] && echo 1 || echo 0) \
 python3 - "$TMP/ghost.json" <<'PY'
-import json, sys
+import json, os, sys
 d = json.load(open(sys.argv[1]))
 assert d["state"]["registered"] is False, d
 assert d["released"] is False, d
 assert any("phase not registered" in r for r in d["reasons"]), d["reasons"]
 print("ok - never-applied phase: 200, registered=false, released=false, reason says unregistered")
+sync = str(d.get("sync", ""))
+fault = os.environ.get("E1_FAULT_BUILD") == "1"
+refused = "must be an https URL without credentials" in sync
+if fault:
+    # Test and fault-injection builds may read a local fixture remote.
+    assert not refused and not sync.startswith("Stop"), sync
+    print("ok - fault build reads the file:// fixture remote:", sync[:80])
+else:
+    # A production build reads only an https remote without credentials (fd34eae): the file://
+    # fixture is refused before any git runs.
+    assert refused, sync
+    print("ok - deploy build refuses the file:// remote for the gate's own read:", sync[:120])
 PY
 
 # Apply (not confirm): pending/<phase>.json exists, but the signed log does not change.
