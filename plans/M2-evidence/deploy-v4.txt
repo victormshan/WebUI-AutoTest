@@ -121,3 +121,7 @@ All rehearsals and E1/observer/E4 preflight: deploy/m2/selftest-output.txt.
 3 "drain_wait.sh treats 60 as seconds": not so; DEADLINE = START + TOTAL_MIN * 60 (minutes), as
   the comment says; tests/test_drain_wait.sh uses minutes too.
 The streak is 2 of 3: per the user's rule this version goes to a manual review (Codex).
+
+== m2-step8-deploy-2 v2 (Codex's erratum in its APPROVED review of 425364e2, n40) ==
+§3.2: the client token check passes five files (the current Claude token and the four package
+tokens) and lists five mappings: "expected 6 lines" is now "expected 5 lines". Nothing else changes.

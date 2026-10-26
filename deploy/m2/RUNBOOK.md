@@ -190,7 +190,7 @@ for f in sys.argv[2:]:
 PY
 ```
 
-预期 6 行：`/home/administrator/.config/review-gate/token -> legacy-claude`（Claude 当前用的令牌），以及 `claude.token -> claude`、`opencode.token -> opencode`、`codex.token -> codex`、`dsh.token -> dsh`。部署后 Claude 改用 `tokens/claude.token`（主体 `claude`，见第 7.3 节），因为 `writers` 只列 `claude`。如果 opencode、Codex 或 DSH 实际使用的令牌文件不是上面这几个，把它的路径追加到命令末尾一并核对；任何一行 `NOT IN identity.json` 都要先由用户决定（换用登记过的令牌，或补登记），再继续。
+预期 5 行：`/home/administrator/.config/review-gate/token -> legacy-claude`（Claude 当前用的令牌），以及 `claude.token -> claude`、`opencode.token -> opencode`、`codex.token -> codex`、`dsh.token -> dsh`。部署后 Claude 改用 `tokens/claude.token`（主体 `claude`，见第 7.3 节），因为 `writers` 只列 `claude`。如果 opencode、Codex 或 DSH 实际使用的令牌文件不是上面这几个，把它的路径追加到命令末尾一并核对；任何一行 `NOT IN identity.json` 都要先由用户决定（换用登记过的令牌，或补登记），再继续。
 
 ### 3.3 milestones.json
 
