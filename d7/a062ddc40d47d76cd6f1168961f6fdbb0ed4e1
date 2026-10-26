@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-split-h
+version: 1/3
+commit: d7a062ddc40d47d76cd6f1168961f6fdbb0ed4e1
+tree: 5a90a69f7015ac0fdf57da54d11cee8621e7d10d
+parent: 5bee9ba19bdf9fdb41a20e83821908504e1aa046
+review: v1-2
+reviewer: manual/manual
+verdict: approved
+at: 2026-10-26T20:00:17Z
+signature: O7s44fy9XgA6/V4s9SyInAz8aCv7cSPGoJoT1VSHbGEMSwOGTRIHFAlm/V1wtL5+k1jklqFMynRif9MxnTWVBg==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
