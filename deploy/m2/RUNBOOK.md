@@ -457,6 +457,23 @@ python3 -m json.tool /tmp/m2-status-after-admin.json
 
 预期 `.state.registered=true`。`reasons` 里出现本清单以外任务名的 `unmatched bridge task <id>`：**不要处理**，记录该任务 id 与完整输出，停止，问用户。
 
+### 8.1a 本手册首版漏写、真实执行（2026-10-26）时补做的两步
+
+`status` 在没有请求时不检查来源与厂商；这两类问题只在第一次 `milestone request` 时报出（409，什么都不写）。所以下面两步必须在发请求之前做完；即使做完，请求仍可能报出新的原因，照样停止并报告。
+
+1. **厂商表**。U-d 只决定了标签，没有写入日志；`Vendors::first()` 不含 `codex-collab`、`opencode`，也不含审计方的值 `openai`。用 `vendors-set` 写入新版本（版本号必须更大；每条匹配的规则都会计入，不是先匹配先用，所以同一名字的两条规则会冲突）。reason 写明用户的决定，以及"按批准的标签判为独立，实际厂商相同"（codex、codex-collab 与审计方都是 OpenAI；opencode 实际是 DeepSeek）。2026-10-26 写入的是 v2（seq 9）和 v3（seq 80，用户把 U-d 扩展到 codex）。
+
+第一条是 dry run（不带 `--yes`，什么都不写，打印将写入的表和 `table_sha256`）；核对输出与文件一致后，再执行第二条（带 `--yes`，实际写入）。两条都不交互：
+
+```
+# 1) dry run: nothing is written
+sudo -u reviewgate /usr/local/bin/review-gate admin milestone --state /var/lib/reviewgate/state --config /etc/review-gate/milestones.json vendors-set --file <表的 JSON，reviewgate 可读> --reason '<用户的决定与实际厂商>'
+# 2) write, after the dry run's output was checked
+sudo -u reviewgate /usr/local/bin/review-gate admin milestone --state /var/lib/reviewgate/state --config /etc/review-gate/milestones.json --yes vendors-set --file <同上> --reason '<同上>'
+```
+
+2. **窗口内未归类的任务**。窗口从首个提交（或登记时间）延续到最后一个提交（或登记时间），所以登记后新建的 implementer 任务也在窗口内。不能按名字批量处理：逐个任务核对目的、parent 链、实际交付，以及是否进入被审范围（`git merge-base --is-ancestor`）。claude 不是参与方的任务，经用户授权后用 bridge 的 observer 元数据核对（只读，不打印令牌）。清单与逐项理由交用户批准，再逐条 `link-task` / `ignore-task`，每条都是先 dry run 再 `--yes`。
+
 ### 8.2 属主未知的旧任务
 
 ```

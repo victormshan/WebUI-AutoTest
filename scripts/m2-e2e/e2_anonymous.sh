@@ -75,6 +75,11 @@ PY
 
 step "2. the gate's own anonymous fetch (one read-only status call)"
 cache_state() {
+    # The private cache is created by the gate's first fetch: before that there is none.
+    if [ ! -d "$CACHE" ]; then
+        echo "no private cache yet ($CACHE)"
+        return 0
+    fi
     stat -c '%y %n' "$CACHE/FETCH_HEAD" 2>/dev/null || echo "no FETCH_HEAD yet"
     git -c "safe.directory=$CACHE" -C "$CACHE" for-each-ref refs/notes --format='%(objectname) %(refname)'
 }

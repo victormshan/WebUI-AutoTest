@@ -1,0 +1,206 @@
+# m2-step8-deploy-2 v3: fixes found in the real run of 2026-10-26 (2026-10-26T18:01:53Z)
+# base 0bf07bb; changes: scripts/m2-e2e/e2_anonymous.sh (cache_state without a cache), scripts/m2-e2e/e4_run.sh (lowercase states), deploy/m2/RUNBOOK.md (§8.1a), scripts/m2-e2e/tests/test_e4_poll.sh (new)
+
+## 1. E2 in the real run (deployment log sha256 0cfb4ebe4bafd96107559538b982dfa7cc66a3c12cb52cba5e02c7dced4e663a, lines 251-378)
+### first run: failed before the fix (raw lines 251-269)
+=== §9 E2 2026-10-26T02:32:57Z
+
+== 0. unit and binary
+active
+MainPID 1301526 started Mon Oct 26 10:32:13 2026
+69b3d3a6b5e0b5e982a8191d47a5dcfde6d6d34f5caa0accade53e7c07184f07  /usr/local/bin/review-gate
+69b3d3a6b5e0b5e982a8191d47a5dcfde6d6d34f5caa0accade53e7c07184f07  /proc/1301526/exe
+
+== 1. environment: names only
+Environment= assignments: 0
+PassEnvironment names: []
+EnvironmentFiles: /etc/review-gate/env (ignore_errors=yes)
+process environment names: GEMINI_API_KEY HOME INVOCATION_ID JOURNAL_STREAM LANG LOGNAME MEMORY_PRESSURE_WATCH MEMORY_PRESSURE_WRITE PATH REVIEW_GATE_GEMINI_MODEL SYSTEMD_EXEC_PID USER
+
+== 2. the gate's own anonymous fetch (one read-only status call)
+no FETCH_HEAD yet
+fatal: cannot change to '/var/lib/reviewgate/state/milestones/remote.git': No such file or directory
+E2 exit 128
+
+### the fix as applied, then the rerun (raw lines 270-378)
+=== E2 script fix (found in the real run; to be reviewed as deploy-2 v3) 2026-10-26T02:33:12Z
+diff --git a/scripts/m2-e2e/e2_anonymous.sh b/scripts/m2-e2e/e2_anonymous.sh
+index 2b6adcf..5d4d5d8 100755
+--- a/scripts/m2-e2e/e2_anonymous.sh
++++ b/scripts/m2-e2e/e2_anonymous.sh
+@@ -75,6 +75,11 @@ PY
+ 
+ step "2. the gate's own anonymous fetch (one read-only status call)"
+ cache_state() {
++    # The private cache is created by the gate's first fetch: before that there is none.
++    if [ ! -d "$CACHE" ]; then
++        echo "no private cache yet ($CACHE)"
++        return 0
++    fi
+     stat -c '%y %n' "$CACHE/FETCH_HEAD" 2>/dev/null || echo "no FETCH_HEAD yet"
+     git -c "safe.directory=$CACHE" -C "$CACHE" for-each-ref refs/notes --format='%(objectname) %(refname)'
+ }
+
+=== §9 E2 rerun with the fix 2026-10-26T02:33:12Z
+
+== 0. unit and binary
+active
+MainPID 1301526 started Mon Oct 26 10:32:13 2026
+69b3d3a6b5e0b5e982a8191d47a5dcfde6d6d34f5caa0accade53e7c07184f07  /usr/local/bin/review-gate
+69b3d3a6b5e0b5e982a8191d47a5dcfde6d6d34f5caa0accade53e7c07184f07  /proc/1301526/exe
+
+== 1. environment: names only
+Environment= assignments: 0
+PassEnvironment names: []
+EnvironmentFiles: /etc/review-gate/env (ignore_errors=yes)
+process environment names: GEMINI_API_KEY HOME INVOCATION_ID JOURNAL_STREAM LANG LOGNAME MEMORY_PRESSURE_WATCH MEMORY_PRESSURE_WRITE PATH REVIEW_GATE_GEMINI_MODEL SYSTEMD_EXEC_PID USER
+
+== 2. the gate's own anonymous fetch (one read-only status call)
+no private cache yet (/var/lib/reviewgate/state/milestones/remote.git)
+status call 2026-10-26T02:33:12.874110902Z .. 2026-10-26T02:33:13.838893772Z -> HTTP 200
+sync (the gate's own read of the remote): Equal
+released: False  reasons: 2
+no FETCH_HEAD yet
+
+== 3. the unit's sandbox, as configured on the running unit
+UMask=0022
+User=reviewgate
+Group=reviewgate
+ReadWritePaths=/var/lib/reviewgate
+ReadOnlyPaths=
+InaccessiblePaths=
+PrivateTmp=yes
+ProtectKernelTunables=no
+ProtectControlGroups=no
+ProtectHome=read-only
+ProtectSystem=strict
+NoNewPrivileges=yes
+RestrictAddressFamilies=~
+mirrored: exactly the properties listed above as --property; not mirrored (and not claimed):
+  RestrictAddressFamilies, and every other unit setting not in that list
+
+== 4. reads in that sandbox (each exit status checked)
+commit
+commit
+task book at base: 571e53f1063f62f85f941182b0222f5eb7571442026d23face6d2515b26ecce6
+plans/M2-evidence/anonymous-read.txt
+plans/M2-evidence/bridge-integration.txt
+plans/M2-evidence/ci-cgroup-test.txt
+plans/M2-evidence/identity-integration.txt
+plans/M2-evidence/mutation-n1.txt
+plans/M2-evidence/mutation-n2.txt
+plans/M2-evidence/mutation-n3-n5.txt
+plans/M2-evidence/mutation-step1.txt
+plans/M2-evidence/mutation-step2.txt
+plans/M2-evidence/mutation-step3.txt
+plans/M2-evidence/mutation-step4.txt
+plans/M2-evidence/mutation-step5.txt
+plans/M2-evidence/mutation-step6a.txt
+plans/M2-evidence/mutation-step6b.txt
+plans/M2-evidence/mutation-step6c.txt
+plans/M2-evidence/mutation-step7.txt
+plans/M2-evidence/mutation-step8.txt
+plans/M2-evidence/peercred-probe.txt
+plans/M2-evidence/step8-rework-v3.txt
+plans/M2-evidence/tests-n1.txt
+plans/M2-evidence/tests-n2.txt
+plans/M2-evidence/tests-n3-n5.txt
+plans/M2-evidence/tests-step1.txt
+plans/M2-evidence/tests-step2.txt
+plans/M2-evidence/tests-step3.txt
+plans/M2-evidence/tests-step4.txt
+plans/M2-evidence/tests-step5.txt
+plans/M2-evidence/tests-step6a.txt
+plans/M2-evidence/tests-step6b.txt
+plans/M2-evidence/tests-step6c.txt
+plans/M2-evidence/tests-step7.txt
+plans/M2-evidence/tests-step8.txt
+b423a579139fb5e7f47e64e976755a900ade547c victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-26T03:17:53+08:00 audit-runner: the own_cgroup test checks the side of the check it runs on (CI fix)
+f1b61e6c1c0878bb78eb443e56d95b69f3cba7d3
+review-gate-attestation: v1
+task: m2-step8-identity
+version: 2/3
+commit: b423a579139fb5e7f47e64e976755a900ade547c
+tree: b68f064fa0f8dcbdf6f71ec0e64b3bd5b1072a5c
+parent: 9978dd1f0477449ccb85fcefc31cd608fcb4b87b
+review: v2-2
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-25T19:17:53Z
+signature: aktBPdbYFJtwacwl6Iv1yFNEs1tnQksSYr3dGXUGbGgs6dBE2aLeJyuHEOjWuF25YAEpBe5fBAUv9Vl8K8SmCQ==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
+ok b423a579139fb5e7f47e64e976755a900ade547c task m2-step8-identity version 2/3 review v2-2 by web-gemini/web-gemini
+
+== E2 done: every command above succeeded
+
+## 2. E4: the driver stopped polling at the first status (raw, deployment log)
+status_exit=1 registered=True released=False current=-
+request_id=m2-q1
+11:55:09Z status_exit=1 registered=True released=False current=m2-q1/pending
+final: registered=True released=False current=m2-q1/pending
+continue exit 0
+=== manual poll of m2-q1 from 2026-10-26T11:55:45Z (script stopped early: case bug)
+poll end: failed
+
+## 3. tests
+### bash scripts/m2-e2e/tests/test_e4_poll.sh
+ok - polled while pending, stopped at the first other state (4 status calls)
+ok - the final status is the failed one
+ALL OK
+exit 0
+### bash scripts/m2-e2e/tests/test_drain_wait.sh
+ok - idle-after-two-not-idle: exit 0
+ok - http-500: exit 2
+ok - bad-json: exit 2
+ok - pending-null: exit 2
+ok - field-missing: exit 2
+ok - bool-as-int: exit 2
+ok - idle-but-a-failure: exit 3
+ok - never-idle-deadline: exit 3
+ok - connection-refused: exit 2
+ALL OK
+exit 0
+### bash scripts/m2-e2e/tests/test_state_manifest.sh
+ok - 3 files hashed
+ok - the .tmp file is in the manifest
+ok - the .tmp file is listed
+ok - the manifest verifies
+ok - an existing output is not overwritten (exit 2)
+ok - an unreadable file fails (exit 123), no output, no partial file
+ok - an output directory the caller cannot write fails (exit 1)
+ALL OK
+exit 0
+### bash scripts/m2-e2e/tests/test_runner_wait.sh
+ok - idle: exit 0
+ok - codex-running-deadline: exit 3
+ok - connection-deadline: exit 3
+ok - pgrep-error: exit 2
+ok - ss-error: exit 2
+ALL OK
+exit 0
+### test_e4_poll against the unfixed e4_run.sh (git stash of the e4_run.sh change; must fail)
+FAIL - 2 status calls
+### REVIEW_GATE_BIN=/usr/local/bin/review-gate bash scripts/m2-e2e/tests/test_identity_migration.sh
+ok - a 0640 legacy token is refused (exit 2), no output
+ok - the conversion with the 0600 copy succeeds
+     claude claude sha256 2087b174932c…
+     opencode deepseek sha256 8b89df95e51e…
+     codex openai sha256 f226f0630350…
+     dsh deepseek sha256 9356fde16399…
+     legacy-claude claude sha256 6b4f326a6ef4…
+     written /tmp/tmp.CmaZYpmn9H/root-m2-id/identity.json (sha256 08efd3992f6b14afe63b105e8142d8bc0ceea5d5eaf84da4ca2ca9f62be659ca)
+ok - the plaintext copy is removed
+ok - 5 principals, each hash = sha256(trimmed token), families as expected, no token in the file
+ok - client.token and agents.json unchanged (content and mode)
+ALL OK
+exit 0
+### bash -n on every changed script
+ok scripts/m2-e2e/e2_anonymous.sh
+ok scripts/m2-e2e/e4_run.sh
+ok scripts/m2-e2e/tests/test_e4_poll.sh
+
+## 4. gate review v3-1 (2026-10-26T18:11Z, web-gemini; gemini-api 503): REJECTED, recorded (streak 1)
+Segment 1 said the first vendors-set line in RUNBOOK §8.1a lacks --yes. That line is the dry run by
+design (the same pattern as every other admin command in §8.1: dry run, then --yes); the admin
+commands never prompt. The text now labels the two lines (dry run / write) and says neither is
+interactive. Segments 2-4 approved.

@@ -76,7 +76,8 @@ current_state() { # status-json path -> prints state or none
 import json, sys
 d = json.load(open(sys.argv[1]))
 c = d["state"].get("current")
-print("none" if c is None else c["state"])
+# The gate serialises states in lowercase (pending, completed, ...).
+print("none" if c is None else c["state"].lower())
 PY
 }
 
@@ -181,7 +182,7 @@ EOF
     echo "$(date -u +%H:%M:%SZ) status_exit=$code $(state_of "$f")"
     local cs
     cs=$(current_state "$f")
-    if [ "$cs" != Pending ]; then
+    if [ "$cs" != pending ]; then
       cp "$f" "$OUT/05-status-final.json"
       break
     fi
@@ -274,7 +275,7 @@ cmd_publish() {
   }
   local cs
   cs=$(current_state "$OUT/03-status-before-publish.json")
-  if [ "$cs" = Pending ] || [ "$cs" = none ]; then
+  if [ "$cs" = pending ] || [ "$cs" = none ]; then
     echo "phase $PHASE has no finished request (current=$cs); refusing to publish now" >&2
     exit 4
   fi
