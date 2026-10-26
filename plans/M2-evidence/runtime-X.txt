@@ -1,0 +1,1216 @@
+# M2 runtime evidence for X = b423a579139fb5e7f47e64e976755a900ade547c (written 2026-10-26T18:20:12Z)
+# Sources (full files kept outside the repository; sha256 of each full file):
+#   deployment log /home/administrator/m2-step8-20261026T021818Z.log: 2430 lines, sha256 0cfb4ebe4bafd96107559538b982dfa7cc66a3c12cb52cba5e02c7dced4e663a
+#   /home/administrator/projects/m2-tools/x-fulltree-20261026T180231Z/tests.txt: sha256 2d91f739ffc17afb213e7a33b12cda99e2ae9534efc462e25abb3d4d00f82ae2
+#   /home/administrator/projects/m2-tools/x-fulltree-20261026T180231Z/tests-host-nofailfast.txt: sha256 44e5899d0592ade4abf725825533c511b6ed5dbd551a1220dc5db210c64e385b
+#   /home/administrator/projects/m2-tools/x-fulltree-20261026T180231Z/tests-sandbox.txt: sha256 b46708efc1a69ad27eb916bf5f88fa96746d4d03314b6b70ab4002f8c468843c
+#   /home/administrator/projects/m2-tools/ci-b423a57.txt: sha256 6e36076987e0080de0fa65930b69effd0391b5fec9b0f77bd034f7f01329daba
+# Included raw: log lines 1-250 (build check to resume), 380-821 (E4 preflight, register, §8.1 admin, first refusal, vendor table v2 dry run), 2298-2430 (second refusal, vendor table v3, request m2-q1 and its failure).
+# Included elsewhere: log lines 251-378 (E2 first run, fix, rerun) are in plans/M2-evidence/deploy-2-v3.txt.
+# NOT included (not reviewed here): log lines 822-2297 = the dry-run and --yes JSON of vendors-set v2 and the 70 link/ignore operations (sha256 of that range: 2cab8a64633d7cb899d4c887a783b4a7b1738eb09cc4c3fb872e899fd9d0765f); the written records are seq 9-79 of the gate's signed milestone log. Test output: the per-test 'ok' lines and compiler progress (summaries below keep every Running line, every result line and every failure in full).
+
+# Encoding: log lines 155 and 165 end in a character that `cut -c1-220` (byte-based) split when the log was written; their incomplete trailing bytes are shown as \xNN escapes here (file lines 168, 178). Nothing else is changed.
+## 1. Deployment log, lines 1-250 (raw)
+# M2 step 8 deployment, executed by Claude under the user's authorization C (root via wsl.exe -u root, this window only)
+# user 2026-10-26: 「我授权你按C执行全部步骤」, RUNBOOK 0.3: 「按推荐」 = 1 now, 2 stop clients, 3 writers [claude], 4 unowned read-only except m2-step8-deploy-2 assigned to claude before first start
+# RUNBOOK = m2-step1 0bf07bb deploy/m2/RUNBOOK.md (sha256 7933fce0f8a6f04aadb7e26b913ba673150a9de6e7be6c64bfb470b8027f023d)
+2026-10-26T02:18:18Z
+
+=== §1 manifest check 2026-10-26T02:18:29Z
+b423a579139fb5e7f47e64e976755a900ade547c
+b68f064fa0f8dcbdf6f71ec0e64b3bd5b1072a5c
+status lines: 0
+69b3d3a6b5e0b5e982a8191d47a5dcfde6d6d34f5caa0accade53e7c07184f07  ../Chrome-MCP-m2-build-b423a57-target-gr/release/review-gate
+c9a66da9442758d85c8411064d1a67753339efab854fe491bcfc79b2293940b3  ../Chrome-MCP-m2-build-b423a57-target-gr/release/audit-runner
+d9ab3e50895ed729b076d031719738e8157516084b3ae8e2aa2620366b41bca2  ../Chrome-MCP-m2-build-b423a57-target-bridge/release/agent-bridge
+target-gr/release/review-gate REVIEW_GATE_FAULT: 0
+target-gr/release/audit-runner AUDIT_RUNNER_FAULT: 0
+target-fault/release/review-gate REVIEW_GATE_FAULT: 1
+target-fault/release/audit-runner AUDIT_RUNNER_FAULT: 3
+--- observer self-test
+ok   401 no token on the observe route
+ok   401 wrong token on the observe route
+ALL OK
+
+=== §2 live state 2026-10-26T02:18:39Z
+d7a030cb0bcad51337f49a217297288c5ba4ea858ba5949bc9ad865299307865  /usr/local/bin/review-gate
+d7a030cb0bcad51337f49a217297288c5ba4ea858ba5949bc9ad865299307865  /proc/298/exe
+# /etc/systemd/system/review-gate.service
+EnvironmentFile=-/etc/review-gate/env
+ExecStart=/usr/local/bin/review-gate serve --state /var/lib/reviewgate/state --listen 127.0.0.1:7878 --token-file /etc/review-gate/client.token --relay-dir /var/lib/reviewgate/relay
+# /etc/systemd/system/review-gate.service.d/agents.conf
+ExecStart=
+ExecStart=/usr/local/bin/review-gate serve --state /var/lib/reviewgate/state --listen 127.0.0.1:7878 --token-file /etc/review-gate/client.token --agents-file /etc/review-gate/agents.json --relay-dir /var/lib/reviewgate/relay
+TimeoutStopUSec=1min 30s
+KillMode=control-group
+KillSignal=15
+SendSIGKILL=yes
+total 16
+-rw-r----- 1 root reviewgate 327 Oct 22 01:03 agents.json
+-rw-r----- 1 root reviewgate 327 Oct 22 01:01 agents.json.bak-20261022010350
+-rw-r----- 1 root reviewgate  64 Oct  5 09:41 client.token
+-rw-r----- 1 root reviewgate 458 Oct 12 02:22 env
+total 4
+-rw-r--r-- 1 root root 246 Oct 22 01:03 agents.conf
+dbca255f1a9bfb0b7256f481515070ab25fda2c1cda8b23b8be5abbe6c5bb31b  /home/administrator/.local/bin/agent-bridge
+active
+active
+inactive
+
+=== §3.2 identity.json 2026-10-26T02:18:50Z
+claude claude sha256 3ca255f15537…
+opencode deepseek sha256 2ca1774990b0…
+codex openai sha256 d4128d86cea5…
+dsh deepseek sha256 311d86c2d259…
+legacy-claude claude sha256 0199f93a67d9…
+written /root/m2-id/identity.json (sha256 0739da96e6862d9fabc081ecb4e7ebd5271e5c0b77deaf894f7216eba93c3583)
+converter exit 0
+total 4
+-rw------- 1 root root 1190 Oct 26 10:18 identity.json
+root reviewgate 640 /etc/review-gate/identity.json
+f: /etc/review-gate/identity.json
+drwxr-xr-x root root       /
+drwxr-xr-x root root       etc
+drwxr-xr-x root root       review-gate
+-rw-r----- root reviewgate identity.json
+--- client tokens
+/home/administrator/.config/review-gate/token -> legacy-claude
+/home/administrator/projects/m2-tools/review-gate-deploy-20261021/tokens/claude.token -> claude
+/home/administrator/projects/m2-tools/review-gate-deploy-20261021/tokens/opencode.token -> opencode
+/home/administrator/projects/m2-tools/review-gate-deploy-20261021/tokens/codex.token -> codex
+/home/administrator/projects/m2-tools/review-gate-deploy-20261021/tokens/dsh.token -> dsh
+
+=== §3.3 milestones.json 2026-10-26T02:28:48Z
+2:  "repo_id": "github.com/victormshan/WebUI-AutoTest",
+10:  "implementers": ["claude", "opencode"],
+13:  "writers": ["claude"]
+root reviewgate 640 /etc/review-gate/milestones.json
+
+=== §3.4 observer token 2026-10-26T02:28:58Z
+ls: cannot access '/home/administrator/.config/agent-bridge/observers.json': No such file or directory
+observer token sha256: 69c213a57b5f88fb27b09cae02e62ab4a19e8a6186e856741c4a30946750d35e
+999 reviewgate reviewgate 600 /etc/review-gate/bridge-observer.token
+file sha256: 69c213a57b5f88fb27b09cae02e62ab4a19e8a6186e856741c4a30946750d35e
+{
+    "review-gate": "69c213a57b5f88fb27b09cae02e62ab4a19e8a6186e856741c4a30946750d35e"
+}
+
+=== §3.6 drop-in (no daemon-reload) 2026-10-26T02:29:06Z
+/etc/systemd/system/review-gate.service.d/:
+total 4
+-rw-r--r-- 1 root root 916 Oct 26 10:29 milestones.conf
+
+/root/m2-id/:
+total 8
+-rw-r--r-- 1 root root  246 Oct 22 01:03 agents.conf.bak
+-rw------- 1 root root 1190 Oct 26 10:18 identity.json
+active
+
+=== §4.1 stop clients 2026-10-26T02:29:13Z
+no worker turn, no review client
+inactive
+inactive
+
+=== §4.2 record before stop 2026-10-26T02:29:20Z
+ActiveEnterTimestamp=Sun 2026-10-25 09:10:23 CST
+MainPID=298
+State Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
+no review-gate client process
+Oct 26 09:31:29 Win10-dt review-gate[298]: [review-gate] gemini-api 429 Too Many Requests, retrying in 15s
+Oct 26 09:31:44 Win10-dt review-gate[298]: [review-gate] gemini-api 429 Too Many Requests, retrying in 45s
+Oct 26 09:32:30 Win10-dt review-gate[298]: [review-gate] provider gemini-api failed: gemini-api 429 Too Many Requests after 3 attempt(s): {"error":{"code":429,"details":[{"@type":"type.googleapis.com/
+
+=== §4.3 stop old gate 2026-10-26T02:29:21Z
+Warning: The unit file, source configuration file or drop-ins of review-gate.service changed on disk. Run 'systemctl daemon-reload' to reload units.
+inactive
+Oct 26 10:29:21 Win10-dt systemd[1]: Stopping review-gate.service - review-gate: independent review gate for auto-iterate...
+Oct 26 10:29:21 Win10-dt systemd[1]: review-gate.service: Deactivated successfully.
+Oct 26 10:29:21 Win10-dt systemd[1]: Stopped review-gate.service - review-gate: independent review gate for auto-iterate.
+Oct 26 10:29:21 Win10-dt systemd[1]: review-gate.service: Consumed 45.857s CPU time over 1d 1h 18min 58.039s wall clock time, 18.2M memory peak, 1.5M memory swap peak.
+
+=== §4.4 state manifest M0 2026-10-26T02:29:28Z
+temporary files (kept as they are):
+manifest: 1300 files, sha256 557ed2bbe9d6cf6933e625a07fbbaffa1e9ac3baef59c3580f01b1e6a8041cce, /root/m2-id/state-M0.sha256
+exit 0
+
+=== §4.5 runner 2026-10-26T02:29:50Z
+runner wait from 2026-10-26T02:29:50Z until 2026-10-26T02:59:50Z
+IDLE at 2026-10-26T02:29:51Z: no codex process, no connection on /run/audit-runner/runner.sock
+runner_wait exit 0
+inactive
+inactive
+
+=== §5 install gate and runner 2026-10-26T02:30:04Z
+TS=20261026T023004Z
+-rwxr-xr-x 1 root root 11459088 Oct 22 01:03 review-gate.bak-20261026T023004Z-d7a030cb0bca
+-rwxr-xr-x 1 root root 1666000 Oct 15 04:28 audit-runner.bak-20261026T023004Z-69983378df3b
+sources ok
+69b3d3a6b5e0b5e982a8191d47a5dcfde6d6d34f5caa0accade53e7c07184f07  /usr/local/bin/.review-gate.new
+c9a66da9442758d85c8411064d1a67753339efab854fe491bcfc79b2293940b3  /usr/local/lib/audit-runner/.audit-runner.new
+root root 755 13167568 /usr/local/bin/review-gate
+root root 755 1675296 /usr/local/lib/audit-runner/audit-runner
+69b3d3a6b5e0b5e982a8191d47a5dcfde6d6d34f5caa0accade53e7c07184f07  /usr/local/bin/review-gate
+c9a66da9442758d85c8411064d1a67753339efab854fe491bcfc79b2293940b3  /usr/local/lib/audit-runner/audit-runner
+
+=== §6 agent-bridge 2026-10-26T02:31:34Z
+no worker turn in progress
+TS=20261026T023134Z
+d9ab3e50895ed729b076d031719738e8157516084b3ae8e2aa2620366b41bca2  /home/administrator/.local/bin/agent-bridge
+active
+curl: (7) Failed to connect to 127.0.0.1 port 7879 after 0 ms: Could not connect to server
+health 000
+Oct 26 10:31:35 Win10-dt agent-bridge[1301241]: agent-bridge: read-only observers ["review-gate"]
+try 1: health 000
+try 2: health 000
+try 3: health 200
+active
+Oct 25 13:52:56 Win10-dt agent-bridge[534]: agent-bridge: wake dsh for dsh-review-m2s8v3-20261025#4 not delivered: 冷却窗内已合并（不追加回合）
+Oct 25 20:24:28 Win10-dt agent-bridge[534]: agent-bridge: wake dsh for dsh-review-m2s8-ident-20261025#3 not delivered: 冷却窗内已合并（不追加回合\xef\xbc
+Oct 26 08:59:10 Win10-dt agent-bridge[534]: agent-bridge: wake dsh for unified-private-v11-compile-only-20261023#4 not delivered: 冷却窗内已合并（不追
+Oct 26 10:31:35 Win10-dt systemd[420]: Stopping agent-bridge.service - agent-bridge: two-way task dispatch between Claude Code and the DSH main agent...
+Oct 26 10:31:35 Win10-dt systemd[420]: Stopped agent-bridge.service - agent-bridge: two-way task dispatch between Claude Code and the DSH main agent.
+Oct 26 10:31:35 Win10-dt systemd[420]: agent-bridge.service: Consumed 13min 45.306s CPU time over 1d 1h 21min 1.044s wall clock time, 67.9M memory peak, 17.5M m
+Oct 26 10:31:35 Win10-dt systemd[420]: Started agent-bridge.service - agent-bridge: two-way task dispatch between Claude Code and the DSH main agent.
+Oct 26 10:31:35 Win10-dt agent-bridge[1301241]: agent-bridge: read-only observers ["review-gate"]
+Oct 26 10:31:43 Win10-dt agent-bridge[1301241]: agent-bridge: push wake-ups for ["dsh"]
+Oct 26 10:31:44 Win10-dt agent-bridge[1301241]: agent-bridge: read-only mirror at /mnt/d/cc-tasks/claude-bridge/tasks
+Oct 26 10:31:48 Win10-dt agent-bridge[1301241]: agent-bridge listening on 127.0.0.1:7879, state /home/administrator/.local/state/agent-bridge, agents ["claude",
+Oct 26 10:31:48 Win10-dt agent-bridge[1301241]: agent-bridge: wake dsh for unified-s2-scope-notice-dsh-20261023#2 not delivered: duplicate-suppressed：同一\xe8\xba
+
+=== added step: unowned tasks, assign m2-step8-deploy-2 -> claude (user 按推荐 item 4) 2026-10-26T02:31:57Z
+81 unowned tasks
+  m2-step8-deploy-2 running 2026-10-26T01:32:58.385403176Z
+  m2-step8-identity done 2026-10-26T01:21:44.196165415Z
+  m2-step8-deploy paused 2026-10-26T00:02:23.284416542Z
+  m2-step8-bridge running 2026-10-20T07:51:54.328070814Z
+--- dry run
+{
+  "id": "m2-step8-deploy-2",
+  "owner_assigned": {
+    "at": "2026-10-26T02:32:03.388043948Z",
+    "by": "admin",
+    "principal": "claude",
+    "reason": "user-2026-10-26-按推荐-item-4"
+  },
+  "principal": "claude"
+}
+dry run: nothing written (add --yes)
+--- --yes
+{
+  "id": "m2-step8-deploy-2",
+  "owner_assigned": {
+    "at": "2026-10-26T02:32:03.575948539Z",
+    "by": "admin",
+    "principal": "claude",
+    "reason": "user-2026-10-26-按推荐-item-4"
+  },
+  "principal": "claude"
+}
+written
+note: the assign above changed tasks/m2-step8-deploy-2.json before the first start (authorized, item 4); §7.2 expects that file and nothing else under tasks/ to differ
+
+=== §7.1 start 2026-10-26T02:32:12Z
+RestartMaxDelaySec=300
+ExecStart=
+ExecStart=/usr/local/bin/review-gate serve --state /var/lib/reviewgate/state --listen 127.0.0.1:7878 --token-file /etc/review-gate/client.token --identity-config /etc/review-gate/identity.json --agents-file /etc/review-gate/agents.json --relay-dir /var/lib/reviewgate/relay --milestones /etc/review-gate/milestones.json --drain-file /etc/review-gate/drain
+active
+active
+Oct 26 10:32:13 Win10-dt systemd[1]: Started review-gate.service - review-gate: independent review gate for auto-iterate.
+Oct 26 10:32:13 Win10-dt review-gate[1301526]: review-gate: agents file /etc/review-gate/agents.json: 4 entries match the identity configuration
+Oct 26 10:32:14 Win10-dt review-gate[1301526]: review-gate listening on 127.0.0.1:7878, state /var/lib/reviewgate/state
+{
+    "drain": {
+        "active_ops": 0,
+        "configured": true,
+        "draining": false,
+        "failure_count": 0,
+        "failures": [],
+        "idle": false,
+        "reason": null
+    },
+    "m1_jobs_running": 0,
+    "m2_pending": 0,
+    "ok": true,
+    "service": "review-gate",
+    "version": "0.1.0"
+}
+{"algorithm":"ed25519","key":"ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw="}
+
+=== §7.2 M1 and diff 2026-10-26T02:32:24Z
+temporary files (kept as they are):
+manifest: 1304 files, sha256 f4561509af398ec6e4bd5cdf79f946947d9e492ac512568db7359e24356b9b02, /root/m2-id/state-M1.sha256
+1069a1070,1072
+> ./state/milestones/log.lock
+> ./state/milestones/owner.json
+> ./state/milestones/owner.lock
+1219a1223
+> ./state/service.lock
+1273c1277
+< ./state/tasks/m2-step8-deploy-2.json
+---
+> ./state/tasks/m2-step8-deploy-2.json
+
+=== §7.3 resume 2026-10-26T02:32:33Z
+total 8
+-rw------- 1 administrator administrator 64 Oct  5 09:41 token
+-rw------- 1 administrator administrator 65 Oct 26 10:32 token.claude
+1 task(s) visible to claude: ['m2-step8-deploy-2']
+--- legacy token sees:
+0 task(s)
+active
+active
+active
+
+
+## 2. Deployment log, lines 380-821 (raw)
+=== §8 E4 preflight 2026-10-26T02:34:58Z
+
+===== identity =====
+repo=/home/administrator/projects/Chrome-MCP
+base=3cc549109c700409b8069dbe920a96759cb47faa
+head=b423a579139fb5e7f47e64e976755a900ade547c
+base_short=3cc549109c70 head_short=b423a579139f
+binary=/usr/local/bin/review-gate
+
+===== task book at base =====
+cat-file -e: ok
+size_bytes=28094
+sha256=571e53f1063f62f85f941182b0222f5eb7571442026d23face6d2515b26ecce6
+evidence directory present at head:
+  yes: plans/M2-evidence
+plans/M2-evidence/anonymous-read.txt
+plans/M2-evidence/bridge-integration.txt
+plans/M2-evidence/ci-cgroup-test.txt
+plans/M2-evidence/identity-integration.txt
+plans/M2-evidence/mutation-n1.txt
+plans/M2-evidence/mutation-n2.txt
+plans/M2-evidence/mutation-n3-n5.txt
+plans/M2-evidence/mutation-step1.txt
+plans/M2-evidence/mutation-step2.txt
+plans/M2-evidence/mutation-step3.txt
+plans/M2-evidence/mutation-step4.txt
+plans/M2-evidence/mutation-step5.txt
+plans/M2-evidence/mutation-step6a.txt
+plans/M2-evidence/mutation-step6b.txt
+plans/M2-evidence/mutation-step6c.txt
+plans/M2-evidence/mutation-step7.txt
+plans/M2-evidence/mutation-step8.txt
+plans/M2-evidence/peercred-probe.txt
+plans/M2-evidence/step8-rework-v3.txt
+plans/M2-evidence/tests-n1.txt
+plans/M2-evidence/tests-n2.txt
+plans/M2-evidence/tests-n3-n5.txt
+plans/M2-evidence/tests-step1.txt
+plans/M2-evidence/tests-step2.txt
+plans/M2-evidence/tests-step3.txt
+plans/M2-evidence/tests-step4.txt
+plans/M2-evidence/tests-step5.txt
+plans/M2-evidence/tests-step6a.txt
+plans/M2-evidence/tests-step6b.txt
+plans/M2-evidence/tests-step6c.txt
+plans/M2-evidence/tests-step7.txt
+plans/M2-evidence/tests-step8.txt
+
+===== commits in base..head =====
+rev_list_count=30
+merge_count=0
+525cffbf202e134e579a45db6effd0a98091ba26 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-18T07:35:08+08:00 review-gate: milestone record chain and release-state derivation (M2 step 1)
+e0b2c02814368d4a64e8e63856bd12ccfa00be15 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-18T08:57:05+08:00 review-gate: conditions must be well-formed, never read with defaults (M2, N2)
+7eb2796b88c0bac7806da6afa31aead93a6c17a6 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-18T09:04:31+08:00 review-gate: the rejection count resets on release, not on approval (M2, N1)
+ddf7f4aefa0ca76765fc77f095de14f1d30e9615 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-18T09:12:41+08:00 review-gate: reused request ids are malformed; one audit per request (M2, N3, N5)
+29c8a67025ab8719b50db17c1812e91db216dbf5 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-18T12:37:26+08:00 review-gate: milestone log, append path, checkpoint and recovery (M2 step 2)
+08ad1c1d75d3ac725d1b122dbb2aa69c60724197 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-18T12:49:08+08:00 review-gate: milestone log sync with the remote and publish (M2 step 3)
+16e96c5e7f940de28ebb9ac0b3124ddf73cfcb27 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-18T13:02:58+08:00 review-gate: audit-runner client with reverse authentication (M2 step 4)
+8d18817be9b8cd55c329d4f424bd0db5ae144b9b victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-18T13:55:41+08:00 agent-bridge: read-only observers for the review gate (M2 step 5)
+8208b7ede62cdeb02e29573f14a5b3b51d38222e victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-18T17:28:57+08:00 agent-bridge: observe client refuses missing or extra keys (M2 step 5, v2)
+5c33588b9f5694aeb2ecf042f1740ebea7788d74 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-18T19:30:53+08:00 review-gate: answer, sources and input modules for milestone audits (M2 step 6a)
+5cf99fbdcdbc6f0a8f403420bb935ebd8bf740d0 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-18T19:56:35+08:00 review-gate: a linked bridge task stays a member whatever its chain (M2 step 6a, v2)
+b5693bbae8840f83bc919993cea21d00124577a2 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-19T04:27:16+08:00 review-gate: the milestone request flow (M2 step 6b)
+83bb705bf768a4d32030fb701845c8b53a161e72 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-19T11:28:51+08:00 review-gate: request flow fixes from the Codex review (M2 step 6b, v2)
+e93dd921c1e84597fd65a8d58f23b42a422e231f victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-19T12:29:13+08:00 review-gate: no job is admitted once the gate has halted (M2 step 6b, v3)
+fae23b25a4940a7983f86bb6229ccaf880b8bded victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-19T13:37:13+08:00 review-gate: a job's line is written under the admission lock (M2 step 6b, v4)
+e3dfe27bc0d906a7c7aaf43d96141b2b35e458ff victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-19T23:31:26+08:00 review-gate: milestone service, admin and CLI with the halted exit (M2 step 6c)
+2795c23c1b59cb5489a360a3092793e78e075020 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-19T23:48:50+08:00 review-gate: a halt is visible at once, even while a send holds the lock (M2 step 6c, v2)
+1b63a5b1ff48949ed12425a8014fd25eedeced33 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-20T01:47:17+08:00 review-gate: token owner check and the task book in the rebaseline preview (M2 step 6c, v3)
+b44eb6579431512fbd1e562b08c6edd59b9eee7b victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-20T02:11:02+08:00 audit-runner: test the cgroup sweep's failure path (M2 step 7, part 1: A25)
+aaebe76263516977a6121ae99ed5904921077d2f victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-20T02:50:53+08:00 review-gate: Flow service-level fault tests F1-F6 (M2 step 7, part 2)
+9f11fb18e741df47ad1621992c15944d18f16390 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-20T04:29:10+08:00 review-gate: remote fault tests F7-F11 for the flow service (M2 step 7, part 3)
+6cd85de4fdf0e19e7e3aac408f82dc79194b95ce victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-20T05:55:44+08:00 review-gate, audit-runner: steadier step 7 fault tests, raw mutation evidence (M2 step 7, v4)
+335db3d35dc51cb0f19e54e5d990d71131e78b77 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-20T06:37:54+08:00 review-gate: F3 replays a reply only the binding checks can refuse; runner test race (M2 step 7, v5)
+46e24996773d33eaf641f60e349bc81a8dcad852 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-20T10:06:12+08:00 review-gate: reverse authentication of the runner through the flow (M2 step 8, part 1: E3)
+4951e9284246d0f7c909c6b0d61054659786a56d victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-20T14:28:50+08:00 agent-bridge: bring the live bridge line onto m2-step1, keeping the observer (M2 step 8)
+bbc5aeb74005d76ad8fde20b89a5e9337f5c7aec victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-20T15:51:48+08:00 agent-bridge: race-free interrupt cleanup test (bridge integration, v2)
+b7a3a91b08d1301228507ba9d44ea05891b9e850 victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-25T09:52:40+08:00 deploy/m2: deployment files, RUNBOOK and acceptance scripts (M2 step 8, part 3)
+fd34eae74984dfc6de7405660743e4d58d2b4f2a victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-25T13:52:56+08:00 review-gate: maintenance drain and an anonymous gate git (M2 step 8, part 3 v3)
+9978dd1f0477449ccb85fcefc31cd608fcb4b87b victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-26T02:51:37+08:00 review-gate: principals from ai-neutral step A with the live --agents-file kept (M2 step 8 identity integration)
+b423a579139fb5e7f47e64e976755a900ade547c victormshan <48558250+victormshan@users.noreply.github.com> 2026-10-26T03:17:53+08:00 audit-runner: the own_cgroup test checks the side of the check it runs on (CI fix)
+
+===== diff size =====
+git_diff_bytes=1465910
+git_diff_stat_tail:
+ scripts/m2-e2e/e4_preflight.sh                     |  108 +
+ scripts/m2-e2e/e4_run.sh                           |  301 ++
+ 100 files changed, 29616 insertions(+), 271 deletions(-)
+
+===== public key and its source =====
+pubkey=ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
+pubkey_len=44
+pubkey_source=/home/administrator/projects/Chrome-MCP/.github/workflows/review-gate.yml (the pinned value in the workflow)
+live_service_pubkey={"algorithm":"ed25519","key":"ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw="}
+
+===== notes ref and verify-range (raw) =====
+notes_ref=refs/notes/review-gate 33827cda138aa9df394cb17ba286fa7cc580abca
+ok 525cffbf202e134e579a45db6effd0a98091ba26 task m2-step1-records version 1/3 review v1-3 by manual/manual
+ok e0b2c02814368d4a64e8e63856bd12ccfa00be15 task m2-n2-conditions version 1/3 review v1-1 by manual/manual
+ok 7eb2796b88c0bac7806da6afa31aead93a6c17a6 task m2-n1-count-reset version 1/3 review v1-1 by web-gemini/web-gemini
+ok ddf7f4aefa0ca76765fc77f095de14f1d30e9615 task m2-n3-n5-requests version 1/3 review v1-1 by web-gemini/web-gemini
+ok 29c8a67025ab8719b50db17c1812e91db216dbf5 task m2-step2-ledger version 1/3 review v1-1 by web-gemini/web-gemini
+ok 08ad1c1d75d3ac725d1b122dbb2aa69c60724197 task m2-step3-sync version 1/3 review v1-1 by web-gemini/web-gemini
+ok 16e96c5e7f940de28ebb9ac0b3124ddf73cfcb27 task m2-step4-runner-client version 1/3 review v1-1 by web-gemini/web-gemini
+ok 8d18817be9b8cd55c329d4f424bd0db5ae144b9b task m2-step5-bridge-observer version 1/3 review v1-1 by web-gemini/web-gemini
+ok 8208b7ede62cdeb02e29573f14a5b3b51d38222e task m2-step5-bridge-observer version 2/3 review v2-1 by web-gemini/web-gemini
+ok 5c33588b9f5694aeb2ecf042f1740ebea7788d74 task m2-step6a-pure-modules version 1/3 review v1-2 by web-gemini/web-gemini
+ok 5cf99fbdcdbc6f0a8f403420bb935ebd8bf740d0 task m2-step6a-pure-modules version 2/3 review v2-1 by web-gemini/web-gemini
+ok b5693bbae8840f83bc919993cea21d00124577a2 task m2-step6b-request-flow version 1/3 review v1-3 by manual/manual
+ok 83bb705bf768a4d32030fb701845c8b53a161e72 task m2-step6b-request-flow version 2/3 review v2-1 by web-gemini/web-gemini
+ok e93dd921c1e84597fd65a8d58f23b42a422e231f task m2-step6b-request-flow version 3/3 review v3-1 by web-gemini/web-gemini
+ok fae23b25a4940a7983f86bb6229ccaf880b8bded task m2-step6b-send-boundary version 1/3 review v1-1 by external-api/gemini-api
+ok e3dfe27bc0d906a7c7aaf43d96141b2b35e458ff task m2-step6c-service version 1/3 review v1-1 by manual/manual
+ok 2795c23c1b59cb5489a360a3092793e78e075020 task m2-step6c-service version 2/3 review v2-1 by web-gemini/web-gemini
+ok 1b63a5b1ff48949ed12425a8014fd25eedeced33 task m2-step6c-service version 3/3 review v3-1 by web-gemini/web-gemini
+ok b44eb6579431512fbd1e562b08c6edd59b9eee7b task m2-step7-faults version 1/5 review v1-1 by web-gemini/web-gemini
+ok aaebe76263516977a6121ae99ed5904921077d2f task m2-step7-faults version 2/5 review v2-1 by web-gemini/web-gemini
+ok 9f11fb18e741df47ad1621992c15944d18f16390 task m2-step7-faults version 3/5 review v3-1 by web-gemini/web-gemini
+ok 6cd85de4fdf0e19e7e3aac408f82dc79194b95ce task m2-step7-faults version 4/5 review v4-1 by external-api/gemini-api
+ok 335db3d35dc51cb0f19e54e5d990d71131e78b77 task m2-step7-faults version 5/5 review v5-1 by web-gemini/web-gemini
+ok 46e24996773d33eaf641f60e349bc81a8dcad852 task m2-step8-deploy version 1/5 review v1-1 by external-api/gemini-api
+ok 4951e9284246d0f7c909c6b0d61054659786a56d task m2-step8-bridge version 1/3 review v1-1 by web-gemini/web-gemini
+ok bbc5aeb74005d76ad8fde20b89a5e9337f5c7aec task m2-step8-bridge version 2/3 review v2-1 by external-api/gemini-api
+ok b7a3a91b08d1301228507ba9d44ea05891b9e850 task m2-step8-deploy version 2/5 review v2-2 by web-gemini/web-gemini
+ok fd34eae74984dfc6de7405660743e4d58d2b4f2a task m2-step8-deploy version 3/5 review v3-1 by web-gemini/web-gemini
+ok 9978dd1f0477449ccb85fcefc31cd608fcb4b87b task m2-step8-identity version 1/3 review v1-3 by manual/manual
+ok b423a579139fb5e7f47e64e976755a900ade547c task m2-step8-identity version 2/3 review v2-2 by web-gemini/web-gemini
+30 verified, 0 failed
+verify_range_exit=0
+
+===== caveat =====
+The final audit input size is only known when the gate assembles it for a request; it is not
+the diff size printed above. The gate refuses an over-limit input before writing anything
+(audit-runner MAX_INPUT = 4 MiB), so do not trim input to make it pass.
+preflight exit 0
+=== §8 E4 register 2026-10-26T02:35:05Z out=/home/administrator/projects/m2-tools/e4-out-20261026T023505Z
+E4 output: /home/administrator/projects/m2-tools/e4-out-20261026T023505Z
+{
+  "base": "3cc549109c700409b8069dbe920a96759cb47faa",
+  "conditions": [],
+  "evidence_dir": "plans/M2-evidence",
+  "phase": "m2",
+  "supersedes": null,
+  "task_book": "plans/M2-design.md",
+  "task_book_sha256": "571e53f1063f62f85f941182b0222f5eb7571442026d23face6d2515b26ecce6"
+}
+{
+  "hash": "",
+  "reasons": [
+    "phase not registered (or not confirmed by the user)",
+    "no audit request"
+  ],
+  "released": false,
+  "seq": 0,
+  "state": {
+    "baseline_seq": null,
+    "conditions": [],
+    "count": 0,
+    "current": null,
+    "paused": false,
+    "phase": "m2",
+    "reasons": [
+      "phase not registered (or not confirmed by the user)",
+      "no audit request"
+    ],
+    "registered": false,
+    "released": false,
+    "superseded_by": null
+  },
+  "sync": "Equal"
+}
+
+status_exit=1 registered=False released=False current=-
+
+Registration application written. The user must confirm it (this is the user's decision):
+  preview: sudo -u reviewgate /usr/local/bin/review-gate admin milestone --state /var/lib/reviewgate/state --config /etc/review-gate/milestones.json confirm m2
+  execute: sudo -u reviewgate /usr/local/bin/review-gate admin milestone --state /var/lib/reviewgate/state --config /etc/review-gate/milestones.json --yes confirm m2
+
+Then run:
+  scripts/m2-e2e/e4_run.sh continue
+register exit 0
+=== §8.1 confirm m2 dry run 2026-10-26T02:35:13Z
+{
+  "dry_run": true,
+  "note": "dry run: nothing written. Run again with --yes to write; the real seq/hash are shown after writing.",
+  "would": {
+    "application": {
+      "base": "3cc549109c700409b8069dbe920a96759cb47faa",
+      "conditions": [],
+      "evidence_dir": "plans/M2-evidence",
+      "phase": "m2",
+      "supersedes": null,
+      "task_book": "plans/M2-design.md",
+      "task_book_sha256": "571e53f1063f62f85f941182b0222f5eb7571442026d23face6d2515b26ecce6"
+    },
+    "command": "confirm",
+    "phase": "m2"
+  }
+}
+exit 0
+=== §8.1 confirm m2 --yes 2026-10-26T02:35:20Z
+{
+  "written": [
+    {
+      "hash": "924aea6b1c35c5c851dac7b0c3dd47dafd79f76f94e0b793d44de5110a9c486f",
+      "kind": "phase_registered",
+      "phase": "m2",
+      "seq": 1
+    }
+  ]
+}
+exit 0
+=== dry link-task dsh-review-m2n2
+{
+  "dry_run": true,
+  "note": "dry run: nothing written. Run again with --yes to write; the real seq/hash are shown after writing.",
+  "would": {
+    "command": "link-task",
+    "phase": "m2",
+    "reason": "user decision U-g (2026-10-20): link dsh-review-m2n2 to phase m2",
+    "task": "dsh-review-m2n2"
+  }
+}
+exit 0
+=== dry link-task dsh-review-m2s6b-20261019
+{
+  "dry_run": true,
+  "note": "dry run: nothing written. Run again with --yes to write; the real seq/hash are shown after writing.",
+  "would": {
+    "command": "link-task",
+    "phase": "m2",
+    "reason": "user decision U-g (2026-10-20): link dsh-review-m2s6b-20261019 to phase m2",
+    "task": "dsh-review-m2s6b-20261019"
+  }
+}
+exit 0
+=== dry ignore-task auto-iterate-generic-proposal-20261019
+{
+  "dry_run": true,
+  "note": "dry run: nothing written. Run again with --yes to write; the real seq/hash are shown after writing.",
+  "would": {
+    "command": "ignore-task",
+    "phase": "m2",
+    "reason": "user decision U-g (2026-10-20): ignore auto-iterate-generic-proposal-20261019 for phase m2",
+    "task": "auto-iterate-generic-proposal-20261019"
+  }
+}
+exit 0
+=== dry ignore-task bridge-settle-conflict-20261018
+{
+  "dry_run": true,
+  "note": "dry run: nothing written. Run again with --yes to write; the real seq/hash are shown after writing.",
+  "would": {
+    "command": "ignore-task",
+    "phase": "m2",
+    "reason": "user decision U-g (2026-10-20): ignore bridge-settle-conflict-20261018 for phase m2",
+    "task": "bridge-settle-conflict-20261018"
+  }
+}
+exit 0
+=== dry ignore-task opencode-handover-20261019
+{
+  "dry_run": true,
+  "note": "dry run: nothing written. Run again with --yes to write; the real seq/hash are shown after writing.",
+  "would": {
+    "command": "ignore-task",
+    "phase": "m2",
+    "reason": "user decision U-g (2026-10-20): ignore opencode-handover-20261019 for phase m2",
+    "task": "opencode-handover-20261019"
+  }
+}
+exit 0
+=== dry ignore-task opencode-perm-fix-20261019-claude
+{
+  "dry_run": true,
+  "note": "dry run: nothing written. Run again with --yes to write; the real seq/hash are shown after writing.",
+  "would": {
+    "command": "ignore-task",
+    "phase": "m2",
+    "reason": "user decision U-g (2026-10-20): ignore opencode-perm-fix-20261019-claude for phase m2",
+    "task": "opencode-perm-fix-20261019-claude"
+  }
+}
+exit 0
+=== dry ignore-task unified-bridge-source-provenance-20261019
+{
+  "dry_run": true,
+  "note": "dry run: nothing written. Run again with --yes to write; the real seq/hash are shown after writing.",
+  "would": {
+    "command": "ignore-task",
+    "phase": "m2",
+    "reason": "user decision U-g (2026-10-20): ignore unified-bridge-source-provenance-20261019 for phase m2",
+    "task": "unified-bridge-source-provenance-20261019"
+  }
+}
+exit 0
+=== --yes link-task dsh-review-m2n2
+{"written":[{"hash":"7f7a96b49b86462cc1ce9dbc884fe1a3489fd2e041d4a27bfd04573888965c74","kind":"task_linked","phase":"m2","seq":2}]}
+exit 0
+=== --yes link-task dsh-review-m2s6b-20261019
+{"written":[{"hash":"d010af7e83f145af2693963737aa5d005f71beb03aa4b0c38107b2eab6bb7c9c","kind":"task_linked","phase":"m2","seq":3}]}
+exit 0
+=== --yes ignore-task auto-iterate-generic-proposal-20261019
+{"written":[{"hash":"42bd341c11e7a009129bba063ef7f770362ac2a3b19a7f14aa52f53eb1651e5b","kind":"task_ignored","phase":"m2","seq":4}]}
+exit 0
+=== --yes ignore-task bridge-settle-conflict-20261018
+{"written":[{"hash":"b94ad921975ca7fb347dc0a8e2e43c173025763ebc3385d03d8224de39fd5f06","kind":"task_ignored","phase":"m2","seq":5}]}
+exit 0
+=== --yes ignore-task opencode-handover-20261019
+{"written":[{"hash":"6a50bbba4cfcfab4b109d0d338ba43b136a5d90a31cb8704b945160bad78d6e2","kind":"task_ignored","phase":"m2","seq":6}]}
+exit 0
+=== --yes ignore-task opencode-perm-fix-20261019-claude
+{"written":[{"hash":"af39e44fe114c864e561ae011d19432a9b068ae2331e59cb647d457578241d93","kind":"task_ignored","phase":"m2","seq":7}]}
+exit 0
+=== --yes ignore-task unified-bridge-source-provenance-20261019
+{"written":[{"hash":"2036784cc2b39912bbd37b21e45dfa40abeff087a682f2a0449ede94e875f2a7","kind":"task_ignored","phase":"m2","seq":8}]}
+exit 0
+=== status after admin 2026-10-26T02:35:31Z
+status exit 1
+{
+    "hash": "2036784cc2b39912bbd37b21e45dfa40abeff087a682f2a0449ede94e875f2a7",
+    "reasons": [
+        "no audit request",
+        "not archived yet: records 1"
+    ],
+    "released": false,
+    "seq": 8,
+    "state": {
+        "baseline_seq": 1,
+        "conditions": [],
+        "count": 0,
+        "current": null,
+        "paused": false,
+        "phase": "m2",
+        "reasons": [
+            "no audit request",
+            "not archived yet: records 1"
+        ],
+        "registered": true,
+        "released": false,
+        "superseded_by": null
+    },
+    "sync": "RemoteBehind { unarchived: 8 }"
+}
+=== §8 E4 continue 2026-10-26T02:35:38Z
+E4 output: /home/administrator/projects/m2-tools/e4-out-20261026T023505Z
+{
+  "hash": "2036784cc2b39912bbd37b21e45dfa40abeff087a682f2a0449ede94e875f2a7",
+  "reasons": [
+    "no audit request",
+    "not archived yet: records 1"
+  ],
+  "released": false,
+  "seq": 8,
+  "state": {
+    "baseline_seq": 1,
+    "conditions": [],
+    "count": 0,
+    "current": null,
+    "paused": false,
+    "phase": "m2",
+    "reasons": [
+      "no audit request",
+      "not archived yet: records 1"
+    ],
+    "registered": true,
+    "released": false,
+    "superseded_by": null
+  },
+  "sync": "RemoteBehind { unarchived: 8 }"
+}
+
+status_exit=1 registered=True released=False current=-
+error: review-gate 409 Conflict: refused: ["bridge task ai-neutral-A-oc-20261020 of the implementer in the window belongs to no phase","bridge task ai-neutral-B-oc-20261020 of the implementer in the window belongs to no phase","bridge task ai-neutral-design-20261020 of the implementer in the window belongs to no phase","bridge task auto-iterate-resume-20261025 of the implementer in the window belongs to no phase","bridge task auto-iterate-self3-20261025 of the implementer in the window belongs to no phase","bridge task claude-decisions-20261021 of the implementer in the window belongs to no phase","bridge task claude-identity-binding-20261021 of the implementer in the window belongs to no phase","bridge task claude-status-20261021 of the implementer in the window belongs to no phase","bridge task continuation-takeover-coordinator-source-review-20261023 of the implementer in the window belongs to no phase","bridge task control-survey-20261017-opencode of the implementer in the window belongs to no phase","bridge task dsh-auto-iterate-feature-gap-20261022 of the implementer in the window belongs to no phase","bridge task dsh-takeover-claude-work-20261021 of the implementer in the window belongs to no phase","bridge task opencode-perm-fix-20261019-codex of the implementer in the window belongs to no phase","bridge task opencode-perm-fix-20261019-codex-collab of the implementer in the window belongs to no phase","bridge task receiver-fencing-design-r2-review-20261023 of the implementer in the window belongs to no phase","bridge task receiver-fencing-design-review-20261023 of the implementer in the window belongs to no phase","bridge task unified-capability-provision-review-20261020 of the implementer in the window belongs to no phase","bridge task unified-continuation-health-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-continuation-health-v2-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-continuation-ownership-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-headless-preparation-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-native-execution-events-review-20261023 of the implementer in the window belongs to no phase","bridge task unified-preflight-combined-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-preflight-durability-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-preflight-policy-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-preflight-revised-integration-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-private-continuity-successor-review-20261020 of the implementer in the window belongs to no phase","bridge task unified-private-continuity-v2-review-20261020 of the implementer in the window belongs to no phase","bridge task unified-private-dispatch-v10-source-review-20261023 of the implementer in the window belongs to no phase","bridge task unified-private-dispatch-v11-source-review-20261023 of the implementer in the window belongs to no phase","bridge task unified-private-dispatch-v2-review-20261023 of the implementer in the window belongs to no phase","bridge task unified-private-dispatch-v3-review-20261023 of the implementer in the window belongs to no phase","bridge task unified-private-dispatch-v4-review-20261023 of the implementer in the window belongs to no phase","bridge task unified-private-dispatch-v9-source-review-20261023 of the implementer in the window belongs to no phase","bridge task unified-private-event-dispatch-opencode-review-20261020 of the implementer in the window belongs to no phase","bridge task unified-private-event-dispatch-review-20261020 of the implementer in the window belongs to no phase","bridge task unified-private-event-runtime-review-20261020 of the implementer in the window belongs to no phase","bridge task unified-receiver-composition-runtime-review-20261020 of the implementer in the window belongs to no phase","bridge task unified-receiver-composition-v2-review-20261020 of the implementer in the window belongs to no phase","bridge task unified-receiver-exclusive-review-20261020 of the implementer in the window belongs to no phase","bridge task unified-receiver-finalizer-claude-review-20261020 of the implementer in the window belongs to no phase","bridge task unified-receiver-finalizer-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-receiver-private-composition-review-20261020 of the implementer in the window belongs to no phase","bridge task unified-receiver-retry-revision-review-20261020 of the implementer in the window belongs to no phase","bridge task unified-s0-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s1-freeze-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-critical-closure-review-20261023 of the implementer in the window belongs to no phase","bridge task unified-s2-escalation-bridge-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-s2-foundation-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-gate-workflow-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-integration-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-local-atomic-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-negative-outcome-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-s2-notification-pilot-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-s2-notification-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-notification-runtime-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-s2-notification-wire-pilot-20261019 of the implementer in the window belongs to no phase","bridge task unified-s2-preflight-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-probe-runner-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-probes-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-record-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-rejection-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-remote-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-retirement-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-runtime-queue-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-scheduler-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-signed-integration-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-s2-timed-pilot-review-20261018 of the implementer in the window belongs to no phase","bridge task unified-successor-cli-revision-review-20261019 of the implementer in the window belongs to no phase","bridge task unified-successor-extension-review-20261019 of the implementer in the window belongs to no phase","auditor openai: maps to no vendor","codex-collab (Bridge, m2-origin-reviewer-check-20261018): maps to no vendor","opencode (Bridge, m2-step7-remote-faults-oc-20261020): maps to no vendor"]
+request failed or its outcome is uncertain (exit 2): do NOT retry blindly; run status first
+continue exit 2
+=== status after refused request 2026-10-26T02:36:07Z
+seq 8 current None count 0 reasons ['no audit request', 'not archived yet: records 1']
+=== dry vendors-set v2 2026-10-26T02:37:02Z
+{
+  "dry_run": true,
+  "note": "dry run: nothing written. Run again with --yes to write; the real seq/hash are shown after writing.",
+  "would": {
+    "command": "vendors-set",
+    "reason": "user decision U-d=a (2026-10-20): keep labels codex-collab->codex, opencode->opencode; auditor openai->openai",
+    "table": {
+      "rules": [
+        {
+          "match": "prefix",
+          "source": "any",
+          "value": "claude",
+          "vendor": "anthropic"
+        },
+        {
+          "match": "exact",
+          "source": "any",
+          "value": "codex",
+          "vendor": "openai"
+        },
+        {
+          "match": "exact",
+          "source": "any",
+          "value": "auditor",
+          "vendor": "openai"
+        },
+        {
+          "match": "exact",
+          "source": "any",
+          "value": "dsh",
+          "vendor": "deepseek"
+        },
+        {
+          "match": "exact",
+          "source": "git_author",
+          "value": "victormshan",
+          "vendor": "user"
+        },
+        {
+          "match": "exact",
+          "source": "bridge",
+          "value": "codex-collab",
+          "vendor": "codex"
+        },
+        {
+          "match": "exact",
+          "source": "bridge",
+          "value": "opencode",
+          "vendor": "opencode"
+        },
+        {
+          "match": "exact",
+          "source": "auditor",
+          "value": "openai",
+          "vendor": "openai"
+        }
+      ],
+      "version": 2
+    },
+    "table_sha256": "4d3da2c103aeff287a2adc4df9c92489d21af450c3063c5996663a91ee66be49"
+  }
+}
+exit 0
+
+## 3. Deployment log, lines 2298-2430 (raw)
+=== §8 E4 continue (2nd) 2026-10-26T11:51:27Z
+E4 output: /home/administrator/projects/m2-tools/e4-out-20261026T023505Z
+{
+  "hash": "0c8619c8fb7e4494a8548e4a8c35cd864a6577b6a7ee2fbb6302c87a2fdecf20",
+  "reasons": [
+    "no audit request",
+    "not archived yet: records 1"
+  ],
+  "released": false,
+  "seq": 79,
+  "state": {
+    "baseline_seq": 1,
+    "conditions": [],
+    "count": 0,
+    "current": null,
+    "paused": false,
+    "phase": "m2",
+    "reasons": [
+      "no audit request",
+      "not archived yet: records 1"
+    ],
+    "registered": true,
+    "released": false,
+    "superseded_by": null
+  },
+  "sync": "RemoteBehind { unarchived: 79 }"
+}
+
+status_exit=1 registered=True released=False current=-
+error: review-gate 409 Conflict: refused: ["codex (Bridge, m2-origin-reviewer-check-20261018) shares vendor openai with the auditor"]
+request failed or its outcome is uncertain (exit 2): do NOT retry blindly; run status first
+continue exit 2
+=== dry vendors-set v3 2026-10-26T11:54:55Z
+dry True version 3 rules 11 sha 36c8c8e0176cd36142073796f3c1b7467fceef5d3aa853c10987658f0ba5d0b6
+same as file: True
+=== --yes vendors-set v3 2026-10-26T11:54:59Z
+{"written":[{"hash":"869679df07946df00120b4f286bf41ee1e7dc2b8c71b1bd211b92c627fe55924","kind":"vendors_changed","phase":"","seq":80}]}
+=== §8 E4 continue (3rd) 2026-10-26T11:55:04Z
+E4 output: /home/administrator/projects/m2-tools/e4-out-20261026T023505Z
+{
+  "hash": "869679df07946df00120b4f286bf41ee1e7dc2b8c71b1bd211b92c627fe55924",
+  "reasons": [
+    "no audit request",
+    "not archived yet: records 1"
+  ],
+  "released": false,
+  "seq": 80,
+  "state": {
+    "baseline_seq": 1,
+    "conditions": [],
+    "count": 0,
+    "current": null,
+    "paused": false,
+    "phase": "m2",
+    "reasons": [
+      "no audit request",
+      "not archived yet: records 1"
+    ],
+    "registered": true,
+    "released": false,
+    "superseded_by": null
+  },
+  "sync": "RemoteBehind { unarchived: 80 }"
+}
+
+status_exit=1 registered=True released=False current=-
+{
+  "request_id": "m2-q1"
+}
+request_id=m2-q1
+11:55:09Z status_exit=1 registered=True released=False current=m2-q1/pending
+no job record yet for m2-q1; keep the raw log
+{
+  "hash": "b0e8ce1d4507f0d216e6eeebf70d4ef0f3f55064d66c9a0740314efbb99a51f6",
+  "reasons": [
+    "current request m2-q1 is Pending",
+    "no valid audit of the current request",
+    "not archived yet: records 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 81"
+  ],
+  "released": false,
+  "seq": 81,
+  "state": {
+    "baseline_seq": 1,
+    "conditions": [],
+    "count": 0,
+    "current": {
+      "audit_seq": null,
+      "baseline_seq": 1,
+      "closed_seq": null,
+      "head": "b423a579139fb5e7f47e64e976755a900ade547c",
+      "independence_note": "",
+      "independent": true,
+      "request_id": "m2-q1",
+      "seq": 81,
+      "sources_known": true,
+      "sources_note": "",
+      "state": "pending",
+      "verdict": null
+    },
+    "paused": false,
+    "phase": "m2",
+    "reasons": [
+      "current request m2-q1 is Pending",
+      "no valid audit of the current request",
+      "not archived yet: records 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 81"
+    ],
+    "registered": true,
+    "released": false,
+    "superseded_by": null
+  },
+  "sync": "RemoteBehind { unarchived: 81 }"
+}
+
+final: registered=True released=False current=m2-q1/pending
+released: False
+reason: current request m2-q1 is Pending
+reason: no valid audit of the current request
+reason: not archived yet: records 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 81
+
+Not publishing. To publish the signed log (ordinary push, never forced):
+  E4_PUBLISH=1 scripts/m2-e2e/e4_run.sh publish
+
+The audit verdict is whatever the runner returned; REWORK is recorded, never retried.
+continue exit 0
+=== manual poll of m2-q1 from 2026-10-26T11:55:45Z (script stopped early: case bug)
+11:55:46Z 101 failed
+poll end: failed
+=== E4 m2-q1 result 2026-10-26T11:55:19Z
+request m2-q1 accepted (seq 81), job seq 82 sender uid 997 cgroup /system.slice/audit-runner.service pid 1412629,
+runner status failed: "codex exited with exit status: 1"; request_closed seq 83 state failed, verdict null.
+auditor job stderr (/home/auditor/jobs/m2-q1/stderr.log): turn/start failed: Input exceeds the maximum length of 1048576 characters
+(input_too_large, max_chars 1048576, actual_chars 1834767). input.txt 1886317 bytes, under the runner's 4 MiB MAX_INPUT.
+Not retried. Not published.
+
+## 4. Running programs at 2026-10-26T18:20:12Z (read as root, digests only)
+review-gate.service MainPID 1301526 active=active
+69b3d3a6b5e0b5e982a8191d47a5dcfde6d6d34f5caa0accade53e7c07184f07  /proc/1301526/exe
+audit-runner.service MainPID 1412629 active=active
+c9a66da9442758d85c8411064d1a67753339efab854fe491bcfc79b2293940b3  /proc/1412629/exe
+69b3d3a6b5e0b5e982a8191d47a5dcfde6d6d34f5caa0accade53e7c07184f07  /usr/local/bin/review-gate
+c9a66da9442758d85c8411064d1a67753339efab854fe491bcfc79b2293940b3  /usr/local/lib/audit-runner/audit-runner
+628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1  /usr/local/lib/auditor-codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+agent-bridge.service (user) MainPID 1301241
+d9ab3e50895ed729b076d031719738e8157516084b3ae8e2aa2620366b41bca2  /proc/1301241/exe
+d9ab3e50895ed729b076d031719738e8157516084b3ae8e2aa2620366b41bca2  /home/administrator/.local/bin/agent-bridge
+
+## 5. Full-tree tests on X (summaries; see the header for full files)
+### tests.txt
+1:# full-tree tests on X, 2026-10-26T18:02:31Z
+2:# worktree /home/administrator/projects/Chrome-MCP-m2-build-b423a57 HEAD b423a579139fb5e7f47e64e976755a900ade547c tree b68f064fa0f8dcbdf6f71ec0e64b3bd5b1072a5c status lines 0
+5:$ CARGO_TARGET_DIR=<new empty dir> cargo test --workspace --locked
+212:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/agent-ff01850f8e067627)
+268:test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+270:     Running tests/mcp_backend.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/mcp_backend-d46e8f007f279074)
+275:test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+277:     Running tests/native_backend.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/native_backend-39a83361b2a20d82)
+294:test result: ok. 0 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 0.00s
+296:     Running tests/snapshot_contract.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/snapshot_contract-158a0184d5207ebb)
+308:test result: ok. 0 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 0.00s
+310:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/agent_bridge-ea80b794e69db3a7)
+403:test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.40s
+405:     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/agent_bridge-a3c6daf55de9cd1a)
+410:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+412:     Running tests/multi_agent.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/multi_agent-a3dd6e26ddebc2fb)
+419:test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+421:     Running tests/serve_observers.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/serve_observers-654d26a09ced885e)
+429:test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+431:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/audit_runner-bc75f864f47f109e)
+447:test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+449:     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/audit_runner-f49da5416c4f2b9d)
+453:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+455:     Running tests/fault.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/fault-aee6d167b518c301)
+459:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+461:     Running tests/runner.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/runner-6542545e9dccd188)
+485:test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.69s
+487:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/browser_runtime-df4a5481e7cdaf5b)
+497:test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+499:     Running tests/chrome.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/chrome-6be2a0922443e650)
+508:test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+510:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/llm-a069f72e784289cd)
+525:test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+527:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/mcp_client-fbfaf94c1834abe8)
+533:test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+535:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/review_gate-e9bcb17b962bc787)
+812:test result: ok. 271 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 33.61s
+814:     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/review_gate-014cdf6af00238d5)
+819:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+821:     Running tests/admin_cli.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/admin_cli-206d5beaf33c84d9)
+826:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+828:     Running tests/admin_task.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/admin_task-1ad5d956a7b5640e)
+834:test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.12s
+836:     Running tests/halt_exit.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/halt_exit-9529365f04eb2d77)
+839:test without_the_feature_faults_are_ignored ... FAILED
+841:failures:
+843:---- without_the_feature_faults_are_ignored stdout ----
+845:thread 'without_the_feature_faults_are_ignored' (1522096) panicked at crates/review-gate/tests/halt_exit.rs:128:9:
+850:failures:
+851:    without_the_feature_faults_are_ignored
+853:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+855:error: test failed, to rerun pass `-p review-gate --test halt_exit`
+856:exit 101
+857:$ cargo clippy --workspace --all-targets --locked -- -D warnings
+1028:exit 0
+1029:# status after: 0 lines
+### tests-host-nofailfast.txt
+1:# full-tree tests on X, host as deployed (/etc/review-gate/identity.json exists, root:reviewgate 640), --no-fail-fast, 2026-10-26T18:11:20Z
+2:# HEAD b423a579139fb5e7f47e64e976755a900ade547c status lines 0
+4:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/agent-ff01850f8e067627)
+60:test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+62:     Running tests/mcp_backend.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/mcp_backend-d46e8f007f279074)
+67:test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+69:     Running tests/native_backend.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/native_backend-39a83361b2a20d82)
+86:test result: ok. 0 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 0.00s
+88:     Running tests/snapshot_contract.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/snapshot_contract-158a0184d5207ebb)
+100:test result: ok. 0 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 0.00s
+102:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/agent_bridge-ea80b794e69db3a7)
+195:test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.17s
+197:     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/agent_bridge-a3c6daf55de9cd1a)
+202:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+204:     Running tests/multi_agent.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/multi_agent-a3dd6e26ddebc2fb)
+211:test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+213:     Running tests/serve_observers.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/serve_observers-654d26a09ced885e)
+221:test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+223:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/audit_runner-bc75f864f47f109e)
+239:test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+241:     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/audit_runner-f49da5416c4f2b9d)
+245:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+247:     Running tests/fault.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/fault-aee6d167b518c301)
+251:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+253:     Running tests/runner.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/runner-6542545e9dccd188)
+277:test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.35s
+279:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/browser_runtime-df4a5481e7cdaf5b)
+289:test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+291:     Running tests/chrome.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/chrome-6be2a0922443e650)
+300:test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+302:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/llm-a069f72e784289cd)
+317:test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+319:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/mcp_client-fbfaf94c1834abe8)
+325:test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+327:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/review_gate-e9bcb17b962bc787)
+604:test result: ok. 271 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 32.37s
+606:     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/review_gate-014cdf6af00238d5)
+611:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+613:     Running tests/admin_cli.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/admin_cli-206d5beaf33c84d9)
+618:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+620:     Running tests/admin_task.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/admin_task-1ad5d956a7b5640e)
+626:test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.12s
+628:     Running tests/halt_exit.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/halt_exit-9529365f04eb2d77)
+631:test without_the_feature_faults_are_ignored ... FAILED
+633:failures:
+635:---- without_the_feature_faults_are_ignored stdout ----
+637:thread 'without_the_feature_faults_are_ignored' (1537998) panicked at crates/review-gate/tests/halt_exit.rs:128:9:
+642:failures:
+643:    without_the_feature_faults_are_ignored
+645:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+647:error: test failed, to rerun pass `-p review-gate --test halt_exit`
+648:     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/webtest-30b17da262317e96)
+653:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+655:     Running tests/e2e.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/e2e-ec873324c2f137f5)
+666:test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+672:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+678:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+684:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+690:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+696:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+702:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+708:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+712:exit 101
+### tests-sandbox.txt
+1:# full-tree tests on X in bwrap with /etc/review-gate hidden by an empty tmpfs (as on CI, where the file is absent), --no-fail-fast, 2026-10-26T18:12:19Z
+2:$ bwrap --dev-bind / / --tmpfs /etc/review-gate -- cargo test --workspace --locked --no-fail-fast
+7:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/agent-ff01850f8e067627)
+63:test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+65:     Running tests/mcp_backend.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/mcp_backend-d46e8f007f279074)
+70:test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+72:     Running tests/native_backend.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/native_backend-39a83361b2a20d82)
+89:test result: ok. 0 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 0.00s
+91:     Running tests/snapshot_contract.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/snapshot_contract-158a0184d5207ebb)
+103:test result: ok. 0 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 0.00s
+105:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/agent_bridge-ea80b794e69db3a7)
+198:test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.20s
+200:     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/agent_bridge-a3c6daf55de9cd1a)
+205:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+207:     Running tests/multi_agent.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/multi_agent-a3dd6e26ddebc2fb)
+214:test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+216:     Running tests/serve_observers.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/serve_observers-654d26a09ced885e)
+224:test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+226:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/audit_runner-bc75f864f47f109e)
+242:test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+244:     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/audit_runner-f49da5416c4f2b9d)
+248:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+250:     Running tests/fault.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/fault-aee6d167b518c301)
+254:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+256:     Running tests/runner.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/runner-6542545e9dccd188)
+280:test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.59s
+282:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/browser_runtime-df4a5481e7cdaf5b)
+292:test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+294:     Running tests/chrome.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/chrome-6be2a0922443e650)
+303:test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+305:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/llm-a069f72e784289cd)
+320:test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+322:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/mcp_client-fbfaf94c1834abe8)
+328:test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+330:     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/review_gate-e9bcb17b962bc787)
+607:test result: ok. 271 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 31.72s
+609:     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/review_gate-014cdf6af00238d5)
+614:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+616:     Running tests/admin_cli.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/admin_cli-206d5beaf33c84d9)
+621:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+623:     Running tests/admin_task.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/admin_task-1ad5d956a7b5640e)
+629:test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.12s
+631:     Running tests/halt_exit.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/halt_exit-9529365f04eb2d77)
+636:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+638:     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/webtest-30b17da262317e96)
+643:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+645:     Running tests/e2e.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/e2e-ec873324c2f137f5)
+656:test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+662:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+668:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+674:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+680:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+686:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+692:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+698:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+700:exit 0
+701:$ cargo clippy --workspace --all-targets --locked -- -D warnings
+703:exit 0
+704:# status after: 0 lines
+### totals
+tests-host-nofailfast.txt: passed 476 failed 1 ignored 36
+tests-sandbox.txt: passed 477 failed 0 ignored 36
+### cause of the host failure (read from the code at X)
+halt_exit.rs starts 'review-gate serve' without --identity-config. main.rs: identity_config defaults to identity::DEFAULT_CONFIG (/etc/review-gate/identity.json) when that file exists, and the service refuses to start if it exists but does not load. Since the 2026-10-26 deployment the file exists as root:reviewgate 0640, so an ordinary user's test process gets 'Permission denied' and the service exits; reproduced by hand with the same arguments. On CI the file is absent. The test is not hermetic; the service behaviour is the designed fail-closed one. The fix (pass a test identity file) changes crates/ and is therefore NOT part of H; it is done after M2.
+
+## 6. verify-range 3cc5491..b423a57
+ok 525cffbf202e134e579a45db6effd0a98091ba26 task m2-step1-records version 1/3 review v1-3 by manual/manual
+ok e0b2c02814368d4a64e8e63856bd12ccfa00be15 task m2-n2-conditions version 1/3 review v1-1 by manual/manual
+ok 7eb2796b88c0bac7806da6afa31aead93a6c17a6 task m2-n1-count-reset version 1/3 review v1-1 by web-gemini/web-gemini
+ok ddf7f4aefa0ca76765fc77f095de14f1d30e9615 task m2-n3-n5-requests version 1/3 review v1-1 by web-gemini/web-gemini
+ok 29c8a67025ab8719b50db17c1812e91db216dbf5 task m2-step2-ledger version 1/3 review v1-1 by web-gemini/web-gemini
+ok 08ad1c1d75d3ac725d1b122dbb2aa69c60724197 task m2-step3-sync version 1/3 review v1-1 by web-gemini/web-gemini
+ok 16e96c5e7f940de28ebb9ac0b3124ddf73cfcb27 task m2-step4-runner-client version 1/3 review v1-1 by web-gemini/web-gemini
+ok 8d18817be9b8cd55c329d4f424bd0db5ae144b9b task m2-step5-bridge-observer version 1/3 review v1-1 by web-gemini/web-gemini
+ok 8208b7ede62cdeb02e29573f14a5b3b51d38222e task m2-step5-bridge-observer version 2/3 review v2-1 by web-gemini/web-gemini
+ok 5c33588b9f5694aeb2ecf042f1740ebea7788d74 task m2-step6a-pure-modules version 1/3 review v1-2 by web-gemini/web-gemini
+ok 5cf99fbdcdbc6f0a8f403420bb935ebd8bf740d0 task m2-step6a-pure-modules version 2/3 review v2-1 by web-gemini/web-gemini
+ok b5693bbae8840f83bc919993cea21d00124577a2 task m2-step6b-request-flow version 1/3 review v1-3 by manual/manual
+ok 83bb705bf768a4d32030fb701845c8b53a161e72 task m2-step6b-request-flow version 2/3 review v2-1 by web-gemini/web-gemini
+ok e93dd921c1e84597fd65a8d58f23b42a422e231f task m2-step6b-request-flow version 3/3 review v3-1 by web-gemini/web-gemini
+ok fae23b25a4940a7983f86bb6229ccaf880b8bded task m2-step6b-send-boundary version 1/3 review v1-1 by external-api/gemini-api
+ok e3dfe27bc0d906a7c7aaf43d96141b2b35e458ff task m2-step6c-service version 1/3 review v1-1 by manual/manual
+ok 2795c23c1b59cb5489a360a3092793e78e075020 task m2-step6c-service version 2/3 review v2-1 by web-gemini/web-gemini
+ok 1b63a5b1ff48949ed12425a8014fd25eedeced33 task m2-step6c-service version 3/3 review v3-1 by web-gemini/web-gemini
+ok b44eb6579431512fbd1e562b08c6edd59b9eee7b task m2-step7-faults version 1/5 review v1-1 by web-gemini/web-gemini
+ok aaebe76263516977a6121ae99ed5904921077d2f task m2-step7-faults version 2/5 review v2-1 by web-gemini/web-gemini
+ok 9f11fb18e741df47ad1621992c15944d18f16390 task m2-step7-faults version 3/5 review v3-1 by web-gemini/web-gemini
+ok 6cd85de4fdf0e19e7e3aac408f82dc79194b95ce task m2-step7-faults version 4/5 review v4-1 by external-api/gemini-api
+ok 335db3d35dc51cb0f19e54e5d990d71131e78b77 task m2-step7-faults version 5/5 review v5-1 by web-gemini/web-gemini
+ok 46e24996773d33eaf641f60e349bc81a8dcad852 task m2-step8-deploy version 1/5 review v1-1 by external-api/gemini-api
+ok 4951e9284246d0f7c909c6b0d61054659786a56d task m2-step8-bridge version 1/3 review v1-1 by web-gemini/web-gemini
+ok bbc5aeb74005d76ad8fde20b89a5e9337f5c7aec task m2-step8-bridge version 2/3 review v2-1 by external-api/gemini-api
+ok b7a3a91b08d1301228507ba9d44ea05891b9e850 task m2-step8-deploy version 2/5 review v2-2 by web-gemini/web-gemini
+ok fd34eae74984dfc6de7405660743e4d58d2b4f2a task m2-step8-deploy version 3/5 review v3-1 by web-gemini/web-gemini
+ok 9978dd1f0477449ccb85fcefc31cd608fcb4b87b task m2-step8-identity version 1/3 review v1-3 by manual/manual
+ok b423a579139fb5e7f47e64e976755a900ade547c task m2-step8-identity version 2/3 review v2-2 by web-gemini/web-gemini
+30 verified, 0 failed
+exit 0
+
+## 7. CI for X
+# GitHub Actions for b423a579139fb5e7f47e64e976755a900ade547c (read 2026-10-26T18:02:49Z from api.github.com, anonymous)
+40225912276 webtest push m2-step1 b423a579139fb5e7f47e64e976755a900ade547c completed success 2026-10-25T19:24:49Z 2026-10-25T19:31:31Z https://github.com/victormshan/WebUI-AutoTest/actions/runs/40225912276
+  job checks success 2026-10-25T19:24:51Z 2026-10-25T19:28:16Z steps: Set up job=success, Run actions/checkout@v4=success, Run rustup component add rustfmt clippy=success, Run Swatinem/rust-cache@v2=success, Run cargo fmt --all --check=success, Run cargo clippy --all-targets --locked -- -D warnings=success, Run cargo test --locked=success, Post Run Swatinem/rust-cache@v2=success, Post Run actions/checkout@v4=success, Complete job=success
+  job regression success 2026-10-25T19:28:19Z 2026-10-25T19:31:30Z steps: Set up job=success, Run actions/checkout@v4=success, Run actions/setup-node@v4=success, Run Swatinem/rust-cache@v2=success, Replay flows=success, Upload reports=success, Post Run Swatinem/rust-cache@v2=success, Post Run actions/setup-node@v4=success, Post Run actions/checkout@v4=success, Complete job=success
+  job e2e success 2026-10-25T19:28:18Z 2026-10-25T19:30:01Z steps: Set up job=success, Run actions/checkout@v4=success, Run actions/setup-node@v4=success, Run Swatinem/rust-cache@v2=success, Run cargo test --locked -p webtest -- --ignored --test-threads 2=success, Post Run Swatinem/rust-cache@v2=success, Post Run actions/setup-node@v4=success, Post Run actions/checkout@v4=success, Complete job=success
+40225364141 webtest push m2-identity-integration b423a579139fb5e7f47e64e976755a900ade547c completed success 2026-10-25T19:17:57Z 2026-10-25T19:24:25Z https://github.com/victormshan/WebUI-AutoTest/actions/runs/40225364141
+  job checks success 2026-10-25T19:18:00Z 2026-10-25T19:21:26Z steps: Set up job=success, Run actions/checkout@v4=success, Run rustup component add rustfmt clippy=success, Run Swatinem/rust-cache@v2=success, Run cargo fmt --all --check=success, Run cargo clippy --all-targets --locked -- -D warnings=success, Run cargo test --locked=success, Post Run Swatinem/rust-cache@v2=success, Post Run actions/checkout@v4=success, Complete job=success
+  job regression success 2026-10-25T19:21:28Z 2026-10-25T19:24:24Z steps: Set up job=success, Run actions/checkout@v4=success, Run actions/setup-node@v4=success, Run Swatinem/rust-cache@v2=success, Replay flows=success, Upload reports=success, Post Run Swatinem/rust-cache@v2=success, Post Run actions/setup-node@v4=success, Post Run actions/checkout@v4=success, Complete job=success
+  job e2e success 2026-10-25T19:21:28Z 2026-10-25T19:23:21Z steps: Set up job=success, Run actions/checkout@v4=success, Run actions/setup-node@v4=success, Run Swatinem/rust-cache@v2=success, Run cargo test --locked -p webtest -- --ignored --test-threads 2=success, Post Run Swatinem/rust-cache@v2=success, Post Run actions/setup-node@v4=success, Post Run actions/checkout@v4=success, Complete job=success
+
+## 8. Build inputs unchanged after X
+$ git diff --name-only b423a57 5bee9ba -- crates Cargo.toml Cargo.lock rust-toolchain rust-toolchain.toml .cargo ; git ls-tree -r --name-only 5bee9ba | grep -E "(^|/)build\.rs$"
+(diff exit 0, no output = no change)
+(no build.rs in the tree)
+H adds only plans/M2-design.md §10 and this file on top of 5bee9ba.
+
+## 9. The halt_exit host failure: raw evidence of the cause
+### 9.1 the test at X: setup() writes no identity file and spawn() passes no --identity-config; the child's stderr is discarded
+$ sed -n 39,75p crates/review-gate/tests/halt_exit.rs; sed -n 104,135p crates/review-gate/tests/halt_exit.rs   (at X)
+fn setup() -> Env {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    std::fs::create_dir(root.join("state")).unwrap();
+    std::fs::write(root.join("client.token"), TOKEN).unwrap();
+    let bt = root.join("bridge.token");
+    std::fs::write(&bt, "bridge-observer-token-0123456789abcdef").unwrap();
+    std::fs::set_permissions(&bt, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::create_dir(root.join("repo")).unwrap();
+    git(&root.join("repo"), &["init", "-q"]);
+    std::fs::create_dir(root.join("remote.git")).unwrap();
+    git(&root.join("remote.git"), &["init", "-q", "--bare"]);
+    let config = serde_json::json!({
+        "repo_id": "repo",
+        "repo": root.join("repo"),
+        "remote_url": format!("file://{}", root.join("remote.git").display()),
+        "runner_socket": root.join("runner.sock"),
+        "runner_uid": 0,
+        "runner_cgroup": "/x",
+        "job_timeout_secs": 60,
+        "auditor": "openai",
+        "implementers": ["claude"],
+        "bridge_url": "http://127.0.0.1:9",
+        "bridge_token_file": bt,
+        "writers": ["legacy-claude"],
+    });
+    std::fs::write(root.join("milestones.json"), config.to_string()).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    Env {
+        _dir: dir,
+        root,
+        port,
+    }
+...
+fn spawn(e: &Env, fault: &str) -> Service {
+    let child = Command::new(env!("CARGO_BIN_EXE_review-gate"))
+        .arg("serve")
+        .arg("--state")
+        .arg(e.root.join("state"))
+        .arg("--listen")
+        .arg(format!("127.0.0.1:{}", e.port))
+        .arg("--token-file")
+        .arg(e.root.join("client.token"))
+        .arg("--milestones")
+        .arg(e.root.join("milestones.json"))
+        .env("REVIEW_GATE_FAULT", fault)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    Service(child)
+}
+
+/// Waits until the child answers /health.
+fn wait_ready(e: &Env, child: &mut Child) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the service exited early"
+        );
+        if std::net::TcpStream::connect(("127.0.0.1", e.port)).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+
+### 9.2 the service at X: the identity configuration defaults to /etc/review-gate/identity.json when that file exists
+$ sed -n 54,58p crates/review-gate/src/main.rs; grep -n DEFAULT_CONFIG crates/review-gate/src/identity.rs; sed -n 397,410p crates/review-gate/src/main.rs   (at X)
+        /// Administrator-managed identities: credential hashes → principal and canonical
+        /// family. Defaults to /etc/review-gate/identity.json when that file exists; if it
+        /// exists but does not load, the service refuses to start (no legacy fallback).
+        #[arg(long)]
+        identity_config: Option<PathBuf>,
+29:pub const DEFAULT_CONFIG: &str = "/etc/review-gate/identity.json";
+fn default_config_present(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(anyhow::anyhow!(
+            "cannot inspect identity configuration {}: {e}",
+            path.display()
+        )),
+    }
+}
+
+async fn run(cli: Cli) -> Result<ExitCode> {
+    match cli.cmd {
+        Cmd::Serve {
+
+### 9.3 manual reproduction with the test's arguments and files, stderr kept (2026-10-26T18:54:17Z)
+$ (same files as halt_exit.rs setup(); client.token mode 0644 as written by the test)
+$ review-gate serve --state <tmp>/state --listen 127.0.0.1:47811 --token-file <tmp>/client.token --milestones <tmp>/milestones.json   (debug build from X, REVIEW_GATE_FAULT=halt-on=<tmp>/halt as in the test)
+error: reading identity configuration /etc/review-gate/identity.json: opening /etc/review-gate/identity.json (symlinks are not followed): Permission denied (os error 13)
+exit 2
+$ the same in bwrap with /etc/review-gate hidden (as on CI): the service starts and listens until timeout 5 ends it
+exit 124 (124 = killed by timeout after 5 s, i.e. it was running)
+$ ls -l /etc/review-gate/identity.json  (as root)
+-rw-r----- root:reviewgate /etc/review-gate/identity.json
+
+### 9.4 the sandbox run executed the same test and it passed
+631:     Running tests/halt_exit.rs (/home/administrator/projects/Chrome-MCP-m2-build-b423a57-target-test/debug/deps/halt_exit-9529365f04eb2d77)
+634:test without_the_feature_faults_are_ignored ... ok
+636:test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+### 9.5 status: a known test-isolation defect of X (the test depends on the host's /etc/review-gate). It is not fixed in H (H changes no code). It is registered as a blocking condition of m2d (task book §10.3); only a fix in a later commit or the user's explicit waiver resolves it.
+
+## 10. Reproducible build: X rebuilt today gives the deployed digests
+$ cd /home/administrator/projects/Chrome-MCP-m2-build-b423a57   # detached at X, status clean; same worktree path as the 2026-10-26 build
+$ CARGO_TARGET_DIR=<new empty dir> cargo build --release --locked -p review-gate -p audit-runner
+HEAD b423a579139fb5e7f47e64e976755a900ade547c, status lines 0
+69b3d3a6b5e0b5e982a8191d47a5dcfde6d6d34f5caa0accade53e7c07184f07  <worktree>-target-repro/release/review-gate
+c9a66da9442758d85c8411064d1a67753339efab854fe491bcfc79b2293940b3  <worktree>-target-repro/release/audit-runner
+Deployed (section 4): review-gate 69b3d3a6b5e0b5e982a8191d47a5dcfde6d6d34f5caa0accade53e7c07184f07, audit-runner c9a66da9442758d85c8411064d1a67753339efab854fe491bcfc79b2293940b3: identical.
+agent-bridge was built separately (-p agent-bridge only, RUNBOOK §1); not rebuilt here.
