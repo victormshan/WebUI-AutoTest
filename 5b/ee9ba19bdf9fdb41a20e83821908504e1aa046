@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-step8-deploy-2
+version: 3/3
+commit: 5bee9ba19bdf9fdb41a20e83821908504e1aa046
+tree: 4901589fd424ca002e10edcf72fe5b0732b13629
+parent: 0bf07bb0b7fe62781771e80487ad9df724f1cf58
+review: v3-2
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-26T18:18:05Z
+signature: 3xkDD2QbDUCaMv7uaUs2Tj1/o2GgrMqwdRqyR3oG8FnSW9tgfRfBwIIfrKvAARvEVFtv02dN0nACZ0ysQq9xDQ==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
