@@ -478,12 +478,20 @@ pub fn judge(i: &Inputs) -> Outcome {
             }
             let matched: BTreeSet<&String> = member.values().flatten().collect();
             phase_tasks = member.get(i.phase).cloned().unwrap_or_default();
+            // This phase's own tasks are facts of its range; the tasks it carries from the
+            // phases it supersedes go through the user's drops like any carried source (m2e/A228-1).
+            let mine = own(i.phase);
             for id in &phase_tasks {
                 if let Some(Err(why)) = chains.get(id.as_str()) {
                     sources_reasons.push(why.clone());
                 }
                 if let Some(t) = tasks.get(id.as_str()) {
                     for p in &t.participants {
+                        if !mine.contains(id.as_str())
+                            && dropped.contains(source_key(Source::Bridge, p).as_str())
+                        {
+                            continue;
+                        }
                         participants.push(Participant {
                             name: p.clone(),
                             source: Source::Bridge,
@@ -966,6 +974,49 @@ mod tests {
                 .iter()
                 .any(|p| p.name == "victormshan" && p.seen_in.starts_with("o ")),
             "only the dropped one is gone"
+        );
+    }
+
+    /// m2e/A228-1: a bridge task of a superseded phase still exists, so its participants are
+    /// carried through the task as well as through the request; a drop removes them there too,
+    /// while the same name in this phase's own task stays.
+    #[test]
+    fn a_drop_removes_a_carried_bridge_task_participant_but_not_an_own_one() {
+        let mut c = Case::new();
+        c.tasks.retain(|(t, _)| t.id != "z");
+        c.tasks.push(task("o-x", None, "codex", "claude", -20, &[]));
+        let o = c.run();
+        assert!(
+            !o.independent,
+            "codex, carried from O's task, shares the auditor's vendor"
+        );
+        assert!(o.tasks.contains("o-x"), "{:?}", o.tasks);
+        c.add(
+            "p",
+            "source_dropped",
+            json!({"source": "bridge:codex", "reason": "r"}),
+        );
+        let o = c.run();
+        assert!(o.independent, "{:?}", o.independence_reasons);
+        assert!(
+            !o.participants.iter().any(|p| p.name == "codex"),
+            "{:?}",
+            o.participants
+        );
+        assert!(
+            o.participants
+                .iter()
+                .any(|p| p.name == "claude" && p.seen_in == "o-x"),
+            "only the dropped name is removed from the carried task"
+        );
+        // The same name in one of P's own tasks is a fact of P's range: no drop removes it.
+        c.tasks.push(task("p-y", None, "codex", "claude", 1, &[]));
+        let o = c.run();
+        assert!(!o.independent, "an own task's participant stays");
+        assert!(
+            o.participants
+                .iter()
+                .any(|p| p.name == "codex" && p.seen_in == "p-y")
         );
     }
 
