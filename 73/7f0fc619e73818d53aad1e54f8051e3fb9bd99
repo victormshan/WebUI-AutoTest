@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-fixes-a228
+version: 2/3
+commit: 737f0fc619e73818d53aad1e54f8051e3fb9bd99
+tree: b2ef833deb90d188799b1f943aeef08e19ba6995
+parent: 8894f3c94b773cad2e071e901d532038bb5a04f6
+review: v2-2
+reviewer: web-gemini/web-gemini
+verdict: approved
+at: 2026-10-27T22:28:46Z
+signature: FNrKbJQOgT/MSVejl6tTrQFeD62FPfISSaGuZgQYxJz9Z9QxE1NOr+OArJ+7umYG24xe57hZI38q8A6QDYNDBw==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
