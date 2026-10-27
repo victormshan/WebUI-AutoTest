@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: m2-fixes
+version: 1/3
+commit: 8a2bfe36e25c52d457653b0d3f61ca1884335c45
+tree: 7e2a5a53d33c8760d4f841ec2e986c2c99d618cf
+parent: d7a062ddc40d47d76cd6f1168961f6fdbb0ed4e1
+review: v1-1
+reviewer: manual/manual
+verdict: approved
+at: 2026-10-27T17:29:19Z
+signature: HEswr8i57vl91f9RgO4urOyxqbfTYhqrcdhORsNdDYfFoPk0qAq77yEx2WPIE9EebCo3GhqSdeljyCqQ0bZ3CQ==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
