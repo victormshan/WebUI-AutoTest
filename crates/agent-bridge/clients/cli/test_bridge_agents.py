@@ -193,7 +193,9 @@ class ConnectorTest(Harness):
 
     def test_timeout_is_uncertain_and_does_not_replay_automatically(self):
         self.send('claude','codex','timeout')
-        args=self.args('codex');args.timeout=.15
+        # 3 s: long enough for the fake client to start and record the call on a loaded machine
+        # (0.15 s was outrun on 2026-10-27), still far below its 20 s sleep.
+        args=self.args('codex');args.timeout=3
         os.environ['FAKE_SLEEP']='1'
         state=self.root/'worker-codex';state.mkdir()
         self.assertFalse(client.worker_once(args,self.agents['codex'],state))
@@ -628,7 +630,8 @@ class ConnectorTest(Harness):
 
     def test_worker_monitor_never_assumes_cancelled_when_service_errors(self):
         # A monitor that raises (service unavailable) must not be read as a cancellation.
-        args=self.args('codex');args.timeout=.4;args.cancel_poll=.1
+        # 3 s: see test_timeout_is_uncertain_and_does_not_replay_automatically.
+        args=self.args('codex');args.timeout=3;args.cancel_poll=.1
         state=self.root/'worker-codex';state.mkdir(exist_ok=True)
         self.send('claude','codex','monitor-err')
         os.environ['FAKE_SLEEP']='1'

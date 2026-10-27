@@ -2639,15 +2639,28 @@ pub(crate) mod tests {
             ..Timing::default()
         };
         let (e, s) = start_push(&notify_url, timing).await;
+        // Pushes are sent asynchronously: wait (bounded) until at least `n` have arrived, then
+        // settle so that any extra one would show too. A fixed pause alone is outrun on a
+        // loaded machine (seen on 2026-10-27 in a full workspace run).
+        let calls_at_least = |n: usize| {
+            let calls = calls.clone();
+            async move {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while calls.lock().unwrap().len() < n && std::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                settle().await;
+            }
+        };
         e.post(CLAUDE, "/v1/tasks", task_body("t")).await;
-        settle().await;
+        calls_at_least(1).await;
         let now = Utc::now();
         s.tick(now + chrono::Duration::minutes(5));
         settle().await;
         assert_eq!(calls.lock().unwrap().len(), 1, "too early to re-wake");
         s.tick(now + chrono::Duration::minutes(16));
         s.tick(now + chrono::Duration::minutes(30));
-        settle().await;
+        calls_at_least(2).await;
         assert_eq!(calls.lock().unwrap().len(), 2, "re-woken exactly once");
         assert_eq!(calls.lock().unwrap()[1].1["n"], 1);
 
@@ -2655,7 +2668,8 @@ pub(crate) mod tests {
         e.post(CLAUDE, "/v1/tasks", json!({ "id": "u", "kind": "task", "protocol": PROTOCOL, "meta": { "to": "dsh", "title": "u" } })).await;
         e.post(DSH, "/v1/inbox/ack", json!({ "task": "u", "n": 1 }))
             .await;
-        settle().await;
+        // u's own first push, before the baseline is taken.
+        calls_at_least(3).await;
         let before = calls.lock().unwrap().len();
         s.tick(now + chrono::Duration::minutes(20));
         settle().await;
@@ -2664,14 +2678,23 @@ pub(crate) mod tests {
         // A day without progress: stalled, the user sees it, and DSH is told once per cooldown.
         s.tick(now + chrono::Duration::hours(25));
         s.tick(now + chrono::Duration::hours(26));
+        // The notices are sent asynchronously: wait for them (bounded) instead of a fixed
+        // pause, which a loaded machine can outrun (seen on 2026-10-27 in a full run).
+        let stalled_now = || -> Vec<Value> {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.1["kind"] == "stalled")
+                .map(|c| c.1.clone())
+                .collect()
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while stalled_now().len() < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         settle().await;
-        let stalled: Vec<Value> = calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|c| c.1["kind"] == "stalled")
-            .map(|c| c.1.clone())
-            .collect();
+        let stalled = stalled_now();
         assert_eq!(
             stalled.len(),
             2,
