@@ -37,6 +37,9 @@ pub struct Snapshot {
     pub stop: Option<String>,
     /// The checkpoint file was rebuilt from the log's last `archived` record (normal crash gap).
     pub rebuilt: bool,
+    /// When `stop` is a checkpoint file ahead of, or in conflict with, the log: the file's
+    /// position, which only the remote can prove (§3.7; m2a/A206-4).
+    pub unproven: Option<Checkpoint>,
 }
 
 pub struct Ledger {
@@ -98,6 +101,12 @@ impl Ledger {
         Ok(f)
     }
 
+    /// The log read and verified without writing anything (no lock file, no checkpoint
+    /// reconciliation): for reads while the service is draining (m2c/A214-1).
+    pub fn read_unwritten(&self) -> Result<ReadOnly> {
+        read_only(&self.dir, &self.repo, &self.key)
+    }
+
     /// A verified snapshot (reconciling the checkpoint as §3.7 says). An unreadable, cut-off
     /// or tampered log is an error: nothing is derived from it.
     pub fn load(&self) -> Result<Snapshot> {
@@ -119,6 +128,7 @@ impl Ledger {
             checkpoint: 0,
             stop: None,
             rebuilt: false,
+            unproven: None,
         };
         self.reconcile(&mut snap)?;
         Ok(snap)
@@ -179,6 +189,7 @@ impl Ledger {
                         "checkpoint file names record {} with hash {} that is not in the log: check the remote",
                         f.seq, f.hash
                     ));
+                    snap.unproven = Some(f);
                 } else {
                     self.write_checkpoint(&l)?;
                     snap.checkpoint = l.seq;
@@ -188,7 +199,10 @@ impl Ledger {
             // Ahead of the log, or the same position with another hash, or a checkpoint while the
             // log has no archived record: never lowered silently, or a rolled-back remote could go
             // unnoticed (§3.7).
-            (l, Some(f)) => snap.stop = Some(ahead(&f, l.as_ref())),
+            (l, Some(f)) => {
+                snap.stop = Some(ahead(&f, l.as_ref()));
+                snap.unproven = Some(f);
+            }
         }
         Ok(())
     }
@@ -304,29 +318,108 @@ impl Ledger {
         });
         let sync = classify(&snap.records, remote, cp.as_ref(), &self.key, &self.repo);
         if let Sync::RemoteAhead { extra } = &sync {
-            let mut all = snap.records.clone();
-            all.extend(extra.iter().cloned());
-            verify_chain(&all, &self.key, &self.repo)?;
-            let new = !self.log_path().exists();
-            let mut f = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(self.log_path())?;
-            for r in extra {
-                let line = r.to_line()?;
-                let back = parse_log(&format!("{line}\n"))?;
-                if back.len() != 1 || back[0].compute_hash()? != r.hash || back[0] != *r {
-                    bail!("remote record {} does not survive a round trip", r.seq);
-                }
-                f.write_all(format!("{line}\n").as_bytes())?;
-                f.sync_all()?;
-            }
-            if new {
-                File::open(&self.dir)?.sync_all()?;
-            }
-            snap.records = all;
+            self.append_verified(snap, extra)?;
         }
         Ok(sync)
+    }
+
+    /// Appends records that continue the local chain (each checked to survive a round trip),
+    /// with fsync, and adds them to `snap`.
+    fn append_verified(&self, snap: &mut Snapshot, extra: &[Record]) -> Result<()> {
+        let mut all = snap.records.clone();
+        all.extend(extra.iter().cloned());
+        verify_chain(&all, &self.key, &self.repo)?;
+        let new = !self.log_path().exists();
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.log_path())?;
+        for r in extra {
+            let line = r.to_line()?;
+            let back = parse_log(&format!("{line}\n"))?;
+            if back.len() != 1 || back[0].compute_hash()? != r.hash || back[0] != *r {
+                bail!("remote record {} does not survive a round trip", r.seq);
+            }
+            f.write_all(format!("{line}\n").as_bytes())?;
+            f.sync_all()?;
+        }
+        if new {
+            File::open(&self.dir)?.sync_all()?;
+        }
+        snap.records = all;
+        Ok(())
+    }
+
+    /// §3.7 (m2a/A206-4): a checkpoint file ahead of, or in conflict with, the log continues
+    /// only if the remote proves it: the remote verifies, holds the checkpoint's `(seq, hash)`,
+    /// and continues the local chain. Then the local chain is filled in from the remote, an
+    /// `archived` record for the checkpoint is appended if the log has none, and the snapshot
+    /// is loaded again. Otherwise the log stays stopped (for the user), with why. The checkpoint
+    /// is never lowered: the file is only ever rewritten with the same position.
+    fn recover_checkpoint(
+        &self,
+        kp: &Keypair,
+        at: &str,
+        snap: &mut Snapshot,
+        remote: &Remote,
+    ) -> Result<()> {
+        let Some(f) = snap.unproven.clone() else {
+            return Ok(());
+        };
+        let proof = (|| -> std::result::Result<Vec<Record>, String> {
+            let remote_records = match remote {
+                Remote::Log(text) => {
+                    parse_log(text).map_err(|e| format!("remote log unreadable: {e}"))?
+                }
+                Remote::Missing => return Err("the remote has no log".into()),
+                Remote::Unreachable(why) => return Err(format!("unreachable: {why}")),
+            };
+            verify_chain(&remote_records, &self.key, &self.repo)
+                .map_err(|e| format!("remote log fails verification: {e}"))?;
+            match remote_records.get((f.seq as usize).wrapping_sub(1)) {
+                Some(r) if f.seq >= 1 && r.hash == f.hash => {}
+                _ => {
+                    return Err(format!(
+                        "it does not hold record {} with hash {}",
+                        f.seq, f.hash
+                    ));
+                }
+            }
+            let prefix = snap.records.len() <= remote_records.len()
+                && snap
+                    .records
+                    .iter()
+                    .zip(&remote_records)
+                    .all(|(a, b)| a == b);
+            if !prefix {
+                return Err("the local log is not a prefix of the remote one".into());
+            }
+            Ok(remote_records)
+        })();
+        let remote_records = match proof {
+            Ok(r) => r,
+            Err(why) => {
+                let base = snap.stop.clone().unwrap_or_default();
+                snap.stop = Some(format!("{base}; the remote does not prove it: {why}"));
+                return Ok(());
+            }
+        };
+        let extra = remote_records[snap.records.len()..].to_vec();
+        self.append_verified(snap, &extra)?;
+        if last_archived(&snap.records).ok().flatten().map(|c| c.seq) < Some(f.seq) {
+            self.append_locked(
+                kp,
+                at,
+                snap,
+                Draft {
+                    kind: "archived".into(),
+                    phase: String::new(),
+                    body: json!({"seq": f.seq, "hash": f.hash}),
+                },
+            )?;
+        }
+        *snap = self.load_locked()?;
+        Ok(())
     }
 
     /// Archives exactly as far as this remote read proves (Codex review of b5693bb, P1): under
@@ -341,6 +434,7 @@ impl Ledger {
     ) -> Result<(Sync, Option<Record>)> {
         let _lock = self.lock()?;
         let mut snap = self.load_locked()?;
+        self.recover_checkpoint(kp, at, &mut snap, remote)?;
         let sync = self.import_locked(&mut snap, remote)?;
         let held = match &sync {
             // After an import the local log is exactly the remote's.
@@ -629,6 +723,174 @@ mod tests {
             note_err(&l).contains("stopped"),
             "appends refused while stopped"
         );
+    }
+
+    /// §3.7, m2a/A206-4: the remote proves the checkpoint, so the rolled-back local log is
+    /// filled in from it, the `archived` record is written again, and the log continues; the
+    /// checkpoint file keeps its position.
+    #[test]
+    fn a_rolled_back_log_is_filled_in_from_a_remote_that_proves_the_checkpoint() {
+        let d = tempfile::tempdir().unwrap();
+        let l = ledger(d.path());
+        let r = note(&l, 1);
+        note(&l, 2);
+        let published = fs::read_to_string(d.path().join("log.jsonl")).unwrap();
+        l.archive(&kp(), "t", 2, &l.load().unwrap().records[1].hash)
+            .unwrap();
+        let cp_before = fs::read(d.path().join("checkpoint.json")).unwrap();
+        fs::write(
+            d.path().join("log.jsonl"),
+            format!("{}\n", r.to_line().unwrap()),
+        )
+        .unwrap();
+        let s = l.load().unwrap();
+        assert!(s.stop.is_some());
+        assert_eq!(s.unproven.as_ref().map(|c| c.seq), Some(2));
+        l.archive_remote(&kp(), "t", &Remote::Log(published))
+            .unwrap();
+        let s = l.load().unwrap();
+        assert_eq!(s.stop, None, "recovered");
+        assert_eq!(s.checkpoint, 2);
+        assert_eq!(
+            s.records.len(),
+            3,
+            "records 1-2 from the remote, then archived"
+        );
+        assert_eq!(s.records[2].kind, "archived");
+        assert_eq!(
+            s.records[2].body,
+            json!({"seq": 2, "hash": s.records[1].hash})
+        );
+        assert_eq!(
+            fs::read(d.path().join("checkpoint.json")).unwrap(),
+            cp_before,
+            "the checkpoint keeps its position"
+        );
+        note(&l, 3);
+    }
+
+    #[test]
+    fn a_remote_that_does_not_prove_the_checkpoint_leaves_the_log_stopped() {
+        let d = tempfile::tempdir().unwrap();
+        let l = ledger(d.path());
+        let r = note(&l, 1);
+        let only_first = fs::read_to_string(d.path().join("log.jsonl")).unwrap();
+        note(&l, 2);
+        l.archive(&kp(), "t", 2, &l.load().unwrap().records[1].hash)
+            .unwrap();
+        let cp_before = fs::read(d.path().join("checkpoint.json")).unwrap();
+        let rolled_back = format!("{}\n", r.to_line().unwrap());
+        fs::write(d.path().join("log.jsonl"), &rolled_back).unwrap();
+        for (remote, why) in [
+            (Remote::Log(only_first), "does not hold record 2"),
+            (Remote::Missing, "no log"),
+            (Remote::Unreachable("down".into()), "unreachable"),
+        ] {
+            let (sync, archived) = l.archive_remote(&kp(), "t", &remote).unwrap();
+            assert!(matches!(sync, Sync::Stop(_)), "{sync:?}");
+            assert!(archived.is_none());
+            let s = l.load().unwrap();
+            assert!(s.stop.is_some(), "still stopped");
+            let (_, a) = l.archive_remote(&kp(), "t", &remote).unwrap();
+            assert!(a.is_none());
+            let (sync, _) = l.import_and_load(&remote).unwrap();
+            let Sync::Stop(text) = sync else {
+                panic!("not stopped")
+            };
+            assert!(text.contains("local log stopped"), "{text}");
+            // The reason recorded for the user names why the remote does not prove it.
+            let mut snap = l.load().unwrap();
+            l.recover_checkpoint(&kp(), "t", &mut snap, &remote)
+                .unwrap();
+            assert!(
+                snap.stop.as_deref().unwrap().contains(why),
+                "{:?}",
+                snap.stop
+            );
+            assert_eq!(
+                fs::read_to_string(d.path().join("log.jsonl")).unwrap(),
+                rolled_back
+            );
+            assert_eq!(
+                fs::read(d.path().join("checkpoint.json")).unwrap(),
+                cp_before
+            );
+        }
+    }
+
+    /// Codex review of the fixes, item 6: a validly signed fork at the checkpoint's position.
+    /// The remote proves the checkpoint, but the local log is not a prefix of it, so nothing is
+    /// filled in and the log stays stopped.
+    #[test]
+    fn a_signed_fork_at_the_checkpoint_position_is_not_filled_in() {
+        let d = tempfile::tempdir().unwrap();
+        let l = ledger(d.path());
+        let r1 = note(&l, 1);
+        note(&l, 2);
+        let published = fs::read_to_string(d.path().join("log.jsonl")).unwrap();
+        l.archive(&kp(), "t", 2, &l.load().unwrap().records[1].hash)
+            .unwrap();
+        // The same first record, then another validly signed record 2.
+        let other = tempfile::tempdir().unwrap();
+        fs::write(
+            other.path().join("log.jsonl"),
+            format!("{}\n", r1.to_line().unwrap()),
+        )
+        .unwrap();
+        let o = ledger(other.path());
+        note(&o, 99);
+        let forked = fs::read_to_string(other.path().join("log.jsonl")).unwrap();
+        fs::write(d.path().join("log.jsonl"), &forked).unwrap();
+        let cp_before = fs::read(d.path().join("checkpoint.json")).unwrap();
+        assert!(l.load().unwrap().stop.is_some(), "the hash conflict stops");
+        let mut snap = l.load().unwrap();
+        l.recover_checkpoint(&kp(), "t", &mut snap, &Remote::Log(published.clone()))
+            .unwrap();
+        assert!(
+            snap.stop.as_deref().unwrap().contains("not a prefix"),
+            "{:?}",
+            snap.stop
+        );
+        let (sync, a) = l
+            .archive_remote(&kp(), "t", &Remote::Log(published))
+            .unwrap();
+        assert!(matches!(sync, Sync::Stop(_)) && a.is_none(), "{sync:?}");
+        assert_eq!(
+            fs::read_to_string(d.path().join("log.jsonl")).unwrap(),
+            forked
+        );
+        assert_eq!(
+            fs::read(d.path().join("checkpoint.json")).unwrap(),
+            cp_before
+        );
+    }
+
+    /// Codex review of the fixes, item 6: a crash after the remote's records were appended but
+    /// before the `archived` record. The next attempt finds a local log equal to the remote and
+    /// completes the recovery.
+    #[test]
+    fn a_recovery_cut_off_before_its_archived_record_completes_next_time() {
+        let d = tempfile::tempdir().unwrap();
+        let l = ledger(d.path());
+        note(&l, 1);
+        note(&l, 2);
+        let published = fs::read_to_string(d.path().join("log.jsonl")).unwrap();
+        l.archive(&kp(), "t", 2, &l.load().unwrap().records[1].hash)
+            .unwrap();
+        // As left by the crash: the remote's records, no archived record.
+        fs::write(d.path().join("log.jsonl"), &published).unwrap();
+        let s = l.load().unwrap();
+        assert!(
+            s.stop.is_some(),
+            "the checkpoint is still ahead of the log's archived records"
+        );
+        l.archive_remote(&kp(), "t", &Remote::Log(published))
+            .unwrap();
+        let s = l.load().unwrap();
+        assert_eq!(s.stop, None);
+        assert_eq!(s.checkpoint, 2);
+        assert_eq!(s.records.len(), 3);
+        assert_eq!(s.records[2].kind, "archived");
     }
 
     #[test]

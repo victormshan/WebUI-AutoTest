@@ -117,6 +117,121 @@ async fn every_milestone_write_is_refused_while_draining_and_the_log_is_unchange
     assert_eq!(h["m2_pending"], 0, "{h}");
 }
 
+/// Every file under `dir` (the milestone state: log, checkpoint, lock files, temporary files)
+/// with its content and modification time, so a write of any kind shows.
+fn manifest(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let e = e.unwrap();
+            let p = e.path();
+            let m = e.metadata().unwrap();
+            if m.is_dir() {
+                todo.push(p);
+            } else {
+                out.push((p.clone(), std::fs::read(&p).unwrap(), m.modified().unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// m2c/A214-1: while draining, a status or log read writes nothing. Here the remote holds the
+/// whole log, so a status read would archive it (append an `archived` record) when not
+/// draining; while draining it answers from the local log and the file stays byte for byte.
+#[tokio::test(flavor = "multi_thread")]
+async fn reads_while_draining_write_nothing_even_when_a_status_would_archive() {
+    let fx = Fx::new();
+    let f = fx.service();
+    fx.register(&f);
+    fx.publish(&f);
+    let drain = Drain::new(None);
+    let url = start(f.clone(), &fx.root, drain.clone()).await;
+    drain.latch("test".into());
+    let before = manifest(&fx.root.join("state"));
+    let (c, v) = call(&url, "GET", "/milestones/p", None).await;
+    assert_eq!(c, 200, "{v}");
+    assert_eq!(v["released"], false, "{v}");
+    assert_eq!(v["sync"], "NotChecked", "{v}");
+    assert!(
+        v["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r.as_str().unwrap().starts_with("draining:")),
+        "{v}"
+    );
+    let (c, _) = call(&url, "GET", "/milestones/log", None).await;
+    assert_eq!(c, 200);
+    assert_eq!(
+        manifest(&fx.root.join("state")),
+        before,
+        "nothing was written"
+    );
+    let h = health(&url).await;
+    assert_eq!(h["drain"]["idle"], true, "{h}");
+    assert_eq!(
+        manifest(&fx.root.join("state")),
+        before,
+        "health wrote nothing either"
+    );
+}
+
+/// A phase that was released before the drain is not shown as released while draining, at
+/// either level, and the reason says why (Codex review of the fixes, item 4).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_released_phase_is_not_shown_released_while_draining() {
+    let fx = Fx::new();
+    let f = fx.service();
+    f.apply("p", &fx.base, "plans/book.md", "ev", vec![], None)
+        .unwrap();
+    f.confirm("p").unwrap();
+    *fx.mode.lock().unwrap() = Mode::Answer("VERDICT: APPROVE\n".into());
+    f.request("p", &fx.head).unwrap();
+    let g = f.clone();
+    tokio::task::spawn_blocking(move || settled(&g, "p"))
+        .await
+        .unwrap();
+    fx.publish(&f);
+    let g = f.clone();
+    let st = tokio::task::spawn_blocking(move || g.status_archived("p").unwrap())
+        .await
+        .unwrap();
+    assert!(st.released && st.state.released, "{:?}", st.reasons);
+    let drain = Drain::new(None);
+    let url = start(f.clone(), &fx.root, drain.clone()).await;
+    drain.latch("test".into());
+    let (c, v) = call(&url, "GET", "/milestones/p", None).await;
+    assert_eq!(c, 200, "{v}");
+    assert_eq!(v["released"], false, "{v}");
+    assert_eq!(v["state"]["released"], false, "{v}");
+    for r in [&v["reasons"], &v["state"]["reasons"]] {
+        assert!(
+            r.as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x.as_str().unwrap().starts_with("draining:")),
+            "{v}"
+        );
+    }
+}
+
+/// The control case: without the drain the same status read does archive.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_the_drain_the_same_status_read_archives() {
+    let fx = Fx::new();
+    let f = fx.service();
+    fx.register(&f);
+    fx.publish(&f);
+    let url = start(f.clone(), &fx.root, Drain::new(None)).await;
+    let n = records(&f);
+    let (c, v) = call(&url, "GET", "/milestones/p", None).await;
+    assert_eq!(c, 200, "{v}");
+    assert_eq!(records(&f), n + 1, "an archived record was appended");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_admitted_before_the_drain_is_counted_until_its_result_is_on_file() {
     let fx = Fx::new();

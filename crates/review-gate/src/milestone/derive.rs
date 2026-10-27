@@ -209,7 +209,35 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
     let mut requests: BTreeMap<String, u64> = BTreeMap::new();
 
     let mut bad: Vec<String> = Vec::new();
-    for r in records.iter().filter(|r| r.phase == phase) {
+    // The last seq covered by an `archived` record seen so far: a release only happens once
+    // every record it rests on is archived (§3.4 ② item 7), and only a release ends the run of
+    // rejections (§3.4 ④; m2a/A206-2).
+    let mut archived_upto = 0u64;
+    for r in records {
+        if r.kind == "archived" && r.phase.is_empty() {
+            if let Some(q) = r.body.get("seq").and_then(Value::as_u64) {
+                archived_upto = archived_upto.max(q);
+            }
+            if released_at(
+                &st,
+                revoked_after_request,
+                &release_needs(
+                    &st,
+                    records,
+                    phase,
+                    registration_seq,
+                    &source_records,
+                    r.seq,
+                ),
+                archived_upto,
+            ) {
+                st.count = 0;
+            }
+            continue;
+        }
+        if r.phase != phase {
+            continue;
+        }
         let b = &r.body;
         if let Some(why) = malformed(r) {
             bad.push(why);
@@ -429,9 +457,21 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
         }
         // The run of rejections ends with a release (§3.4 ④), not with an approval alone: an
         // approval that still leaves a blocking condition open does not reset the count (DSH
-        // review note N1). Archival is left out here, so the count does not depend on how far
-        // the log has been published; it only decides whether the release is visible.
-        if eligible_apart_from_archival(&st, revoked_after_request) {
+        // review note N1), and neither does one whose records are not archived yet (m2a/A206-2:
+        // the release needs them archived, §3.4 ② item 7).
+        if released_at(
+            &st,
+            revoked_after_request,
+            &release_needs(
+                &st,
+                records,
+                phase,
+                registration_seq,
+                &source_records,
+                r.seq,
+            ),
+            archived_upto,
+        ) {
             st.count = 0;
         }
         if st.count >= THRESHOLD {
@@ -498,22 +538,6 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
                 Some(v) => why.push(format!("verdict {v}")),
                 None => why.push("no valid audit of the current request".into()),
             }
-            needed.extend(
-                [Some(c.seq), c.audit_seq, c.closed_seq]
-                    .into_iter()
-                    .flatten(),
-            );
-            needed.extend(
-                records
-                    .iter()
-                    .filter(|r| {
-                        r.phase == phase
-                            && r.kind == "job"
-                            && s(&r.body, "request_id") == c.request_id
-                    })
-                    .map(|r| r.seq),
-            );
-            needed.extend(source_records.iter().filter(|q| **q < c.seq));
         }
     }
     if revoked_after_request {
@@ -528,14 +552,14 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
         let ids: Vec<&str> = open.iter().map(|c| c.id.as_str()).collect();
         why.push(format!("open blocking conditions: {}", ids.join(", ")));
     }
-    needed.extend(registration_seq);
-    needed.extend(st.baseline_seq);
-    needed.extend(
-        st.conditions
-            .iter()
-            .filter(|c| c.blocking)
-            .filter_map(|c| c.closed.as_ref().map(|x| x.1)),
-    );
+    needed.extend(release_needs(
+        &st,
+        records,
+        phase,
+        registration_seq,
+        &source_records,
+        u64::MAX,
+    ));
     let unarchived: Vec<u64> = needed.into_iter().filter(|q| *q > checkpoint).collect();
     if !unarchived.is_empty() {
         why.push(format!(
@@ -550,6 +574,53 @@ fn derive_inner(records: &[Record], phase: &str, checkpoint: u64, depth: usize) 
     st.released = why.is_empty();
     st.reasons = why;
     st
+}
+
+/// The records a release of the current state rests on, among those up to `upto` (§3.4 ②
+/// item 7): the current request, its jobs, audit and closure, the source records before it,
+/// the registration, the baseline in force and every closure of a blocking condition.
+fn release_needs(
+    st: &PhaseState,
+    records: &[Record],
+    phase: &str,
+    registration_seq: Option<u64>,
+    source_records: &[u64],
+    upto: u64,
+) -> BTreeSet<u64> {
+    let mut n = BTreeSet::new();
+    if let Some(c) = &st.current {
+        n.extend(
+            [Some(c.seq), c.audit_seq, c.closed_seq]
+                .into_iter()
+                .flatten(),
+        );
+        n.extend(
+            records
+                .iter()
+                .filter(|r| {
+                    r.seq <= upto
+                        && r.phase == phase
+                        && r.kind == "job"
+                        && s(&r.body, "request_id") == c.request_id
+                })
+                .map(|r| r.seq),
+        );
+        n.extend(source_records.iter().filter(|q| **q < c.seq));
+    }
+    n.extend(registration_seq);
+    n.extend(st.baseline_seq);
+    n.extend(
+        st.conditions
+            .iter()
+            .filter(|c| c.blocking)
+            .filter_map(|c| c.closed.as_ref().map(|x| x.1)),
+    );
+    n
+}
+
+/// Whether the state is released once everything up to `archived_upto` is archived.
+fn released_at(st: &PhaseState, revoked: bool, needs: &BTreeSet<u64>, archived_upto: u64) -> bool {
+    eligible_apart_from_archival(st, revoked) && needs.iter().all(|q| *q <= archived_upto)
 }
 
 /// Whether the current request would release the phase if every record were archived.
@@ -616,6 +687,13 @@ mod tests {
 
         fn last(&self) -> u64 {
             self.recs.len() as u64
+        }
+
+        /// An `archived` record covering everything so far (as the ledger writes it).
+        fn archive(&mut self) -> u64 {
+            let last = self.recs.last().unwrap();
+            let body = json!({"seq": last.seq, "hash": last.hash});
+            self.add("", "archived", body)
         }
 
         fn register(&mut self, phase: &str, conds: &[&str]) -> u64 {
@@ -1068,13 +1146,46 @@ mod tests {
         l.audit("p", "r2", "APPROVE", &["c1"]);
         l.close("p", "r2", "completed");
         assert_eq!(
-            l.state("p", 0).count,
+            l.state("p", l.last()).count,
+            2,
+            "not released before its records are archived, so no reset yet (m2a/A206-2)"
+        );
+        l.archive();
+        assert_eq!(
+            l.state("p", l.last()).count,
             0,
-            "reset even before the log is archived"
+            "the archived release ends the run"
         );
         l.request("p", "r3", reg);
         l.audit("p", "r3", "REWORK", &[]);
         assert_eq!(l.state("p", l.last()).count, 1);
+    }
+
+    #[test]
+    fn an_approval_that_is_never_archived_does_not_end_the_run() {
+        // m2a/A206-2's case: REWORK, REWORK, an approval left unarchived, REWORK: three in a
+        // row, so the phase pauses.
+        let mut l = Log::new();
+        let reg = l.register("p", &[]);
+        for i in 0..2 {
+            let id = format!("r{i}");
+            l.request("p", &id, reg);
+            l.audit("p", &id, "REWORK", &[]);
+            l.close("p", &id, "completed");
+        }
+        l.request("p", "r2", reg);
+        l.audit("p", "r2", "APPROVE", &[]);
+        l.close("p", "r2", "completed");
+        // Released only once archived: with checkpoint 0 it is not.
+        assert!(!l.state("p", 0).released, "not archived");
+        l.request("p", "r3", reg);
+        l.audit("p", "r3", "REWORK", &[]);
+        l.close("p", "r3", "completed");
+        // Archiving now does not release r2 any more: r3 is the current request.
+        l.archive();
+        let st = l.state("p", l.last());
+        assert_eq!(st.count, 3);
+        assert!(st.paused);
     }
 
     #[test]
@@ -1122,6 +1233,12 @@ mod tests {
             "condition_waived",
             json!({"condition": "c1", "reason": "user"}),
         );
+        assert_eq!(
+            l.state("p", l.last()).count,
+            2,
+            "the waiver is not archived yet (m2a/A206-2)"
+        );
+        l.archive();
         assert_eq!(l.state("p", l.last()).count, 0);
     }
 

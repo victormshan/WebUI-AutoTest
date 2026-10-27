@@ -9,12 +9,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Extension;
+use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -523,6 +525,62 @@ fn check_phase(phase: &str) -> Result<(), Box<Response>> {
     }
 }
 
+/// The route order of the task book (§6): authentication (401, the middleware), then the path
+/// parameters (400, even once halted), then 404 without milestones and 503 once halted, and
+/// only then the body (m2b/A210-2: an extractor would answer 415/422 first). The same 404/503
+/// checks run again inside `guarded`.
+fn ms_open(s: &AppState) -> Result<(), Box<Response>> {
+    let Some(flow) = s.milestones.as_ref() else {
+        return Err(Box::new(
+            ApiError(StatusCode::NOT_FOUND, "milestones are not enabled".into()).into_response(),
+        ));
+    };
+    if let Some(why) = flow.halted() {
+        return Err(Box::new(halted_response(why)));
+    }
+    Ok(())
+}
+
+/// The most a milestone body may be (they are a few short fields).
+const MS_BODY_LIMIT: usize = 64 * 1024;
+
+/// A milestone body, read only after the path, the 404 and the 503 checks (m2b/A210-2, Codex
+/// review of the fixes: an extractor would read it before the handler runs, and could answer
+/// 413 or wait for a body that never comes first). Too large, cut off or not valid: 400.
+async fn ms_body<T: DeserializeOwned>(body: Body) -> Result<T, Box<Response>> {
+    // An announced length over the limit is refused before anything is read.
+    let announced = axum::body::HttpBody::size_hint(&body).lower();
+    if announced > MS_BODY_LIMIT as u64 {
+        return Err(Box::new(
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("invalid request body: {announced} bytes, more than {MS_BODY_LIMIT}"),
+            )
+            .into_response(),
+        ));
+    }
+    let bytes = axum::body::to_bytes(body, MS_BODY_LIMIT)
+        .await
+        .map_err(|e| {
+            Box::new(
+                ApiError(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid request body: {e}"),
+                )
+                .into_response(),
+            )
+        })?;
+    serde_json::from_slice(&bytes).map_err(|e| {
+        Box::new(
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("invalid request body: {e}"),
+            )
+            .into_response(),
+        )
+    })
+}
+
 /// Every milestone route goes through here (Codex n4 §3, n6): 404 without milestones; 503 if
 /// the service has halted before the call or by the time it returns, whatever the call
 /// produced; the call itself on a blocking thread. The admission boundaries stay inside the
@@ -532,7 +590,7 @@ fn check_phase(phase: &str) -> Result<(), Box<Response>> {
 /// ended, even if the client goes away and this future is dropped first.
 async fn guarded<T: Send + 'static>(
     s: &AppState,
-    op: OpGuard,
+    op: Option<OpGuard>,
     f: impl FnOnce(&Arc<Flow>) -> Result<T, FlowError> + Send + 'static,
 ) -> Result<T, Box<Response>> {
     let Some(flow) = s.milestones.clone() else {
@@ -603,18 +661,22 @@ async fn guarded_write<T: Send + 'static>(
         ));
     }
     let op = admit(s, what).map_err(|e| Box::new(e.into_response()))?;
-    guarded(s, op, f).await
+    guarded(s, Some(op), f).await
 }
 
-/// A milestone read: never refused, but counted while it runs (a status read may still
-/// complete a crash-cut group in the log).
+/// A milestone read: never refused. While not draining it is counted while it runs (a status
+/// read may still complete a crash-cut group, import or archive); once draining it runs
+/// `unwritten`, which writes nothing (m2c/A214-1). The choice is made under the drain mutex.
 async fn guarded_read<T: Send + 'static>(
     s: &AppState,
     what: &str,
     f: impl FnOnce(&Arc<Flow>) -> Result<T, FlowError> + Send + 'static,
+    unwritten: impl FnOnce(&Arc<Flow>) -> Result<T, FlowError> + Send + 'static,
 ) -> Result<T, Box<Response>> {
-    let op = s.drain.track(what);
-    guarded(s, op, f).await
+    match s.drain.read(what) {
+        Some(op) => guarded(s, Some(op), f).await,
+        None => guarded(s, None, unwritten).await,
+    }
 }
 
 fn ok_json(v: impl Serialize) -> Response {
@@ -637,8 +699,16 @@ struct ApplyBody {
 async fn ms_apply(
     State(s): State<Arc<AppState>>,
     Extension(who): Extension<Identity>,
-    Json(b): Json<ApplyBody>,
+    body: Body,
 ) -> Response {
+    // No path parameters: the gates first, then the body and the phase it names.
+    if let Err(r) = ms_open(&s) {
+        return *r;
+    }
+    let b: ApplyBody = match ms_body(body).await {
+        Ok(b) => b,
+        Err(r) => return *r,
+    };
     if let Err(r) = check_phase(&b.phase) {
         return *r;
     }
@@ -669,11 +739,18 @@ async fn ms_request(
     State(s): State<Arc<AppState>>,
     Extension(who): Extension<Identity>,
     Path(phase): Path<String>,
-    Json(b): Json<RequestBody>,
+    body: Body,
 ) -> Response {
     if let Err(r) = check_phase(&phase) {
         return *r;
     }
+    if let Err(r) = ms_open(&s) {
+        return *r;
+    }
+    let b: RequestBody = match ms_body(body).await {
+        Ok(b) => b,
+        Err(r) => return *r,
+    };
     match guarded_write(&s, &who, "milestone request", move |f| {
         f.request(&phase, &b.head)
     })
@@ -688,11 +765,17 @@ async fn ms_status(State(s): State<Arc<AppState>>, Path(phase): Path<String>) ->
     if let Err(r) = check_phase(&phase) {
         return *r;
     }
-    match guarded_read(&s, "milestone status", move |f| {
-        #[cfg(feature = "fault-injection")]
-        crate::milestone::serve::fault::in_status();
-        f.status_archived(&phase)
-    })
+    let p2 = phase.clone();
+    match guarded_read(
+        &s,
+        "milestone status",
+        move |f| {
+            #[cfg(feature = "fault-injection")]
+            crate::milestone::serve::fault::in_status();
+            f.status_archived(&phase)
+        },
+        move |f| f.status_unwritten(&p2),
+    )
     .await
     {
         Ok(st) => ok_json(st),
@@ -715,6 +798,9 @@ async fn ms_cancel(
         )
         .into_response();
     }
+    if let Err(r) = ms_open(&s) {
+        return *r;
+    }
     match guarded_write(&s, &who, "milestone cancel", move |f| f.cancel(&phase, &id)).await {
         Ok(()) => ok_json(json!({ "cancelled": true })),
         Err(r) => *r,
@@ -722,7 +808,14 @@ async fn ms_cancel(
 }
 
 async fn ms_log(State(s): State<Arc<AppState>>) -> Response {
-    match guarded_read(&s, "milestone log", |f| f.log().map_err(FlowError::Other)).await {
+    match guarded_read(
+        &s,
+        "milestone log",
+        |f| f.log().map_err(FlowError::Other),
+        |f| f.log_unwritten().map_err(FlowError::Other),
+    )
+    .await
+    {
         Ok(text) => ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response(),
         Err(r) => *r,
     }
@@ -738,8 +831,15 @@ struct PublishedBody {
 async fn ms_published(
     State(s): State<Arc<AppState>>,
     Extension(who): Extension<Identity>,
-    Json(b): Json<PublishedBody>,
+    body: Body,
 ) -> Response {
+    if let Err(r) = ms_open(&s) {
+        return *r;
+    }
+    let b: PublishedBody = match ms_body(body).await {
+        Ok(b) => b,
+        Err(r) => return *r,
+    };
     match guarded_write(&s, &who, "milestone published", move |f| {
         f.published_then_archive(b.seq, &b.hash)
     })

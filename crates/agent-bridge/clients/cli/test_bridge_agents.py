@@ -810,6 +810,18 @@ class ReworkTest(Harness):
         self.assertFalse(m['context']['truncated'])
         self.assertFalse(m['context']['requires_bridge_show'])
 
+    def test_a_clipped_title_alone_marks_the_turn_truncated(self):
+        # m2c/A214-3: only the title is cut; the payload must not claim to be complete.
+        thread={'task':{'id':'t','state':'open','last_n':2,'title':'T'*9000},
+                'messages':[self._msg(1,'claude','task','t'),self._msg(2,'codex','ack','a')]}
+        event=self._msg(1,'claude','task','t')
+        m=client.build_context(thread,event,None,None,budget=20000)
+        self.assertTrue(m['thread']['task']['title_truncated'])
+        self.assertEqual(m['context']['omitted_messages'],0)
+        self.assertTrue(m['context']['truncated'])
+        self.assertTrue(m['context']['requires_bridge_show'])
+        self.assertIn('bridge_show',m['context']['note'])
+
     def test_resume_oversized_delta_keeps_checkpoint_below_dropped_peer_input(self):
         msgs=[self._msg(i,'claude','note','z'*4000) for i in range(1,21)]
         thread={'task':{'id':'t','state':'open','last_n':20},'messages':msgs}

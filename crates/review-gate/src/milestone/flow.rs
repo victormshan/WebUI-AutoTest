@@ -697,7 +697,8 @@ impl Flow {
     /// wait for, or report: one left over after a restart is closed at start, so a Pending
     /// request in a drained, idle service is something that went wrong).
     pub fn pending_requests(&self) -> Result<usize> {
-        let snap = self.ledger.load()?;
+        // Written for /health: read without writing (m2c/A214-1).
+        let snap = self.ledger.read_unwritten()?;
         let phases: BTreeSet<&str> = snap
             .records
             .iter()
@@ -1539,6 +1540,46 @@ impl Flow {
         render_log(&self.ledger.load()?.records)
     }
 
+    /// The log as it is on file, read without writing (while draining, m2c/A214-1).
+    pub fn log_unwritten(&self) -> Result<String> {
+        render_log(&self.ledger.read_unwritten()?.records)
+    }
+
+    /// Status while the service is draining (m2c/A214-1): derived from the local log read
+    /// without writing anything: no recovery, no import from the remote, no archive. It is
+    /// never a basis for release, and says so.
+    pub fn status_unwritten(&self, phase: &str) -> std::result::Result<Status, FlowError> {
+        let ro = self.ledger.read_unwritten()?;
+        let mut st = derive(&ro.records, phase, ro.checkpoint);
+        // Never a basis for release, at either level (Codex review of the fixes, item 4): the
+        // derived state is marked too, with the same reason, so no field says "released".
+        let drained = "draining: the local log read without writing (remote not checked, nothing recovered or archived)".to_string();
+        st.released = false;
+        st.reasons.push(drained.clone());
+        let mut reasons = st.reasons.clone();
+        if ro.truncated_tail {
+            reasons.push("log stopped: its last line is cut off".into());
+        }
+        if let Some(why) = &ro.checkpoint_mismatch {
+            reasons.push(format!("log stopped: {why}"));
+        }
+        if let Some(why) = self.halted() {
+            reasons.push(format!("service halted: {why}"));
+        }
+        let (seq, hash) = ro
+            .records
+            .last()
+            .map_or((0, String::new()), |r| (r.seq, r.hash.clone()));
+        Ok(Status {
+            released: false,
+            reasons,
+            sync: "NotChecked".into(),
+            seq,
+            hash,
+            state: st,
+        })
+    }
+
     /// The implementer reports what it pushed; recorded only for a position the log holds.
     pub fn published(&self, seq: u64, hash: &str) -> std::result::Result<(), FlowError> {
         self.ledger.transact(&self.kp, &now(), |snap| {
@@ -1656,6 +1697,18 @@ impl Flow {
         source: &str,
         reason: &str,
     ) -> std::result::Result<Record, FlowError> {
+        // `<source>:<name>` as sources::source_key writes it, so a drop can only name a carried
+        // participant's form (m2a/A206-3), never a free text that silently matches nothing.
+        let well_formed = source.split_once(':').is_some_and(|(k, n)| {
+            !n.trim().is_empty()
+                && serde_json::from_value::<sources::Source>(json!(k))
+                    .is_ok_and(|s| sources::source_key(s, n) == source)
+        });
+        if !well_formed {
+            return Err(refused(format!(
+                "source {source:?} is not <source>:<name> (git_author, trailer, bridge, auditor)"
+            )));
+        }
         self.admin(
             phase,
             "source_dropped",
@@ -2590,7 +2643,7 @@ mod tests {
         let reader: BridgeRead = Arc::new(move || {
             if r2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                 other
-                    .drop_source("p", "nothing", "written mid-preparation")
+                    .drop_source("p", "trailer:Nobody", "written mid-preparation")
                     .unwrap();
             }
             b2.lock().unwrap().clone()
@@ -2610,7 +2663,7 @@ mod tests {
         let other = fx.admin();
         let b2 = fx.bridge.clone();
         let reader: BridgeRead = Arc::new(move || {
-            other.drop_source("p", "nothing", "again").unwrap();
+            other.drop_source("p", "trailer:Nobody", "again").unwrap();
             b2.lock().unwrap().clone()
         });
         let g = Flow::open_admin(fx.cfg(), kp(), reader).unwrap();
@@ -2744,7 +2797,8 @@ mod tests {
         let fx = Fx::new();
         let f = fx.admin();
         fx.register(&f);
-        f.drop_source("p", "x", "a second record").unwrap();
+        f.drop_source("p", "trailer:Nobody", "a second record")
+            .unwrap();
         fx.publish(&f);
         let full = fs::read_to_string(fx.root.join("state/log.jsonl")).unwrap();
         // The local log is set back to its first record (as if restored from an old copy).
@@ -3931,4 +3985,6 @@ mod tests {
     mod faults_remote;
     /// E3: reverse authentication of the runner through the whole flow (M2 step 8).
     mod reverse_auth;
+    /// The order of the milestone routes' checks before the body is read (m2b/A210-2).
+    mod route_order;
 }

@@ -325,6 +325,57 @@ pub fn judge(i: &Inputs) -> Outcome {
         }
     }
 
+    // Sources carried over from the phases this one supersedes (§3.1; m2a/A206-3): every
+    // participant their requests recorded (commit authors, trailers, bridge names) joins this
+    // phase, mapped with the vendor table in force, unless the user dropped it one by one
+    // (`source_dropped`, source `<source>:<name>`, on any phase of the lineage). The phase's
+    // own commits and tasks are facts of its range and cannot be dropped.
+    let dropped: BTreeSet<&str> = i
+        .records
+        .iter()
+        .filter(|r| r.kind == "source_dropped" && lineage.contains(&r.phase))
+        .filter_map(|r| r.body.get("source").and_then(Value::as_str))
+        .collect();
+    for r in i
+        .records
+        .iter()
+        .filter(|r| r.kind == "request" && r.phase != i.phase && lineage.contains(&r.phase))
+    {
+        // Every request records its participants; one that does not (missing, null, not a
+        // list) leaves the carried sources unknown rather than empty (Codex review of the
+        // fixes, item 3).
+        let Some(list) = r.body.get("participants").and_then(Value::as_array) else {
+            sources_reasons.push(format!(
+                "record {}: the carried request has no participant list",
+                r.seq
+            ));
+            continue;
+        };
+        for p in list {
+            let name = p.get("name").and_then(Value::as_str);
+            let source = p
+                .get("source")
+                .cloned()
+                .and_then(|v| serde_json::from_value::<Source>(v).ok());
+            let (Some(name), Some(source)) = (name, source) else {
+                sources_reasons.push(format!(
+                    "record {}: a carried participant is malformed",
+                    r.seq
+                ));
+                continue;
+            };
+            if dropped.contains(source_key(source, name).as_str()) {
+                continue;
+            }
+            participants.push(Participant {
+                name: name.to_string(),
+                source,
+                seen_in: format!("{} (request record {})", r.phase, r.seq),
+                mapping: i.vendors.map(source, name),
+            });
+        }
+    }
+
     let mut phase_tasks = BTreeSet::new();
     let mut unmatched = Vec::new();
     match &i.bridge {
@@ -553,6 +604,15 @@ pub async fn read_bridge(
         }
     })
     .await
+}
+
+/// How `source_dropped` names a carried participant: `<source>:<name>`, e.g. `trailer:Codex`.
+pub fn source_key(source: Source, name: &str) -> String {
+    let s = serde_json::to_value(source)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
+    format!("{s}:{name}")
 }
 
 fn describe(m: &Mapping) -> String {
@@ -850,6 +910,99 @@ mod tests {
             !o.unmatched.contains(&"before".to_string()),
             "outside the window"
         );
+    }
+
+    /// m2a/A206-3: the participants a superseded phase's request recorded join the new phase
+    /// (mapped with the table in force), and only a `source_dropped` naming one removes it.
+    #[test]
+    fn participants_recorded_for_a_superseded_phase_carry_over_unless_dropped() {
+        let carried = json!({"request_id": "o-q1", "participants": [
+            {"name": "Codex", "source": "trailer", "seen_in": "c0",
+             "mapping": {"result": "vendor", "detail": "openai"}},
+            {"name": "victormshan", "source": "git_author", "seen_in": "c0",
+             "mapping": {"result": "vendor", "detail": "user"}}]});
+        let mut c = Case::new();
+        c.tasks.retain(|(t, _)| t.id != "z");
+        assert!(c.run().independent, "nothing carried yet");
+        c.add("o", "request", carried.clone());
+        let o = c.run();
+        assert!(
+            !o.independent,
+            "the carried Codex trailer shares the auditor's vendor"
+        );
+        assert!(
+            o.independence_reasons.iter().any(|r| r.contains("Codex")),
+            "{:?}",
+            o.independence_reasons
+        );
+        assert!(
+            o.participants
+                .iter()
+                .any(|p| p.name == "Codex" && p.seen_in.starts_with("o (request record ")),
+            "{:?}",
+            o.participants
+        );
+        // Another phase's request is not carried.
+        let mut q = Case::new();
+        q.tasks.retain(|(t, _)| t.id != "z");
+        q.add("q", "request", carried.clone());
+        assert!(q.run().independent, "Q is not in P's lineage");
+        // A drop naming another source changes nothing; the right one removes it.
+        c.add(
+            "p",
+            "source_dropped",
+            json!({"source": "trailer:Other", "reason": "r"}),
+        );
+        assert!(!c.run().independent);
+        c.add(
+            "p",
+            "source_dropped",
+            json!({"source": "trailer:Codex", "reason": "r"}),
+        );
+        let o = c.run();
+        assert!(o.independent, "{:?}", o.independence_reasons);
+        assert!(
+            o.participants
+                .iter()
+                .any(|p| p.name == "victormshan" && p.seen_in.starts_with("o ")),
+            "only the dropped one is gone"
+        );
+    }
+
+    #[test]
+    fn a_malformed_carried_participant_makes_the_sources_unknown() {
+        let mut c = Case::new();
+        c.tasks.retain(|(t, _)| t.id != "z");
+        c.add(
+            "o",
+            "request",
+            json!({"request_id": "o-q1", "participants": [{"name": "x"}]}),
+        );
+        let o = c.run();
+        assert!(!o.sources_known);
+        assert!(
+            o.sources_reasons
+                .iter()
+                .any(|r| r.contains("carried participant is malformed"))
+        );
+        for body in [
+            json!({"request_id": "o-q2"}),
+            json!({"request_id": "o-q2", "participants": null}),
+            json!({"request_id": "o-q2", "participants": {"name": "x"}}),
+        ] {
+            let mut c = Case::new();
+            c.tasks.retain(|(t, _)| t.id != "z");
+            c.add("o", "request", body.clone());
+            let o = c.run();
+            assert!(!o.sources_known, "{body}");
+            assert!(
+                o.sources_reasons
+                    .iter()
+                    .any(|r| r.contains("has no participant list")),
+                "{body}: {:?}",
+                o.sources_reasons
+            );
+        }
     }
 
     #[test]

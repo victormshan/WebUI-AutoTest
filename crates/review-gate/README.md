@@ -66,13 +66,15 @@ Administrators configure this in a read-only file (`serve --identity-config`, de
   `version` are configuration errors: the service refuses to start. There is **no fallback** to
   the legacy token when a configuration file is present but invalid — or when the default path
   exists but cannot be inspected (for example a permission error on `/etc/review-gate/identity.json`).
-- A principal with `"admin": true` is an administrator over HTTP as well: it may list, read and
-  act on every task. Human `manual` reviews are still accepted only by the local `admin manual`
-  command, never over HTTP.
+- A principal with `"admin": true` may list and read every task over HTTP, but it has **no write
+  exemption**: it changes only the tasks it owns, and never milestones unless it is a listed
+  writer. Human `manual` reviews are accepted only by the local `admin manual` command, never
+  over HTTP.
 - Without any configuration file, `/etc/review-gate/client.token` remains an explicit legacy
   compatibility entry: principal `legacy-claude`, family `claude`. That file is still plaintext;
   "only hashes" describes the new administrator mapping.
-- Tasks written by older versions have no principal and belong only to `legacy-claude`.
+- Tasks written by older versions have no principal and therefore **no known owner** (see
+  Ownership below); they do not belong to `legacy-claude`.
 - The family of an OpenAI-compatible endpoint is **not guessed** from its URL or model name. Set
   `REVIEW_GATE_OPENAI_FAMILY` (`openai` | `deepseek` | `gemini` | `claude`); official
   `api.openai.com` / `api.deepseek.com` endpoints have those defaults. An endpoint with no
@@ -91,8 +93,9 @@ Administrators configure this in a read-only file (`serve --identity-config`, de
   write is refused, and so is every `/check` on its repository. Nothing assigns one automatically.
   `review-gate admin task --state … unowned` lists them; `admin task --state … assign --id T
   --principal P --reason R --expect-updated-at <as listed> [--yes]` gives one its first owner
-  (dry run without `--yes`; once only; refused while a service holds `state/service.lock` unless it
-  is drained idle). The owner and its audit (`owner_assigned`) are one write of the task file.
+  (dry run without `--yes`; once only; with `--yes` it is refused while a service holds
+  `state/service.lock`, drained or not: stop the service first). The owner and its audit
+  (`owner_assigned`) are one write of the task file.
 - **`/check`** refuses a commit when any running task of the repository is not the caller's,
   even if the caller also runs one there.
 - **`--agents-file`** (the token → family file deployed on 2026-10-22) is still accepted on the

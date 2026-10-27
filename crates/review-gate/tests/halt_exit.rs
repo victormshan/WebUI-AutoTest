@@ -41,6 +41,21 @@ fn setup() -> Env {
     let root = dir.path().to_path_buf();
     std::fs::create_dir(root.join("state")).unwrap();
     std::fs::write(root.join("client.token"), TOKEN).unwrap();
+    // The test's own identities, passed with --identity-config: without it the service would
+    // read the host's /etc/review-gate/identity.json when that exists (m2d/R1).
+    let etc = root.join("etc");
+    std::fs::create_dir(&etc).unwrap();
+    std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o750)).unwrap();
+    let ids = etc.join("identity.json");
+    std::fs::write(
+        &ids,
+        format!(
+            r#"{{"version": 1, "principals": [{{"id": "legacy-claude", "family": "claude", "credentials": [{{"id": "t1", "sha256": "{}"}}]}}]}}"#,
+            review_gate::identity::token_hash(TOKEN)
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ids, std::fs::Permissions::from_mode(0o640)).unwrap();
     let bt = root.join("bridge.token");
     std::fs::write(&bt, "bridge-observer-token-0123456789abcdef").unwrap();
     std::fs::set_permissions(&bt, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -112,6 +127,8 @@ fn spawn(e: &Env, fault: &str) -> Service {
         .arg(e.root.join("client.token"))
         .arg("--milestones")
         .arg(e.root.join("milestones.json"))
+        .arg("--identity-config")
+        .arg(e.root.join("etc/identity.json"))
         .env("REVIEW_GATE_FAULT", fault)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

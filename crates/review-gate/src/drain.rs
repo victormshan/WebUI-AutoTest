@@ -167,6 +167,22 @@ impl Drain {
         })
     }
 
+    /// A read that may write (recovery, import, archive) is counted like an admitted operation
+    /// while not draining; once draining it gets `None` and must take a path that writes
+    /// nothing (m2c/A214-1). Decided under the same mutex as `enter` and `snapshot`, so a
+    /// snapshot that is idle stays idle: nothing that could write starts after it.
+    pub fn read(self: &Arc<Self>, what: &str) -> Option<OpGuard> {
+        let mut s = self.lock();
+        if s.draining.is_some() {
+            return None;
+        }
+        s.active += 1;
+        Some(OpGuard {
+            drain: self.clone(),
+            what: what.to_string(),
+        })
+    }
+
     /// Counts an operation that is never refused (a read that may still write recovery
     /// records): it keeps a safe stop waiting while it runs.
     pub fn track(self: &Arc<Self>, what: &str) -> OpGuard {
@@ -246,6 +262,28 @@ mod tests {
         assert!(s.draining && s.active_ops == 1 && !s.idle());
         drop(c);
         assert!(d.snapshot().idle());
+    }
+
+    #[test]
+    fn a_read_is_counted_before_the_drain_and_gets_the_unwritten_path_after_it() {
+        // m2c/A214-1: a read admitted before the latch keeps a safe stop waiting; once the
+        // latch is set no read is counted any more, so an idle snapshot stays idle.
+        let d = Drain::new(None);
+        let r = d.read("status").expect("not draining: counted");
+        d.latch("t".into());
+        assert!(
+            !d.snapshot().idle(),
+            "the read admitted before the latch is still running"
+        );
+        assert!(
+            d.read("status").is_none(),
+            "after the latch: the unwritten path"
+        );
+        drop(r);
+        let s = d.snapshot();
+        assert!(s.idle(), "{s:?}");
+        assert!(d.read("status").is_none());
+        assert!(d.snapshot().idle(), "still idle after another read");
     }
 
     #[test]

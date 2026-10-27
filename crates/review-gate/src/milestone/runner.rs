@@ -95,9 +95,6 @@ fn recv_piece(s: &UnixStream, buf: &mut [u8]) -> Result<(usize, Option<libc::ucr
             std::io::Error::last_os_error()
         );
     }
-    if msg.msg_flags & libc::MSG_CTRUNC != 0 {
-        bail!("the credentials of the runner's reply were truncated");
-    }
     let mut cred = None;
     let mut passed_fds = 0;
     // SAFETY: walking the control buffer recvmsg filled, with the libc helpers.
@@ -120,6 +117,11 @@ fn recv_piece(s: &UnixStream, buf: &mut [u8]) -> Result<(usize, Option<libc::ucr
             }
             c = libc::CMSG_NXTHDR(&msg, c);
         }
+    }
+    // Checked only after the walk above: with MSG_CTRUNC the kernel has still installed the
+    // descriptors that fitted, and they are closed there before the reply is refused.
+    if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+        bail!("the credentials of the runner's reply were truncated");
     }
     if passed_fds > 0 {
         bail!("the runner's reply carried {passed_fds} file descriptor(s): refused");
@@ -427,6 +429,61 @@ mod tests {
         let err = res.unwrap_err().to_string();
         assert!(err.contains("file descriptor"), "{err}");
         assert!(open() <= before, "a passed descriptor was kept open");
+    }
+
+    /// The truncated case of the test above, also alone in a child process (m2a/A206-5).
+    #[test]
+    fn descriptors_delivered_with_truncated_control_data_are_closed() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "milestone::runner::tests::truncated_control_data_alone",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && text.contains("1 passed"),
+            "{text}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "run alone by descriptors_delivered_with_truncated_control_data_are_closed"]
+    fn truncated_control_data_alone() {
+        // Twelve descriptors do not fit next to the credentials: the kernel installs the ones
+        // that fit, closes the rest and sets MSG_CTRUNC.
+        let d = tempfile::tempdir().unwrap();
+        let sock = d.path().join("r.sock");
+        let mut child = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(
+                "import socket,sys,array,os\n\
+                 s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.listen(1);print('ready',flush=True)\n\
+                 c,_=s.accept();c.recv(100)\n\
+                 fds=array.array('i',[os.open('/dev/null',os.O_RDONLY) for _ in range(12)])\n\
+                 c.sendmsg([b'ok\\n'],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,fds)])\n\
+                 c.recv(1)\n",
+            )
+            .arg(&sock)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        listening(&mut child);
+        let open = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+        let before = open();
+        let res = call(&sock, "{}", &me(), Duration::from_secs(5));
+        let _ = child.kill();
+        child.wait().unwrap();
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("truncated"), "{err}");
+        assert!(
+            open() <= before,
+            "a descriptor delivered with truncated control data was kept open"
+        );
     }
 
     #[test]

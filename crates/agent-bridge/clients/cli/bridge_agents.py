@@ -353,8 +353,11 @@ def build_context(thread, event, session, prior, budget=DEFAULT_PROMPT_BUDGET, a
         included = {m.get('n') for m in pool} if include_messages else set()
         omitted_messages = len(eligible) if not include_messages else len(
             {n for n in eligible if n not in included})
+        task_view = _task_view(task, field_limit)
+        # A clipped title is truncated content too (m2c/A214-3).
         field_truncated = (ev_trunc or (origin_view[1] if origin_view else 0) > 0
-                           or any(v[1] or v[2] for v in views))
+                           or any(v[1] or v[2] for v in views)
+                           or bool(task_view.get('title_truncated')))
         truncated = bool(omitted_messages) or field_truncated
         if resume and omitted_messages:
             checkpoint = max(included, default=delivered if isinstance(delivered, int) else 0)
@@ -365,7 +368,7 @@ def build_context(thread, event, session, prior, budget=DEFAULT_PROMPT_BUDGET, a
                 'Complete for this turn; bridge_show remains authoritative if you must re-read.')
         material = {
             'event': event_view,
-            'thread': {'task': _task_view(task, field_limit),
+            'thread': {'task': task_view,
                        'messages': [v for v, _, _ in views],
                        'messages_included': include_messages,
                        'message_count': len(messages)},
