@@ -1,0 +1,344 @@
+# Evidence for F = 8a2bfe36e25c52d457653b0d3f61ca1884335c45 (fix phase m2e, task book §11)
+# Full raw files (outside the repository): /home/administrator/projects/m2-tools/F-evidence-20261027T172948Z/checks.txt sha256 818320022e0b75a958df9c790086c7303048a8a21bc664e2a9e3a1a6df357c29; /home/administrator/projects/m2-tools/F-evidence-20261027T172948Z/mutants/ (per mutant: patch.diff, cmd.txt, exit.txt, stdout.txt, stderr.txt), summary.json sha256 90bd81781db4d9370b103bab8658c1aad08e06a909af254dc538a196646465df
+# Included here: every command line, exit status, 'Running' and 'test result' line of the checks; every mutant's patch, exit status and failing tests. Not included: the per-test 'ok' lines and compiler progress.
+
+## 1. Checks on F (host; /etc/review-gate/identity.json present)
+# checks on F = 8a2bfe36e25c52d457653b0d3f61ca1884335c45 (tree 7e2a5a53d33c8760d4f841ec2e986c2c99d618cf), host, 2026-10-27T17:29:49Z
+status lines: 0
+rustc 1.99.0 (b940084d7 2026-09-28)
+cargo 1.99.0 (5f94df478 2026-08-27)
+$ cargo fmt --all -- --check
+exit 0
+$ cargo clippy --workspace --all-targets --locked -- -D warnings
+exit 0
+$ cargo test --workspace --locked --no-fail-fast
+     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/agent-ff01850f8e067627)
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/mcp_backend.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/mcp_backend-d46e8f007f279074)
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/native_backend.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/native_backend-39a83361b2a20d82)
+test result: ok. 0 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/snapshot_contract.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/snapshot_contract-158a0184d5207ebb)
+test result: ok. 0 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/agent_bridge-ea80b794e69db3a7)
+test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.38s
+     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/agent_bridge-a3c6daf55de9cd1a)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/multi_agent.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/multi_agent-a3dd6e26ddebc2fb)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+     Running tests/serve_observers.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/serve_observers-654d26a09ced885e)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/audit_runner-bc75f864f47f109e)
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/audit_runner-f49da5416c4f2b9d)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/fault.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/fault-aee6d167b518c301)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/runner.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/runner-6542545e9dccd188)
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.15s
+     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/browser_runtime-df4a5481e7cdaf5b)
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/chrome.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/chrome-6be2a0922443e650)
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/llm-a069f72e784289cd)
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/mcp_client-fbfaf94c1834abe8)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src/lib.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/review_gate-e9bcb17b962bc787)
+test result: ok. 288 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 39.53s
+     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/review_gate-014cdf6af00238d5)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+     Running tests/admin_cli.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/admin_cli-206d5beaf33c84d9)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+     Running tests/admin_task.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/admin_task-1ad5d956a7b5640e)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.13s
+     Running tests/halt_exit.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/halt_exit-9529365f04eb2d77)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+     Running unittests src/main.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/webtest-30b17da262317e96)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/e2e.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target/debug/deps/e2e-ec873324c2f137f5)
+test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit 0
+$ cargo test --locked -p review-gate --features fault-injection --test halt_exit
+     Running tests/halt_exit.rs (/home/administrator/projects/Chrome-MCP-m2-fix-target-fault/debug/deps/halt_exit-967e43652a008b68)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.28s
+exit 0
+$ (crates/agent-bridge/clients/cli) python3 -m unittest test_bridge_agents
+Ran 70 tests in 19.307s
+OK
+status after: 0
+totals over every 'test result' line above: passed 496, failed 0, ignored 37
+
+## 2. Mutants on F (m2-tools/mut-fixes.py; HEAD 8a2bfe36e25c52d457653b0d3f61ca1884335c45; the tree checked clean after each)
+### 01 KILLED (exit 101): A206-5 runner: refuse MSG_CTRUNC before closing the delivered descriptors
+$ cargo test --locked -p review-gate --lib milestone::runner (cwd /home/administrator/projects/Chrome-MCP-m2-fix)
+```diff
+diff --git a/crates/review-gate/src/milestone/runner.rs b/crates/review-gate/src/milestone/runner.rs
+index b6a5e2e..89774e6 100644
+--- a/crates/review-gate/src/milestone/runner.rs
++++ b/crates/review-gate/src/milestone/runner.rs
+@@ -95,6 +95,9 @@ fn recv_piece(s: &UnixStream, buf: &mut [u8]) -> Result<(usize, Option<libc::ucr
+             std::io::Error::last_os_error()
+         );
+     }
++    if msg.msg_flags & libc::MSG_CTRUNC != 0 {
++        bail!("the credentials of the runner's reply were truncated");
++    }
+     let mut cred = None;
+     let mut passed_fds = 0;
+     // SAFETY: walking the control buffer recvmsg filled, with the libc helpers.
+```
+failing: test milestone::runner::tests::descriptors_delivered_with_truncated_control_data_are_closed ... FAILED; test milestone::runner::tests::truncated_control_data_alone ... FAILED
+### 02 KILLED (exit 101): A210-2 service: read the request body before the path check
+$ cargo test --locked -p review-gate --lib milestone::flow::tests::route_order (cwd /home/administrator/projects/Chrome-MCP-m2-fix)
+```diff
+diff --git a/crates/review-gate/src/service.rs b/crates/review-gate/src/service.rs
+index cd86499..93c32ca 100644
+--- a/crates/review-gate/src/service.rs
++++ b/crates/review-gate/src/service.rs
+@@ -741,13 +741,15 @@ async fn ms_request(
+     Path(phase): Path<String>,
+     body: Body,
+ ) -> Response {
++    let early: Result<RequestBody, _> = ms_body(body).await;
++    let body = early;
+     if let Err(r) = check_phase(&phase) {
+         return *r;
+     }
+     if let Err(r) = ms_open(&s) {
+         return *r;
+     }
+-    let b: RequestBody = match ms_body(body).await {
++    let b: RequestBody = match body {
+         Ok(b) => b,
+         Err(r) => return *r,
+     };
+```
+failing: test milestone::flow::tests::route_order::without_milestones_an_unfinished_body_is_a_404_at_once ... FAILED; test milestone::flow::tests::route_order::the_body_is_read_only_after_the_path_and_gate_checks ... FAILED
+### 03 KILLED (exit 101): A206-2 derive: reset the count on an approval that is not archived
+$ cargo test --locked -p review-gate --lib milestone::derive (cwd /home/administrator/projects/Chrome-MCP-m2-fix)
+```diff
+diff --git a/crates/review-gate/src/milestone/derive.rs b/crates/review-gate/src/milestone/derive.rs
+index c94d972..47636dd 100644
+--- a/crates/review-gate/src/milestone/derive.rs
++++ b/crates/review-gate/src/milestone/derive.rs
+@@ -620,7 +620,8 @@ fn release_needs(
+ 
+ /// Whether the state is released once everything up to `archived_upto` is archived.
+ fn released_at(st: &PhaseState, revoked: bool, needs: &BTreeSet<u64>, archived_upto: u64) -> bool {
+-    eligible_apart_from_archival(st, revoked) && needs.iter().all(|q| *q <= archived_upto)
++    let _ = (needs, archived_upto);
++    eligible_apart_from_archival(st, revoked)
+ }
+ 
+ /// Whether the current request would release the phase if every record were archived.
+```
+failing: test milestone::derive::tests::a_waiver_that_completes_a_release_also_ends_the_run ... FAILED; test milestone::derive::tests::an_approval_that_is_never_archived_does_not_end_the_run ... FAILED; test milestone::derive::tests::the_count_resets_on_release_not_on_an_approval_that_leaves_a_blocking_condition_open ... FAILED
+### 04 KILLED (exit 101): A206-3 sources: carry nothing from superseded phases
+$ cargo test --locked -p review-gate --lib milestone::sources (cwd /home/administrator/projects/Chrome-MCP-m2-fix)
+```diff
+diff --git a/crates/review-gate/src/milestone/sources.rs b/crates/review-gate/src/milestone/sources.rs
+index 3d5b0fa..1db4694 100644
+--- a/crates/review-gate/src/milestone/sources.rs
++++ b/crates/review-gate/src/milestone/sources.rs
+@@ -339,7 +339,7 @@ pub fn judge(i: &Inputs) -> Outcome {
+     for r in i
+         .records
+         .iter()
+-        .filter(|r| r.kind == "request" && r.phase != i.phase && lineage.contains(&r.phase))
++        .filter(|r| false && r.kind == "request" && r.phase != i.phase && lineage.contains(&r.phase))
+     {
+         // Every request records its participants; one that does not (missing, null, not a
+         // list) leaves the carried sources unknown rather than empty (Codex review of the
+```
+failing: test milestone::sources::tests::a_malformed_carried_participant_makes_the_sources_unknown ... FAILED; test milestone::sources::tests::participants_recorded_for_a_superseded_phase_carry_over_unless_dropped ... FAILED
+### 05 KILLED (exit 101): A206-3 sources: a source_dropped has no effect
+$ cargo test --locked -p review-gate --lib milestone::sources (cwd /home/administrator/projects/Chrome-MCP-m2-fix)
+```diff
+diff --git a/crates/review-gate/src/milestone/sources.rs b/crates/review-gate/src/milestone/sources.rs
+index 3d5b0fa..6bf204d 100644
+--- a/crates/review-gate/src/milestone/sources.rs
++++ b/crates/review-gate/src/milestone/sources.rs
+@@ -364,9 +364,7 @@ pub fn judge(i: &Inputs) -> Outcome {
+                 ));
+                 continue;
+             };
+-            if dropped.contains(source_key(source, name).as_str()) {
+-                continue;
+-            }
++            let _ = &dropped;
+             participants.push(Participant {
+                 name: name.to_string(),
+                 source,
+```
+failing: test milestone::sources::tests::participants_recorded_for_a_superseded_phase_carry_over_unless_dropped ... FAILED
+### 06 KILLED (exit 101): Codex fixes review item 3 sources: skip a missing participant list silently
+$ cargo test --locked -p review-gate --lib milestone::sources (cwd /home/administrator/projects/Chrome-MCP-m2-fix)
+```diff
+diff --git a/crates/review-gate/src/milestone/sources.rs b/crates/review-gate/src/milestone/sources.rs
+index 3d5b0fa..98ba2d6 100644
+--- a/crates/review-gate/src/milestone/sources.rs
++++ b/crates/review-gate/src/milestone/sources.rs
+@@ -345,10 +345,6 @@ pub fn judge(i: &Inputs) -> Outcome {
+         // list) leaves the carried sources unknown rather than empty (Codex review of the
+         // fixes, item 3).
+         let Some(list) = r.body.get("participants").and_then(Value::as_array) else {
+-            sources_reasons.push(format!(
+-                "record {}: the carried request has no participant list",
+-                r.seq
+-            ));
+             continue;
+         };
+         for p in list {
+```
+failing: test milestone::sources::tests::a_malformed_carried_participant_makes_the_sources_unknown ... FAILED
+### 07 KILLED (exit 101): A206-4 ledger: no recovery before the import
+$ cargo test --locked -p review-gate --lib milestone::ledger (cwd /home/administrator/projects/Chrome-MCP-m2-fix)
+```diff
+diff --git a/crates/review-gate/src/milestone/ledger.rs b/crates/review-gate/src/milestone/ledger.rs
+index 323b45e..6d48fce 100644
+--- a/crates/review-gate/src/milestone/ledger.rs
++++ b/crates/review-gate/src/milestone/ledger.rs
+@@ -434,7 +434,7 @@ impl Ledger {
+     ) -> Result<(Sync, Option<Record>)> {
+         let _lock = self.lock()?;
+         let mut snap = self.load_locked()?;
+-        self.recover_checkpoint(kp, at, &mut snap, remote)?;
++        let _ = (kp, at);
+         let sync = self.import_locked(&mut snap, remote)?;
+         let held = match &sync {
+             // After an import the local log is exactly the remote's.
+```
+failing: test milestone::ledger::tests::a_rolled_back_log_is_filled_in_from_a_remote_that_proves_the_checkpoint ... FAILED; test milestone::ledger::tests::a_recovery_cut_off_before_its_archived_record_completes_next_time ... FAILED
+### 08 KILLED (exit 101): A206-4 ledger: accept a remote that does not hold the checkpoint
+$ cargo test --locked -p review-gate --lib milestone::ledger (cwd /home/administrator/projects/Chrome-MCP-m2-fix)
+```diff
+diff --git a/crates/review-gate/src/milestone/ledger.rs b/crates/review-gate/src/milestone/ledger.rs
+index 323b45e..fa3f679 100644
+--- a/crates/review-gate/src/milestone/ledger.rs
++++ b/crates/review-gate/src/milestone/ledger.rs
+@@ -377,7 +377,7 @@ impl Ledger {
+             verify_chain(&remote_records, &self.key, &self.repo)
+                 .map_err(|e| format!("remote log fails verification: {e}"))?;
+             match remote_records.get((f.seq as usize).wrapping_sub(1)) {
+-                Some(r) if f.seq >= 1 && r.hash == f.hash => {}
++                _ if true => {}
+                 _ => {
+                     return Err(format!(
+                         "it does not hold record {} with hash {}",
+```
+failing: test milestone::ledger::tests::a_remote_that_does_not_prove_the_checkpoint_leaves_the_log_stopped ... FAILED
+### 09 KILLED (exit 101): A206-4 ledger: no prefix check (signed fork)
+$ cargo test --locked -p review-gate --lib milestone::ledger (cwd /home/administrator/projects/Chrome-MCP-m2-fix)
+```diff
+diff --git a/crates/review-gate/src/milestone/ledger.rs b/crates/review-gate/src/milestone/ledger.rs
+index 323b45e..e27a02b 100644
+--- a/crates/review-gate/src/milestone/ledger.rs
++++ b/crates/review-gate/src/milestone/ledger.rs
+@@ -391,7 +391,7 @@ impl Ledger {
+                     .iter()
+                     .zip(&remote_records)
+                     .all(|(a, b)| a == b);
+-            if !prefix {
++            if !prefix && false {
+                 return Err("the local log is not a prefix of the remote one".into());
+             }
+             Ok(remote_records)
+```
+failing: test milestone::ledger::tests::a_signed_fork_at_the_checkpoint_position_is_not_filled_in ... FAILED
+### 10 KILLED (exit 101): A214-1 service: reads while draining take the writing path
+$ cargo test --locked -p review-gate --lib milestone::flow::tests::drain (cwd /home/administrator/projects/Chrome-MCP-m2-fix)
+```diff
+diff --git a/crates/review-gate/src/service.rs b/crates/review-gate/src/service.rs
+index cd86499..efa046b 100644
+--- a/crates/review-gate/src/service.rs
++++ b/crates/review-gate/src/service.rs
+@@ -673,10 +673,9 @@ async fn guarded_read<T: Send + 'static>(
+     f: impl FnOnce(&Arc<Flow>) -> Result<T, FlowError> + Send + 'static,
+     unwritten: impl FnOnce(&Arc<Flow>) -> Result<T, FlowError> + Send + 'static,
+ ) -> Result<T, Box<Response>> {
+-    match s.drain.read(what) {
+-        Some(op) => guarded(s, Some(op), f).await,
+-        None => guarded(s, None, unwritten).await,
+-    }
++    let _ = unwritten;
++    let op = s.drain.track(what);
++    guarded(s, Some(op), f).await
+ }
+ 
+ fn ok_json(v: impl Serialize) -> Response {
+```
+failing: test milestone::flow::tests::drain::reads_while_draining_write_nothing_even_when_a_status_would_archive ... FAILED; test milestone::flow::tests::drain::a_released_phase_is_not_shown_released_while_draining ... FAILED
+### 11 KILLED (exit 101): Codex fixes review item 4 flow: the derived state keeps released while draining
+$ cargo test --locked -p review-gate --lib milestone::flow::tests::drain (cwd /home/administrator/projects/Chrome-MCP-m2-fix)
+```diff
+diff --git a/crates/review-gate/src/milestone/flow.rs b/crates/review-gate/src/milestone/flow.rs
+index 1b9a07c..c307252 100644
+--- a/crates/review-gate/src/milestone/flow.rs
++++ b/crates/review-gate/src/milestone/flow.rs
+@@ -1554,8 +1554,6 @@ impl Flow {
+         // Never a basis for release, at either level (Codex review of the fixes, item 4): the
+         // derived state is marked too, with the same reason, so no field says "released".
+         let drained = "draining: the local log read without writing (remote not checked, nothing recovered or archived)".to_string();
+-        st.released = false;
+-        st.reasons.push(drained.clone());
+         let mut reasons = st.reasons.clone();
+         if ro.truncated_tail {
+             reasons.push("log stopped: its last line is cut off".into());
+```
+failing: test milestone::flow::tests::drain::reads_while_draining_write_nothing_even_when_a_status_would_archive ... FAILED; test milestone::flow::tests::drain::a_released_phase_is_not_shown_released_while_draining ... FAILED
+### 12 KILLED (exit 101): m2d/R1 halt_exit: no --identity-config (host has /etc/review-gate/identity.json)
+$ cargo test --locked -p review-gate --test halt_exit (cwd /home/administrator/projects/Chrome-MCP-m2-fix)
+```diff
+diff --git a/crates/review-gate/tests/halt_exit.rs b/crates/review-gate/tests/halt_exit.rs
+index 0bf6431..49ea95a 100644
+--- a/crates/review-gate/tests/halt_exit.rs
++++ b/crates/review-gate/tests/halt_exit.rs
+@@ -127,8 +127,6 @@ fn spawn(e: &Env, fault: &str) -> Service {
+         .arg(e.root.join("client.token"))
+         .arg("--milestones")
+         .arg(e.root.join("milestones.json"))
+-        .arg("--identity-config")
+-        .arg(e.root.join("etc/identity.json"))
+         .env("REVIEW_GATE_FAULT", fault)
+         .stdin(Stdio::null())
+         .stdout(Stdio::null())
+```
+failing: test without_the_feature_faults_are_ignored ... FAILED
+### 13 KILLED (exit 1): A214-3 bridge_agents.py: a clipped title does not mark the turn truncated
+$ python3 -m unittest test_bridge_agents.ReworkTest.test_a_clipped_title_alone_marks_the_turn_truncated (cwd /home/administrator/projects/Chrome-MCP-m2-fix/crates/agent-bridge/clients/cli)
+```diff
+diff --git a/crates/agent-bridge/clients/cli/bridge_agents.py b/crates/agent-bridge/clients/cli/bridge_agents.py
+index d0b0534..bbe852d 100644
+--- a/crates/agent-bridge/clients/cli/bridge_agents.py
++++ b/crates/agent-bridge/clients/cli/bridge_agents.py
+@@ -356,8 +356,7 @@ def build_context(thread, event, session, prior, budget=DEFAULT_PROMPT_BUDGET, a
+         task_view = _task_view(task, field_limit)
+         # A clipped title is truncated content too (m2c/A214-3).
+         field_truncated = (ev_trunc or (origin_view[1] if origin_view else 0) > 0
+-                           or any(v[1] or v[2] for v in views)
+-                           or bool(task_view.get('title_truncated')))
++                           or any(v[1] or v[2] for v in views))
+         truncated = bool(omitted_messages) or field_truncated
+         if resume and omitted_messages:
+             checkpoint = max(included, default=delivered if isinstance(delivered, int) else 0)
+```
+failing: FAIL: test_a_clipped_title_alone_marks_the_turn_truncated (test_bridge_agents.ReworkTest.test_a_clipped_title_alone_marks_the_turn_truncated)
+
+## 3. Review trail
+- Codex (stage reviewer): m2-fixes-review-20261027 n3 REWORK (four points, all handled); m2-fixes-v2-review-20261027 n3 APPROVE WITH CONDITIONS (condition 4 answered by §11.5, user 2026-10-27 "写进任务书的例外（推荐）"; condition 5 answered by this evidence commit).
+- Gate review m2-fixes-4: no channel (gemini-api 429/503, web-gemini SEND_FAIL); no record written. Codex manual review m2-fixes-manual-review-20261027 could not run (codex.exe exit 1, no message).
+- User 2026-10-27: "改交 DSH 审". DSH dsh-review-m2-fixes-20261027 n3: VERDICT: APPROVED (it ran fmt, clippy and `cargo test -p review-gate` itself: 293 passed, 0 failed). Recorded as gate review v1-1 (manual) on tree 7e2a5a53d33c8760d4f841ec2e986c2c99d618cf; F has exactly that tree.
+
+## 4. DSH's non-blocking points and how they are handled (not changed in F)
+- N2: recovery from a remote-proven checkpoint runs on the archive path (archive_remote). The service's status calls status_archived, which archives first, so a status read triggers it; a pure load() does not. Follow-up: state this in task book §3.7 when F is next amended.
+- N3: only participants recorded in the superseded phase's request records are carried. Every request since step 6b records all participants (commit authors, trailers, bridge names) in its body (flow.rs, the request record's "participants"); a request without the list now makes the sources unknown. Follow-up: a test that the request record holds the commit-derived participants.
+- N4: the same participant carried from several phases appears more than once. It does not change the independence result. Follow-up: de-duplicate by source_key.
+- N5: require the conclusion to contain verbatim "实际厂商相同，按 11.5 的用户例外接受", and note in the vendor table that the codex/codex-collab labels implement §11.5. Follow-up for the next task book amendment; the m2e request will be checked for that sentence by hand.
