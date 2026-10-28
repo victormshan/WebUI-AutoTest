@@ -60,9 +60,59 @@ pub struct ReviewerConfig {
     /// Waits before retrying an API call that answered 503 (overloaded) or 429 (rate limited);
     /// one retry per entry. Other errors are not retried.
     pub api_retry_pauses: Vec<Duration>,
+    /// How long a provider that is still rate limited after its retries is skipped by `auto`
+    /// (`REVIEW_GATE_RATE_LIMIT_COOLDOWN_SECS`, default 900): the chunks of a review and the
+    /// reviews that follow go straight to the next provider instead of waiting through the
+    /// same retries again.
+    pub rate_limit_cooldown: Duration,
+    /// Provider -> skipped until, shared by every clone of this configuration (one per service).
+    pub cooldowns: Cooldowns,
 }
 
+/// Rate-limit cooldowns of the providers (process-wide, in memory).
+pub type Cooldowns = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Instant>>>;
+
+/// A provider still answered 429 after all its retries.
+#[derive(Debug)]
+pub struct RateLimited(pub String);
+
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RateLimited {}
+
 impl ReviewerConfig {
+    /// When `provider`'s rate-limit cooldown ends, if it has not ended yet.
+    pub fn cooldown_until(&self, provider: &str) -> Option<Instant> {
+        let mut m = self.cooldowns.lock().unwrap_or_else(|p| p.into_inner());
+        match m.get(provider).copied() {
+            Some(t) if t > Instant::now() => Some(t),
+            Some(_) => {
+                m.remove(provider);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn start_cooldown(&self, provider: &str) {
+        if self.rate_limit_cooldown.is_zero() {
+            return;
+        }
+        let until = Instant::now() + self.rate_limit_cooldown;
+        eprintln!(
+            "[review-gate] {provider} rate limited: skipped by auto for {}s",
+            self.rate_limit_cooldown.as_secs()
+        );
+        self.cooldowns
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(provider.to_string(), until);
+    }
+
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let configured_family = var("REVIEW_GATE_OPENAI_FAMILY");
@@ -113,6 +163,12 @@ impl ReviewerConfig {
                         .collect()
                 })
                 .unwrap_or_else(|| vec![Duration::from_secs(15), Duration::from_secs(45)]),
+            rate_limit_cooldown: Duration::from_secs(
+                var("REVIEW_GATE_RATE_LIMIT_COOLDOWN_SECS")
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(900),
+            ),
+            cooldowns: Default::default(),
         }
     }
 }
@@ -190,6 +246,20 @@ pub async fn ask(
             errors.push(format!("{name}: unavailable"));
             continue;
         }
+        // Still cooling down after a rate limit: `auto` goes straight to the next provider (an
+        // explicitly requested provider is tried all the same).
+        if provider == "auto"
+            && let Some(until) = cfg.cooldown_until(name)
+        {
+            let why = format!(
+                "{name}: rate limited, skipped for another {}s",
+                until.saturating_duration_since(Instant::now()).as_secs()
+            );
+            eprintln!("[review-gate] {why}");
+            failed.push(why.clone());
+            errors.push(why);
+            continue;
+        }
         let Some(family) = provider_family(cfg, name) else {
             let why = format!(
                 "{name}: the model family of this endpoint is not configured; an unknown vendor cannot be an independent reviewer"
@@ -220,6 +290,9 @@ pub async fn ask(
                 return Ok(r);
             }
             Err(e) => {
+                if e.downcast_ref::<RateLimited>().is_some() {
+                    cfg.start_cooldown(name);
+                }
                 eprintln!("[review-gate] provider {name} failed: {e:#}");
                 failed.push(format!("{name}: {e:#}"));
                 errors.push(format!("{name}: {e:#}"));
@@ -289,11 +362,15 @@ async fn gemini_api(
             attempt += 1;
             continue;
         }
-        anyhow::bail!(
+        let msg = format!(
             "gemini-api {status} after {} attempt(s): {}",
             attempt + 1,
             v.to_string().chars().take(300).collect::<String>()
         );
+        if status.as_u16() == 429 {
+            return Err(anyhow::Error::new(RateLimited(msg)));
+        }
+        anyhow::bail!(msg);
     };
     let answer = v["candidates"][0]["content"]["parts"]
         .as_array()
@@ -707,6 +784,8 @@ pub(crate) mod tests {
             retry_pause: Duration::from_millis(10),
             poll: Duration::from_millis(10),
             api_retry_pauses: vec![Duration::from_millis(10), Duration::from_millis(10)],
+            rate_limit_cooldown: Duration::from_secs(900),
+            cooldowns: Default::default(),
         }
     }
 
@@ -860,6 +939,68 @@ pub(crate) mod tests {
         );
         assert!(r.fallbacks.is_empty(), "{:?}", r.fallbacks);
         assert_eq!(*hits.lock().unwrap(), 3);
+    }
+
+    /// A provider still rate limited after its retries is skipped by `auto` for the cooldown:
+    /// the next chunk or review goes straight to web-gemini instead of waiting through the same
+    /// retries (user, 2026-10-26). An explicit provider is still tried; after the cooldown it is
+    /// tried again; a non-429 failure starts no cooldown.
+    #[tokio::test]
+    async fn a_rate_limited_provider_is_skipped_by_auto_during_the_cooldown() {
+        let (bridge, _) = mock_bridge(vec![Ok("VERDICT: APPROVED\n"); 4]).await;
+        let (base, hits) = mock_gemini(vec![429, 429, 429, 429, 429, 429, 200]).await;
+        let mut c = gemini_cfg(base);
+        c.bridge = bridge;
+        // 1: gemini-api is tried (3 attempts, all 429), web-gemini answers, the cooldown starts.
+        let r = ask(&c, "p", "auto", "claude").await.unwrap();
+        assert_eq!(r.provider, "web-gemini");
+        assert_eq!(*hits.lock().unwrap(), 3);
+        assert!(c.cooldown_until("gemini-api").is_some());
+        // 2: the next ask (another chunk) skips gemini-api entirely, and says so.
+        let r = ask(&c, "p", "auto", "claude").await.unwrap();
+        assert_eq!(r.provider, "web-gemini");
+        assert_eq!(*hits.lock().unwrap(), 3, "gemini-api was not called again");
+        assert!(
+            r.fallbacks
+                .iter()
+                .any(|f| f.contains("rate limited, skipped")),
+            "{:?}",
+            r.fallbacks
+        );
+        // 3: a clone (the same service) shares the cooldown.
+        let r = ask(&c.clone(), "p", "auto", "claude").await.unwrap();
+        assert_eq!(r.provider, "web-gemini");
+        assert_eq!(*hits.lock().unwrap(), 3);
+        // 4: an explicit request for gemini-api is still made.
+        let _ = ask(&c, "p", "gemini-api", "claude").await;
+        assert_eq!(*hits.lock().unwrap(), 6);
+        // 5: once the cooldown has passed, auto tries gemini-api again (and it answers).
+        c.cooldowns
+            .lock()
+            .unwrap()
+            .insert("gemini-api".into(), Instant::now() - Duration::from_secs(1));
+        let r = ask(&c, "p", "auto", "claude").await.unwrap();
+        assert_eq!(r.provider, "gemini-api");
+        assert_eq!(*hits.lock().unwrap(), 7);
+        assert!(c.cooldown_until("gemini-api").is_none());
+    }
+
+    #[tokio::test]
+    async fn only_a_rate_limit_starts_a_cooldown() {
+        let (base, _) = mock_gemini(vec![400]).await;
+        let c = gemini_cfg(base);
+        let _ = ask(&c, "p", "gemini-api", "claude").await;
+        assert!(
+            c.cooldown_until("gemini-api").is_none(),
+            "a 400 is not a rate limit"
+        );
+        let (base, _) = mock_gemini(vec![503, 503, 503]).await;
+        let c = gemini_cfg(base);
+        let _ = ask(&c, "p", "gemini-api", "claude").await;
+        assert!(
+            c.cooldown_until("gemini-api").is_none(),
+            "an overload is not a rate limit"
+        );
     }
 
     #[tokio::test]
