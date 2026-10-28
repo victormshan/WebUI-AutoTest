@@ -177,7 +177,8 @@ class ConnectorTest(Harness):
         self.assertTrue(client.worker_once(args,self.agents['codex'],self.root/'worker-codex'))
         self.assertEqual(len(self.calls()),2)
         ms=self.agents['claude'].request('GET','/v1/tasks/interrupt')['messages']
-        self.assertEqual([m['kind'] for m in ms],['task','ack','result'])
+        # The second poll reported the blocked attempt once, as a quiet note on the task.
+        self.assertEqual([m['kind'] for m in ms],['task','ack','note','result'])
 
     def test_cli_success_without_protocol_reply_is_not_task_success(self):
         self.send('dsh','opencode','silent')
@@ -346,6 +347,212 @@ class ConnectorTest(Harness):
         self.assertFalse(client.worker_once(args,self.agents['codex'],state))
         self.assertEqual(len(self.calls()),1)
         self.assertEqual(json.loads((state/'jobs/uncertain-1.json').read_text())['status'],'uncertain')
+
+    # ---- uncertain events: report once per attempt, keep blocking, back off ----------------
+
+    def _stderr_of(self, fn):
+        import contextlib, io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            result = fn()
+        return result, buf.getvalue()
+
+    def test_a_blocked_event_is_reported_once_per_attempt_and_stays_blocked(self):
+        self.send('claude','codex','blk')
+        os.environ['FAKE_ERROR']='1'
+        state=self.root/'worker-codex';state.mkdir(exist_ok=True)
+        args=self.args('codex')
+        _, first = self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        self.assertIn('requires inspection', first)
+        outs = [self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))[1] for _ in range(3)]
+        self.assertEqual(sum(o.count('Uncertain event blk#1') for o in outs), 1, outs)
+        self.assertEqual(len(self.calls()),1,'never relaunched')
+        notes=[m for m in self.agents['claude'].request('GET','/v1/tasks/blk')['messages']
+               if m['from']=='codex' and m['kind']=='note']
+        self.assertEqual(len(notes),1,notes)
+        self.assertIn('blocked until it is checked', notes[0]['body'])
+        # A restarted worker (new args, same state) does not report the same attempt again.
+        _, again = self._stderr_of(lambda: client.worker_once(self.args('codex'),self.agents['codex'],state))
+        self.assertNotIn('Uncertain event', again)
+        # An explicit retry of that event fails again: a new attempt, reported once more.
+        retry=self.args('codex');retry.retry_task=['blk#1']
+        self._stderr_of(lambda: client.worker_once(retry,self.agents['codex'],state))
+        self.assertEqual(len(self.calls()),2)
+        self.assertEqual(json.loads((state/'jobs/blk-1.json').read_text())['attempt'],2)
+        _, second = self._stderr_of(lambda: client.worker_once(retry,self.agents['codex'],state))
+        self.assertIn('Uncertain event blk#1 (attempt 2)', second)
+        notes=[m for m in self.agents['claude'].request('GET','/v1/tasks/blk')['messages']
+               if m['from']=='codex' and m['kind']=='note']
+        self.assertEqual(len(notes),2)
+
+    def test_other_tasks_proceed_while_one_is_blocked(self):
+        self.send('claude','codex','stuck')
+        os.environ['FAKE_ERROR']='1'
+        state=self.root/'worker-codex';state.mkdir(exist_ok=True)
+        args=self.args('codex')
+        self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        os.environ.pop('FAKE_ERROR')
+        self.send('claude','codex','free')
+        ok,_=self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        self.assertFalse(ok,'the blocked task still counts as a failure')
+        self.assertEqual([c['task'] for c in self.calls()],['stuck','free'])
+        self.assertEqual(json.loads((state/'jobs/free-1.json').read_text())['status'],'done')
+        self.assertEqual(json.loads((state/'jobs/stuck-1.json').read_text())['status'],'uncertain')
+        self.assertTrue(args.progress,'a completed turn is progress')
+
+    def test_a_retry_names_one_concrete_uncertain_event(self):
+        pending={'t':{1,3},'u':{2}}
+        _, err = self._stderr_of(lambda: client.bind_retries(['t'],pending))
+        self.assertIn('2 uncertain events (#1, #3); name one as t#<n>', err)
+        # A named later event is refused while an older one is uncertain (oldest first).
+        self.assertEqual(self._stderr_of(lambda: client.bind_retries(['t#3'],pending))[0],[])
+        self.assertEqual(client.bind_retries(['t#1'],pending),[('t',1)])
+        self.assertEqual(client.bind_retries(['t#9','x','x#1'],pending),[])
+        self.assertEqual(client.bind_retries(['u'],pending),[('u',2)])
+        self.assertEqual(self._stderr_of(lambda: client.bind_retries(['t'],pending))[0],[])
+
+    def test_without_progress_the_wait_doubles_to_its_cap(self):
+        self.assertEqual(client.next_delay(True,False,300),1)
+        self.assertEqual(client.next_delay(False,True,300),10)
+        d,seen=0,[]
+        for _ in range(8):
+            d=client.next_delay(False,False,d);seen.append(d)
+        self.assertEqual(seen,[10,20,40,80,160,300,300,300])
+        self.assertEqual(client.next_delay(False,True,300),10,'progress resets the wait')
+
+    class _Clock:
+        def __init__(self): self.t=0.0; self.slept=[]
+        def __call__(self): return self.t
+        def sleep(self,d): self.slept.append(d); self.t+=d
+
+    def test_a_new_event_ends_the_wait_within_one_check(self):
+        c=self._Clock()
+        same=lambda: {('t',1)}
+        self.assertFalse(client.wait_for_news(45,{('t',1)},same,sleep=c.sleep,clock=c))
+        self.assertEqual(c.slept,[10,10,10,10,5],'the whole wait, in checks of at most 10 s')
+        c=self._Clock();checks=iter([{('t',1)},{('t',1),('u',1)}])
+        self.assertTrue(client.wait_for_news(300,{('t',1)},lambda: next(checks),sleep=c.sleep,clock=c))
+        self.assertEqual(c.slept,[10,10],'woken at the second check')
+        # Time spent reading the inbox counts toward the wait (monotonic clock).
+        c=self._Clock()
+        def slow(): c.t+=7; return {('t',1)}
+        self.assertFalse(client.wait_for_news(30,{('t',1)},slow,sleep=c.sleep,clock=c))
+        self.assertLessEqual(c.t,30+10+7)
+
+    def test_a_malformed_or_later_event_is_refused_never_widened(self):
+        _, err = self._stderr_of(lambda: client.bind_retries(['u#bogus','u#'],{'u':{2}}))
+        self.assertEqual(client.bind_retries(['u#bogus'],{'u':{2}}),[],'not widened to u#2')
+        self.assertIn('u#bogus: not task#<n>; refused', err)
+        bound, err = self._stderr_of(lambda: client.bind_retries(['t#3'],{'t':{1,3}}))
+        self.assertEqual(bound,[])
+        self.assertIn('t#1 is older and uncertain; it must be checked first', err)
+        self.assertEqual(client.bind_retries(['t#1'],{'t':{1,3}}),[('t',1)])
+
+    def _two_uncertain(self):
+        self.send('claude','codex','two')
+        self.agents['claude'].post('two',{'kind':'note','reply_to':1,'body':'more','wake':'normal'})
+        ms=self.agents['codex'].request('GET','/v1/tasks/two')['messages']
+        state=self.root/'worker-codex';(state/'jobs').mkdir(parents=True,exist_ok=True)
+        for m in ms:
+            client.write_private(state/'jobs'/('two-'+str(m['n'])+'.json'),
+                                 {'event':dict(m,task='two'),'status':'uncertain','attempt':1,'error':'fixture'})
+        return state
+
+    def test_worker_runs_only_the_oldest_uncertain_event_it_was_authorized_for(self):
+        state=self._two_uncertain()
+        args=self.args('codex');args.retry_task=['two#2']
+        _, err=self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        self.assertEqual(len(self.calls()),0,'#2 is not run, and #1 is not run in its place')
+        self.assertIn('two#1 is older and uncertain', err)
+        self.assertEqual(json.loads((state/'jobs/two-1.json').read_text())['status'],'uncertain')
+        args=self.args('codex');args.retry_task=['two#1']
+        self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        self.assertEqual(len(self.calls()),1,'the oldest one, explicitly authorized, runs once')
+
+    def test_a_note_that_could_not_be_sent_is_sent_later_once(self):
+        self.send('claude','codex','nt')
+        os.environ['FAKE_ERROR']='1'
+        state=self.root/'worker-codex';state.mkdir(exist_ok=True)
+        args=self.args('codex')
+        self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        real=self.agents['codex'].post
+        def down(task,body):raise RuntimeError('bridge HTTP 503: down')
+        with patch.object(self.agents['codex'],'post',down):
+            _, err=self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        self.assertIn('Uncertain event nt#1', err)
+        self.assertIn('could not report nt#1@1 on the bridge (will retry)', err)
+        rec=json.loads((state/'warned.json').read_text())
+        self.assertEqual((rec['warned'],rec['noted']),(['nt#1@1'],[]),'warned, not noted')
+        _, err=self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        self.assertNotIn('Uncertain event', err,'the warning is not repeated')
+        self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        notes=[m for m in self.agents['claude'].request('GET','/v1/tasks/nt')['messages']
+               if m['from']=='codex' and m['kind']=='note']
+        self.assertEqual(len(notes),1,'sent once the bridge answered, and only once')
+        self.assertEqual(json.loads((state/'warned.json').read_text())['noted'],['nt#1@1'])
+
+    def test_a_list_from_the_first_format_proves_a_warning_not_a_note(self):
+        self.send('claude','codex','old')
+        os.environ['FAKE_ERROR']='1'
+        state=self.root/'worker-codex';state.mkdir(exist_ok=True)
+        args=self.args('codex')
+        self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        # As the first format left it after a failed note: the key listed, no note on the task.
+        client.write_private(state/'warned.json',['old#1@1'])
+        _, err=self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        self.assertNotIn('Uncertain event',err,'the warning was already printed')
+        notes=[m for m in self.agents['claude'].request('GET','/v1/tasks/old')['messages']
+               if m['from']=='codex' and m['kind']=='note']
+        self.assertEqual(len(notes),1,'the note of unknown delivery is sent')
+        rec=json.loads((state/'warned.json').read_text())
+        self.assertEqual((rec['warned'],rec['noted']),(['old#1@1'],['old#1@1']))
+
+    def test_a_note_whose_reply_was_lost_is_not_added_twice(self):
+        self.send('claude','codex','lost')
+        os.environ['FAKE_ERROR']='1'
+        state=self.root/'worker-codex';state.mkdir(exist_ok=True)
+        args=self.args('codex')
+        self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        real=client.Bridge.post
+        def appended_then_lost(bridge,task,body):
+            real(bridge,task,body)
+            raise OSError('connection reset after the request was handled')
+        with patch.object(client.Bridge,'post',appended_then_lost):
+            self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        self.assertEqual(json.loads((state/'warned.json').read_text())['noted'],[])
+        self._stderr_of(lambda: client.worker_once(args,self.agents['codex'],state))
+        notes=[m for m in self.agents['claude'].request('GET','/v1/tasks/lost')['messages']
+               if m['from']=='codex' and m['kind']=='note']
+        self.assertEqual(len(notes),1,'the retry with the same key returned the note already there')
+        self.assertEqual(json.loads((state/'warned.json').read_text())['noted'],['lost#1@1'])
+
+    def test_the_loop_backs_off_wakes_on_news_and_drops_retry_flags_after_one_round(self):
+        c=self._Clock()
+        inbox=[{('t',1)}]
+        rounds=[]
+        def worker(args,bridge,state):
+            rounds.append(list(args.retry_task))
+            if len(rounds)==3: raise RuntimeError('bridge down')
+            return False
+        args=argparse.Namespace(once=False,retry_task=['t#1'],progress=False)
+        client.run_loop(args,None,self.root,worker=worker,sleep=c.sleep,clock=c,
+                        fetch=lambda: inbox[0],rounds=4)
+        self.assertEqual(rounds[0],['t#1']);self.assertTrue(all(r==[] for r in rounds[1:]),rounds)
+        # The same unread event every round: 10 (first failure), 20, then the exception path
+        # (no progress) keeps doubling: 40, 80.
+        self.assertEqual(sum(c.slept),10+20+40+80,c.slept)
+        # A new event wakes the wait at the next check and counts as progress.
+        c=self._Clock();inbox=[{('t',1)}];calls=[]
+        def worker2(args,bridge,state):
+            calls.append(c.t)
+            if len(calls)==2: inbox[0]={('t',1),('u',1)}
+            return False
+        client.run_loop(argparse.Namespace(once=False,retry_task=[],progress=False),None,self.root,
+                        worker=worker2,sleep=c.sleep,clock=c,fetch=lambda: inbox[0],rounds=4)
+        # rounds: wait 10, wait 20 (news appears during round 2's wait: woken at first check),
+        # round 3 sees the new event (progress): 10 again.
+        self.assertEqual(c.slept[:3],[10,10,10],c.slept)
+
 
     def test_one_use_retry_authorization_across_polls(self):
         self.send('claude','codex','retry')

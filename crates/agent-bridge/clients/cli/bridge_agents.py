@@ -623,6 +623,147 @@ def task_monitor(bridge, task, timeout=MONITOR_HTTP_TIMEOUT):
     return check
 
 
+def bind_retries(flags, pending):
+    """--retry-task authorizes one concrete uncertain attempt: `task#n`, or `task` when that task
+    has exactly one uncertain event. Returns the bound (task, n) pairs; anything else is dropped,
+    with a reason, so an authorization never reaches a failure produced later."""
+    bound = []
+    for flag in flags:
+        if isinstance(flag, tuple):
+            task, n = flag
+        elif '#' in flag:
+            task, _, num = flag.partition('#')
+            if not num.isdigit():
+                # An explicit event that does not parse is refused, never widened to the task.
+                print('--retry-task ' + flag + ': not task#<n>; refused', file=sys.stderr)
+                continue
+            n = int(num)
+        else:
+            task, n = flag, None
+        events = pending.get(task, set())
+        if n is None and len(events) == 1:
+            n = next(iter(events))
+        elif n is None and len(events) > 1:
+            print('--retry-task ' + task + ': ' + str(len(events)) + ' uncertain events (' +
+                  ', '.join('#' + str(e) for e in sorted(events)) + '); name one as ' + task + '#<n>',
+                  file=sys.stderr)
+            continue
+        if n not in events:
+            continue
+        oldest = min(events)
+        if n != oldest:
+            # The worker always reconciles a task's oldest uncertain event first: an authorization
+            # for a later one cannot run now and is not moved to the oldest.
+            print('--retry-task ' + task + '#' + str(n) + ': ' + task + '#' + str(oldest) +
+                  ' is older and uncertain; it must be checked first. Refused', file=sys.stderr)
+            continue
+        bound.append((task, n))
+    return bound
+
+
+def report_blocked(args, bridge, state, task, n, prior):
+    """An uncertain attempt blocks its task until someone checks it: say so once per attempt,
+    on stderr and as a quiet note on the task, and keep blocking. The diagnostic record is kept
+    apart from the journal, so it never changes uncertain, authorization or completion."""
+    attempt = prior.get('attempt', 1)
+    key = task + '#' + str(n) + '@' + str(attempt)
+    path = state / 'warned.json'
+    record = json.loads(path.read_text()) if path.exists() else {}
+    if isinstance(record, list):
+        # The first format only proves the warning was printed; a note may have failed then.
+        # Its delivery is unknown, so it is sent again with the same idempotency key.
+        record = {'warned': record, 'noted': [], 'note_failed': []}
+    warned, noted, failed = (record.get(k, []) for k in ('warned', 'noted', 'note_failed'))
+    error = str(prior.get('error') or prior.get('status'))[:300]
+    if key not in warned:
+        print('Uncertain event ' + task + '#' + str(n) + ' (attempt ' + str(attempt) + '): ' + error +
+              '; blocked until checked (--retry-task ' + task + '#' + str(n) + ', or close the task)',
+              file=sys.stderr)
+        warned = warned + [key]
+    if key not in noted:
+        # The same idempotency key on every try: the bridge returns the note it already holds
+        # instead of adding another (bridge.rs append_checked, client_msg_id per sender).
+        try:
+            bridge.post(task, {'kind': 'note', 'reply_to': n, 'wake': 'quiet',
+                               'client_msg_id': 'uncertain-' + args.agent + '-' + task + '-' + str(n) + '-' + str(attempt),
+                               'body': args.agent + ': the turn for #' + str(n) + ' ended uncertain (' + error +
+                                       '). It is not retried automatically; this task is blocked until it is checked '
+                                       '(retry with --retry-task ' + task + '#' + str(n) + ', or close the task).'})
+            noted = noted + [key]
+        except (RuntimeError, ValueError, OSError) as e:
+            if key not in failed:
+                print('could not report ' + key + ' on the bridge (will retry): ' + str(e), file=sys.stderr)
+                failed = failed + [key]
+    write_private(path, {'warned': warned, 'noted': noted, 'note_failed': failed})
+
+
+BLOCKED_MIN, BLOCKED_MAX, WAKE_CHECK = 10, 300, 10
+
+
+def next_delay(ok, progress, previous):
+    """The wait before the next poll: 1 s after a clean poll; 10 s after a failure with
+    progress; without progress (only the same blocked events read again) it doubles from 10 s
+    up to 300 s."""
+    if ok:
+        return 1
+    if progress or not previous:
+        return BLOCKED_MIN
+    return min(previous * 2, BLOCKED_MAX)
+
+
+INBOX_CHECK_TIMEOUT = 10
+
+
+def inbox_keys(bridge):
+    v = bridge.request('GET', '/v1/inbox?wait=0', timeout=INBOX_CHECK_TIMEOUT, retries=1)
+    return {(m['task'], m['n']) for m in v['messages']}
+
+
+def wait_for_news(delay, seen, fetch_keys, sleep=time.sleep, clock=time.monotonic):
+    """Waits up to `delay` seconds (by the monotonic clock), looking at the inbox every
+    WAKE_CHECK seconds at most: an event not in `seen` ends the wait. Each read is configured
+    with a timeout of INBOX_CHECK_TIMEOUT seconds; how long a read can take in the worst case
+    depends on the HTTP stack, so no overall bound is claimed beyond the check interval."""
+    start = clock()
+    while clock() - start < delay:
+        sleep(min(WAKE_CHECK, max(0, delay - (clock() - start))))
+        try:
+            if fetch_keys() - seen:
+                return True
+        except (RuntimeError, ValueError, OSError):
+            pass
+    return False
+
+
+def run_loop(args, bridge, state, worker=None, sleep=time.sleep, clock=time.monotonic,
+             fetch=None, rounds=None):
+    """The worker loop: one poll, then a wait chosen by next_delay. Explicit retry flags apply
+    to the first round only, whatever happens in it. `rounds` bounds the loop (tests)."""
+    worker = worker or worker_once
+    fetch = fetch or (lambda: inbox_keys(bridge))
+    delay, seen, done = 0, set(), 0
+    while rounds is None or done < rounds:
+        args.progress = False
+        try:
+            keys = fetch()
+            new_events = bool(keys - seen)
+            seen = keys
+            ok = worker(args, bridge, state)
+        except (RuntimeError, ValueError, urllib.error.URLError, TimeoutError) as e:
+            print(str(e), file=sys.stderr)
+            ok, new_events = False, False
+        args.retry_task = []
+        done += 1
+        if args.once:
+            return ok
+        delay = next_delay(ok, args.progress or new_events, delay)
+        if delay <= 1:
+            sleep(delay)
+        else:
+            wait_for_news(delay, seen, fetch, sleep=sleep, clock=clock)
+    return None
+
+
 def worker_once(args, bridge, state):
     bridge.identity()
     events = bridge.request('GET', '/v1/inbox?wait=' + str(args.wait))['messages']
@@ -631,12 +772,13 @@ def worker_once(args, bridge, state):
     # --retry-task authorizes one concrete attempt that is already uncertain. Bind it to the jobs
     # that were uncertain when this poll began and drop every other flag, so a failure produced by
     # this very poll cannot inherit an authorization the user aimed at something they had seen.
-    pending_uncertain = set()
+    pending_uncertain = {}
     for f in jobs.glob('*.json'):
         job = json.loads(f.read_text())
         if job['status'] != 'done':
-            pending_uncertain.add(job['event']['task'])
-    args.retry_task = [t for t in args.retry_task if t in pending_uncertain]
+            pending_uncertain.setdefault(job['event']['task'], set()).add(job['event']['n'])
+    args.retry_task = bind_retries(args.retry_task, pending_uncertain)
+    args.progress = False
     candidates = {(m['task'], m['n']): m for m in events}
     for f in jobs.glob('*.json'):
         job = json.loads(f.read_text())
@@ -680,6 +822,7 @@ def worker_once(args, bridge, state):
         if event is None:
             # Only non-actionable news: advance the read cursor, never start a CLI turn.
             bridge.ack(task, max(by_task[task]))
+            args.progress = True
             continue
         n = event['n']
         path = journal_path(event)
@@ -692,16 +835,19 @@ def worker_once(args, bridge, state):
             if prior:
                 write_private(path, {'event': event, 'status': 'done', 'reconciled': 'terminal task'})
             bridge.ack(task, n)
+            args.progress = True
             continue
         if prior:
-            if task not in args.retry_task:
-                print('Uncertain event ' + task + '#' + str(n) + '; inspect journal before --retry-task ' + task, file=sys.stderr)
+            if (task, n) not in args.retry_task:
+                report_blocked(args, bridge, state, task, n, prior)
                 failed = True
                 continue
             # Explicit retry authorization is one-use for this concrete attempt: consume it here,
             # before the launch, so a poll loop that reuses the same args cannot relaunch it.
-            args.retry_task = [t for t in args.retry_task if t != task]
-        write_private(path, {'event': event, 'status': 'running'})
+            args.retry_task = [t for t in args.retry_task if t != (task, n)]
+        attempt = (prior or {}).get('attempt', 1 if prior else 0) + 1
+        write_private(path, {'event': event, 'status': 'running', 'attempt': attempt})
+        args.progress = True
         sessions = state / 'sessions.json'
         saved = json.loads(sessions.read_text()) if sessions.exists() else {}
         start_key = 'cli-start-' + args.agent + '-' + task + '-' + str(n)
@@ -762,7 +908,8 @@ def worker_once(args, bridge, state):
             bridge.ack(task, n)
         else:
             error = result['error'] or 'CLI exited without a protocol reply'
-            write_private(path, {'event': event, 'status': 'uncertain', 'session': result['session'], 'error': error})
+            write_private(path, {'event': event, 'status': 'uncertain', 'session': result['session'],
+                                 'error': error, 'attempt': attempt})
             print('Task ' + task + ' requires inspection: ' + error, file=sys.stderr)
             failed = True
     return not failed
@@ -1009,15 +1156,8 @@ def main():
             if identity_file.exists() and json.loads(identity_file.read_text()) != scope:
                 raise RuntimeError('state directory belongs to another identity/server/client/workspace')
             write_private(identity_file, scope)
-            while True:
-                try:
-                    ok = worker_once(args, bridge, state)
-                except (RuntimeError, ValueError, urllib.error.URLError, TimeoutError) as e:
-                    print(str(e), file=sys.stderr)
-                    ok = False
-                if args.once:
-                    raise SystemExit(0 if ok else 1)
-                time.sleep(1 if ok else 10)
+            ok = run_loop(args, bridge, state)
+            raise SystemExit(0 if ok else 1)
 
 
 if __name__ == '__main__':
