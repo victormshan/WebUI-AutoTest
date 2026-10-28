@@ -59,6 +59,10 @@ pub const NO_TOOLS: &[&str] = &[
 
 /// Largest input accepted, in bytes (a phase diff plus evidence is a few hundred KB).
 pub const MAX_INPUT: usize = 4 * 1024 * 1024;
+/// The audit CLI's limit on one turn, counted in UTF-16 code units (a conservative count; see
+/// review-gate's `input::MAX_INPUT_UNITS`, which is the same number). Checked again here, so
+/// an over-long input is refused before the CLI starts.
+pub const MAX_INPUT_UNITS: usize = 1_048_576;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -261,6 +265,16 @@ pub async fn run_job(cfg: &Config, req: &Request) -> Response {
             out,
             "rejected",
             Some(format!("input over {MAX_INPUT} bytes")),
+        );
+    }
+    let units = req.input.encode_utf16().count();
+    if units > MAX_INPUT_UNITS {
+        return finish(
+            out,
+            "rejected",
+            Some(format!(
+                "input is {units} UTF-16 code units, over the audit CLI's limit of {MAX_INPUT_UNITS}"
+            )),
         );
     }
     let dir = cfg.workdir.join(&req.job_id);
@@ -789,6 +803,36 @@ mod tests {
             own_cgroup: false,
             reasoning_effort: "high".into(),
         }
+    }
+
+    /// An input over the CLI's limit is rejected before anything starts; one at the limit is
+    /// not rejected for its length (it then fails later for the nonexistent CLI here).
+    #[tokio::test]
+    async fn an_input_over_the_cli_limit_is_rejected_before_the_cli_starts() {
+        let c = cfg(0, None);
+        let at = |n: usize, s: &str| Request {
+            job_id: format!("units-{n}-{}", std::process::id()),
+            input: s.repeat(n),
+            timeout_secs: None,
+        };
+        let over = run_job(&c, &at(MAX_INPUT_UNITS / 2 + 1, "😀")).await;
+        assert_eq!(over.status, "rejected");
+        assert!(
+            over.error.as_deref().unwrap().contains("UTF-16 code units"),
+            "{:?}",
+            over.error
+        );
+        let ok = run_job(&c, &at(MAX_INPUT_UNITS / 2, "😀")).await;
+        assert!(
+            !ok.error.as_deref().unwrap_or("").contains("UTF-16"),
+            "exactly at the limit is not refused for its length: {:?}",
+            ok.error
+        );
+        let _ = std::fs::remove_dir_all(c.workdir.join(format!(
+            "units-{}-{}",
+            MAX_INPUT_UNITS / 2,
+            std::process::id()
+        )));
     }
 
     #[test]

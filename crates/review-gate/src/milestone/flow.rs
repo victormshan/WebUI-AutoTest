@@ -1161,7 +1161,9 @@ impl Flow {
             },
         )
         .map_err(|e| match e {
-            input::InputError::TooLarge { .. } => refused(e.to_string()),
+            input::InputError::TooLarge { .. } | input::InputError::TooManyCharacters { .. } => {
+                refused(e.to_string())
+            }
             input::InputError::Other(e) => FlowError::Other(e),
         })?;
         let input_text = String::from_utf8(assembled.bytes.clone()).context("input is UTF-8")?;
@@ -2395,10 +2397,11 @@ mod tests {
     #[test]
     fn the_request_line_must_fit_what_the_runner_reads() {
         let fx = Fx::new();
-        // Just under the input limit, but nearly every byte is a newline, which JSON doubles.
-        // n newlines appear about three times over in the input (the evidence, and "+" lines in
-        // the diff): about 3n bytes, under MAX_INPUT; JSON escapes each, so the line is about 5n.
-        let body = "\n".repeat(1_300_000);
+        // Under both input limits (bytes and the CLI's UTF-16 units), but nearly every character
+        // is \x01, which JSON writes as the six bytes \u0001. n of them appear twice in the
+        // input (the evidence, and the "+" line of the diff): about 2n units, under
+        // MAX_INPUT_UNITS; the line is about 12n bytes, over what the runner reads.
+        let body = "\u{1}".repeat(450_000);
         write(&fx.repo, "ev/big.txt", &body);
         let head = commit(&fx.repo, "big", true);
         let f = fx.admin();

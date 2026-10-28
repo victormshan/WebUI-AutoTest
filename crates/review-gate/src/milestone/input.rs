@@ -31,6 +31,20 @@ use super::record::sha256_hex;
 
 /// The runner's limit on one input (bytes, after the final serialisation).
 pub const MAX_INPUT: usize = 4 * 1024 * 1024;
+/// The audit CLI's limit on one turn: codex-cli 0.162.1 refused the 1,834,767-character input of
+/// m2-q1 with "Input exceeds the maximum length of 1048576 characters" (gate log seq 81-83).
+/// Counted here as UTF-16 code units, which are at least as many as Unicode scalar values (and
+/// grapheme clusters), so a text within this count is within the CLI's limit however it counts
+/// characters: a conservative precheck, refused before anything is written.
+pub const MAX_INPUT_UNITS: usize = 1_048_576;
+
+/// The text's length in UTF-16 code units (a character outside the BMP counts 2); `None` if
+/// the bytes are not UTF-8.
+pub fn utf16_units(bytes: &[u8]) -> Option<usize> {
+    std::str::from_utf8(bytes)
+        .ok()
+        .map(|t| t.encode_utf16().count())
+}
 pub const TEMPLATE: &str = "milestone-input v1";
 
 /// git with nothing of the caller's environment or configuration.
@@ -312,6 +326,10 @@ pub struct Assembled {
 pub enum InputError {
     #[error("audit input is {size} bytes, over the limit of {MAX_INPUT}: refused, not trimmed")]
     TooLarge { size: usize },
+    #[error(
+        "audit input is {units} UTF-16 code units, over the audit CLI's limit of {MAX_INPUT_UNITS}: refused, not trimmed (split the phase)"
+    )]
+    TooManyCharacters { units: usize },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -395,6 +413,10 @@ pub fn assemble(g: &mut Isolated, m: &Material, t: &Trusted) -> Result<Assembled
         return Err(InputError::TooLarge {
             size: a.bytes.len(),
         });
+    }
+    let units = utf16_units(&a.bytes).unwrap_or(usize::MAX);
+    if units > MAX_INPUT_UNITS {
+        return Err(InputError::TooManyCharacters { units });
     }
     Ok(a)
 }
@@ -1258,23 +1280,36 @@ mod tests {
         )
     }
 
-    fn size_of(r: &Path, base: &str) -> usize {
+    /// The final input's size in UTF-16 code units, whether accepted or refused for its length.
+    fn units_of(r: &Path, base: &str) -> usize {
         match at_head(r, base) {
-            Ok(a) => a.bytes.len(),
-            Err(InputError::TooLarge { size }) => size,
+            Ok(a) => utf16_units(&a.bytes).unwrap(),
+            Err(InputError::TooManyCharacters { units }) => units,
             Err(e) => panic!("{e}"),
         }
     }
 
     #[test]
-    fn the_limit_is_on_final_bytes() {
+    fn utf16_units_count_a_character_outside_the_bmp_twice() {
+        assert_eq!(utf16_units("abc".as_bytes()), Some(3));
+        assert_eq!(utf16_units("é中".as_bytes()), Some(2), "BMP: one unit each");
+        assert_eq!(
+            utf16_units("😀".as_bytes()),
+            Some(2),
+            "outside the BMP: two"
+        );
+        assert_eq!(utf16_units(&[0xff, 0xfe]), None, "not UTF-8");
+    }
+
+    #[test]
+    fn the_limit_is_on_final_utf16_units() {
         let f = fixture();
         let r = f.root();
         // Two evidence files: ev/odd.txt is committed in the base (shown once, as evidence),
         // ev/big.txt only at head (shown twice, as evidence and in the diff) and multi-byte
-        // ("é" is two bytes). Adjusting both lands the input on exactly MAX_INPUT.
-        // Both start non-empty: an empty block gets no closing newline, a non-empty one without a
-        // final newline gets one, so a file growing from empty would jump by one byte.
+        // ("é" is one UTF-16 unit, two bytes). Adjusting both lands the input on exactly
+        // MAX_INPUT_UNITS. Both start non-empty: an empty block gets no closing newline, a
+        // non-empty one without a final newline gets one.
         let (mut odd, mut two, mut ascii) = (10i64, 1i64, 0i64);
         let mut base = String::new();
         for _ in 0..12 {
@@ -1285,7 +1320,7 @@ mod tests {
             b.extend(std::iter::repeat_n(b'a', ascii as usize));
             write(r, "ev/big.txt", &b);
             commit(r, "big");
-            let gap = MAX_INPUT as i64 - size_of(r, &base) as i64;
+            let gap = MAX_INPUT_UNITS as i64 - units_of(r, &base) as i64;
             if gap == 0 {
                 break;
             }
@@ -1294,28 +1329,32 @@ mod tests {
                 odd += gap.signum();
                 gap -= gap.signum();
             }
-            // Each "é" adds 4 bytes in all, each ASCII byte 2.
-            let total = (two * 4 + ascii * 2 + gap).max(0);
-            two = total / 4;
-            ascii = (total % 4) / 2;
+            // Each "é" and each ASCII byte of big.txt adds 2 units in all (shown twice).
+            let total = (two * 2 + ascii * 2 + gap).max(0);
+            two = total / 2;
+            ascii = 0;
             odd = odd.max(1);
             two = two.max(1);
         }
-        assert_eq!(size_of(r, &base), MAX_INPUT, "did not converge");
+        assert_eq!(units_of(r, &base), MAX_INPUT_UNITS, "did not converge");
         let a = at_head(r, &base).expect("exactly at the limit is accepted");
-        assert_eq!(a.bytes.len(), MAX_INPUT);
-        assert!(String::from_utf8(a.bytes).unwrap().contains("é"));
-        // One byte more: refused, not trimmed.
+        assert_eq!(utf16_units(&a.bytes), Some(MAX_INPUT_UNITS));
+        assert!(
+            a.bytes.len() > MAX_INPUT_UNITS,
+            "more bytes than units: é is two bytes"
+        );
+        // A character outside the BMP is two units: one more of it is refused, not trimmed.
         let mut fh = std::fs::OpenOptions::new()
             .append(true)
             .open(r.join("ev/big.txt"))
             .unwrap();
-        fh.write_all(b"a").unwrap();
+        fh.write_all("😀".as_bytes()).unwrap();
         drop(fh);
         commit(r, "one more");
         match at_head(r, &base) {
-            Err(InputError::TooLarge { size }) => assert!(size > MAX_INPUT),
-            Ok(a) => panic!("accepted {} bytes", a.bytes.len()),
+            // Over the limit (the new commit also adds its own lines to the input).
+            Err(InputError::TooManyCharacters { units }) => assert!(units > MAX_INPUT_UNITS),
+            Ok(a) => panic!("accepted {:?} units", utf16_units(&a.bytes)),
             Err(e) => panic!("{e}"),
         }
     }
