@@ -285,7 +285,7 @@ sudo bash /home/administrator/projects/Chrome-MCP-m2/scripts/m2-e2e/state_manife
 sudo bash /home/administrator/projects/Chrome-MCP-m2/scripts/m2-e2e/runner_wait.sh 30   # 参数单位是分钟：总上限 30 分钟
 ```
 
-退出 0：没有 auditor 的 codex 进程，runner.sock 上没有 `ESTAB`/`CLOSE-WAIT`。退出 2：`pgrep` 或 `ss` 读取失败。退出 3：30 分钟到时仍有活动（脚本打印起止时间与仍在的进程/连接）。2 或 3：**停止并报告**，不 kill，不继续第 5 节。只有退出 0 才继续：
+退出 0：除 runner 自身（`systemctl show -p MainPID audit-runner.service`；它的参数含 `--codex`，也会被 `pgrep -af codex` 匹配）外没有 auditor 的 codex 进程，runner.sock 上没有 `ESTAB`/`CLOSE-WAIT`。退出 2：`pgrep`、`ss` 或 `systemctl` 读取失败，或 MainPID 不是数字。退出 3：30 分钟到时仍有活动（脚本打印起止时间与仍在的进程/连接）。2 或 3：**停止并报告**，不 kill，不继续第 5 节。只有退出 0 才继续：
 
 ```
 sudo systemctl stop audit-runner.socket

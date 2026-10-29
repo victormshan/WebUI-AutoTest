@@ -1,0 +1,73 @@
+# ops-fixes v1 evidence (2026-10-29): runner_wait.sh false busy; webtest e2e npx race
+# base fec1bec094079dbe54e4d626af74532aa7b1cc70 (main). All output below is raw, produced on WSL Win10-dt.
+
+## 1. runner_wait.sh counted the idle runner as an audit
+Seen in the 2026-10-28T20:47Z drain deploy (log m2-tools/deploy-fec1bec-20261028T204759Z.log, lines 7-8):
+2026-10-28T20:48:07Z still active:
+  1412629 /usr/local/lib/audit-runner/audit-runner --allow-uid 999 --allow-cgroup /system.slice/review-gate.service --codex /usr/local/lib/auditor-codex/node_modules/.bin/codex --codex-home /home/auditor/.codex --run-home /home/auditor/codex-run --own-cgroup --workdir /home/auditor/jobs
+The only match was the runner's main process (no child process, no socket connection); its argv
+carries --codex <path>, so 'pgrep -u auditor -af codex' matches it. The wait would have run to its
+30-minute deadline and stopped the deploy. That run was aborted (drain file removed, gate untouched)
+and the deploy used an inline check that excludes systemctl MainPID (same rule as this fix).
+
+### test_runner_wait.sh on the fixed script
+ok - idle: exit 0
+ok - idle-runner-only: exit 0
+ok - runner-with-audit-deadline: exit 3
+ok - runner-not-main-deadline: exit 3
+ok - systemctl-error: exit 2
+ok - mainpid-not-a-number: exit 2
+ok - codex-running-deadline: exit 3
+ok - connection-deadline: exit 3
+ok - pgrep-error: exit 2
+ok - ss-error: exit 2
+ALL OK
+
+### the same new test file against the OLD script (git show HEAD:scripts/m2-e2e/runner_wait.sh)
+ok - idle: exit 0
+FAIL - idle-runner-only: exit 124, want 0
+
+### mutants of the fix (each must make the test file fail)
+FAIL - idle-runner-only: exit 124, want 0  <- sed 's/'NF \&\& $1 != p'/'NF'/'
+FAIL - runner-with-audit-deadline: exit 0, want 3  <- sed 's/'NF \&\& $1 != p'/'NF \&\& 0'/'
+FAIL - mainpid-not-a-number: exit 0, want 2  <- sed 's/|| ! \[\[ "$RPID" =~ \^\[0-9\]+$ \]\]//'
+
+## 2. webtest e2e red on main since 2026-10-16
+Scheduled runs on the unchanged main 6467374: success 10-12..10-15, failure every day 10-16..10-28.
+Same commit fec1bec: push to m2-deploy -> e2e 7 passed (run 40764405578); push to main -> 7 failed (run 40766911629).
+Failed log, run 40766911629 job e2e (gh run view --log-failed), first failure:
+npm error code ENOTEMPTY
+npm error syscall rmdir
+npm error path /home/runner/.npm/_npx/ba38acecdf97096f/node_modules/chrome-devtools-mcp/build/src
+npm error errno -39
+npm error ENOTEMPTY: directory not empty, rmdir '/home/runner/.npm/_npx/ba38acecdf97096f/node_modules/chrome-devtools-mcp/build/src'
+npm error A complete log of this run can be found in: /home/runner/.npm/_logs/2026-10-28T20_54_31_745Z-debug-0.log
+error: MCP handshake with chrome-devtools-mcp failed: connection closed: initialize response
+error: MCP handshake with chrome-devtools-mcp failed: connection closed: initialize response
+
+Cause: the 7 tests run 2 at a time and each starts 'npx -y chrome-devtools-mcp@1.10.1'
+(crates/mcp-client/src/lib.rs DEFAULT_PACKAGE). With a cold npx cache, concurrent starts install into
+the same ~/.npm/_npx/<hash> directory at once. The other failures (exit 2, want 1) follow from the failed handshake.
+
+### local reproduction: 4 concurrent cold starts, empty npm cache each round
+round 1: 0 install errors in 4 processes
+round 2: 0 install errors in 4 processes
+round 3: 0 install errors in 4 processes
+The race does NOT reproduce reliably on this machine: in the run above all 3 rounds were clean. An
+earlier run the same day (same command, 11:4xZ) had 1 of 3 rounds with errors: process 1 printed 2
+and process 4 printed 1 "npm WARN tar TAR_ENTRY_ERROR ENOENT ... lstat" lines (concurrent extraction
+into one directory), all 4 still exited with "1.10.1". So the cause is an inference from the CI log
+(ENOTEMPTY on rmdir inside the shared _npx directory while tests start 2 at a time, and the same
+commit passing on another branch), not a deterministic local reproduction. Why it fails on main every
+day since 10-16 and not on the branch pushes is not established (cache state per branch is a guess).
+
+### with the new warm-up step first (same script as the workflow step), then 4 concurrent starts
+round 1: warm-up exit 0, printed 1.10.1; 0 install errors/warnings, 1 npx dir
+round 2: warm-up exit 0, printed 1.10.1; 0 install errors/warnings, 1 npx dir
+round 3: warm-up exit 0, printed 1.10.1; 0 install errors/warnings, 1 npx dir
+
+Both workflow copies (.github/workflows/webtest.yml, ci/webtest.yml) parse as YAML; the step sits right before the e2e cargo test:
+  .github/workflows/webtest.yml step 3 -> next: cargo test --locked -p webtest -- --ignored --test-threads 2
+  ci/webtest.yml step 3 -> next: cargo test --locked -p webtest -p agent -- --ignored --test-threads 2
+
+Not verified here: the CI run itself (it runs on push; the push of this version is its check).

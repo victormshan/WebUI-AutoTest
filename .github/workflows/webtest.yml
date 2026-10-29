@@ -37,6 +37,13 @@ jobs:
         with:
           node-version: 22
       - uses: Swatinem/rust-cache@v2
+      # Install the pinned chrome-devtools-mcp once: with a cold npx cache, tests started in
+      # parallel install it into the same ~/.npm/_npx directory at once and fail (ENOTEMPTY).
+      - name: Warm the npx cache
+        run: |
+          pkg=$(sed -n 's/^pub const DEFAULT_PACKAGE: &str = "\(.*\)";/\1/p' crates/mcp-client/src/lib.rs)
+          test -n "$pkg"
+          npx -y "$pkg" --version
       # Framework self-tests against fixtures/shop (uses the runner's Chrome).
       - run: cargo test --locked -p webtest -- --ignored --test-threads 2
 
