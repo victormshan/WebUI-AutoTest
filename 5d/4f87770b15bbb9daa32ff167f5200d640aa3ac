@@ -1,0 +1,12 @@
+review-gate-attestation: v1
+task: browser-mcp
+version: 1/3
+commit: 5d4f87770b15bbb9daa32ff167f5200d640aa3ac
+tree: 47a247d8c23384d3521e3c81d5b11c60651a8b75
+parent: 9c0a4b98dfadbf7fd5cc570d637e60ee2cef0150
+review: v1-1
+reviewer: external-api/gemini-api
+verdict: approved
+at: 2026-10-30T01:52:59Z
+signature: dfe1Vz7p72V5MMHBWY1p5YusIo5mx1GJ0NluiBm2NoAP0tIGKpg8CKZ2L7WW0FKKlykBOC6zrrZtOEeobtSyBw==
+key: ITU9Oc3AbiC/Q/LYPwld2b+OC2rxlqHbvCO7IQcGdXw=
