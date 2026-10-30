@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "rust_browser": {
+      "type": "local",
+      "command": [
+        "/home/administrator/projects/Chrome-MCP/target/debug/browser-mcp",
+        "--chrome",
+        "/home/administrator/.local/bin/chrome-wsl"
+      ],
+      "enabled": true,
+      "timeout": 30000
+    }
+  }
+}

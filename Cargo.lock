@@ -249,6 +249,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "browser-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "browser-runtime",
+ "clap",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "browser-runtime"
 version = "0.1.0"
 dependencies = [
