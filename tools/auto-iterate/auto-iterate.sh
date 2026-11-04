@@ -20,6 +20,9 @@ usage: auto-iterate.sh --task ID (--agent-cmd CMD | --adapter NAME) [options]
   --report FILE      write a Markdown run report to FILE
   --events FILE      append one JSON object per line to FILE
   --review-timeout S kill the external review client after S seconds (0 = off, default 0)
+  --drain-timeout S  wait up to S seconds while the gate is draining (default 1800;
+                     0 = fail immediately on the first draining response)
+  --drain-interval S seconds between draining retries (default 5; 0 = immediate)
   --check            validate prerequisites and exit without changing anything
   --plan, --dry-run  validate and print the next round plan; change nothing
   --provider NAME    reviewer provider passed to `review run` (default: gate auto)
@@ -65,11 +68,12 @@ releases the lock when the driver exits, so a crashed run never leaves a stale
 lease behind.
 
 Exit: 0 done/finalized, 2 lock held or pending state, 3 no external AI,
-      4 paused by the gate, 5 stopped on a rejection, 1 error.
+      4 paused by the gate or gate still draining after --drain-timeout,
+      5 stopped on a rejection, 1 error.
 TXT
 }
 
-TASK=; AGENT=; ADAPTER=; adapter_note=; MESSAGE=; EVIDENCE=; EVIDENCE_SET=0; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; FALLBACK=; FALLBACK_CHANNEL=claude-subagent; state=
+TASK=; AGENT=; ADAPTER=; adapter_note=; MESSAGE=; EVIDENCE=; EVIDENCE_SET=0; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; DRAIN_TIMEOUT=1800; DRAIN_INTERVAL=5; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; FALLBACK=; FALLBACK_CHANNEL=claude-subagent; state=
 LOCK_TIMEOUT=0; lockfile=; lock_owner=; VERIFY_CMD=; VERIFY_TIMEOUT=0; VERIFY_CMD_SET=0; VERIFY_TIMEOUT_SET=0; VERSION_PLAN=; resume_review=0; resume_allow_dirty=0; keep_state=0; started_clean=0; durable_feedback=
 NOTIFY=; VERIFY_RANGE=0; NOTIFY_TIMEOUT=0; VERIFY_RANGE_TIMEOUT=0; NOTIFY_EVENTS=; NOTIFY_RETRIES=0; NOTIFY_RETRY_DELAY=1; notify_event=; notify_reason=; manifest=; MANIFEST=; MANIFEST_SET=0; commit=; tag=; rid=; verdict=; channel=; msg=; full=; PLAN=0; status_file=; run_started=
 while [ $# -gt 0 ]; do
@@ -86,6 +90,8 @@ while [ $# -gt 0 ]; do
         --report) REPORT=$2; shift 2 ;;
         --events) EVENTS=$2; shift 2 ;;
         --review-timeout) REVIEW_TIMEOUT=$2; shift 2 ;;
+        --drain-timeout) DRAIN_TIMEOUT=$2; shift 2 ;;
+        --drain-interval) DRAIN_INTERVAL=$2; shift 2 ;;
         --check) CHECK=1; shift ;;
         --plan|--dry-run) PLAN=1; shift ;;
         --provider) PROVIDER=$2; shift 2 ;;
@@ -140,6 +146,8 @@ case "$MAX" in ''|*[!0-9]*) echo "--max must be an integer" >&2; exit 2 ;; esac
 [ "$MAX" -ge 1 ] || { echo "--max must be >= 1" >&2; exit 2; }
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*) echo "--agent-timeout must be an integer" >&2; exit 2 ;; esac
 case "$REVIEW_TIMEOUT" in ''|*[!0-9]*) echo "--review-timeout must be an integer" >&2; exit 2 ;; esac
+case "$DRAIN_TIMEOUT" in ''|*[!0-9]*) echo "--drain-timeout must be an integer" >&2; exit 2 ;; esac
+case "$DRAIN_INTERVAL" in ''|*[!0-9]*) echo "--drain-interval must be an integer" >&2; exit 2 ;; esac
 case "$LOCK_TIMEOUT" in ''|*[!0-9]*) echo "--lock-timeout must be an integer" >&2; exit 2 ;; esac
 case "$VERIFY_TIMEOUT" in ''|*[!0-9]*) echo "--verify-timeout must be an integer" >&2; exit 2 ;; esac
 case "$NOTIFY_TIMEOUT" in ''|*[!0-9]*) echo "--notify-timeout must be an integer" >&2; exit 2 ;; esac
@@ -415,6 +423,101 @@ PY
     _ws_rc=$?
     write_run_status "$_phase" || true
     return "$_ws_rc"
+}
+
+gate_health() {
+    _gh_url=${REVIEW_GATE_URL:-http://127.0.0.1:7878}
+    python3 - "$_gh_url" <<'PY' 2>/dev/null || true
+import json, sys, urllib.request
+url = sys.argv[1].rstrip("/") + "/health"
+try:
+    with urllib.request.urlopen(url, timeout=2) as r:
+        d = json.load(r)
+    print("draining" if d.get("drain", {}).get("draining") is True else "ok")
+except Exception:
+    print("error")
+PY
+}
+
+gate_is_draining() {
+    _gd_out=$1; _gd_err=$2
+    _gd_health=$(gate_health)
+    [ "$_gd_health" = draining ] && return 0
+    if grep -Eiq '(^|[^0-9])503([^0-9]|$)' "$_gd_out" "$_gd_err" 2>/dev/null \
+        && grep -Eiq 'draining' "$_gd_out" "$_gd_err" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+drain_mark() {
+    [ -n "${state:-}" ] && [ -f "$state" ] || return 0
+    python3 - "$state" "$1" "$2" "$3" "$4" "$DRAIN_TIMEOUT" <<'PY' 2>/dev/null || true
+import json, os, sys
+p, label, started, elapsed, attempts, limit = sys.argv[1:7]
+d = json.load(open(p))
+d["drain_wait"] = {
+    "active": True,
+    "label": label,
+    "started": int(started),
+    "elapsed_secs": int(elapsed),
+    "attempts": int(attempts),
+    "limit_secs": int(limit),
+}
+tmp = f"{p}.tmp.{os.getpid()}"
+with open(tmp, "w") as f:
+    json.dump(d, f)
+    f.write("\n")
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(tmp, p)
+PY
+}
+
+# Run a review-gate write. A 503 while /health reports drain.draining (or a
+# 503+draining body when health is unavailable) is retried without changing the
+# round phase. Other failures are returned unchanged. Exhausting
+# --drain-timeout returns 4, never a rejection.
+gate_write() {
+    _gw_label=$1; shift
+    _gw_start=$(date +%s)
+    _gw_attempt=0
+    _gw_out=$(mktemp "${TMPDIR:-/tmp}/auto-iterate-gate-out.XXXXXX") || return 1
+    _gw_err=$(mktemp "${TMPDIR:-/tmp}/auto-iterate-gate-err.XXXXXX") || {
+        rm -f "$_gw_out"; return 1; }
+    while :; do
+        _gw_attempt=$((_gw_attempt + 1))
+        set +e
+        "$@" >"$_gw_out" 2>"$_gw_err"
+        _gw_rc=$?
+        set -e
+        if [ "$_gw_rc" -eq 0 ]; then
+            cat "$_gw_out"
+            cat "$_gw_err" >&2
+            rm -f "$_gw_out" "$_gw_err"
+            return 0
+        fi
+        if gate_is_draining "$_gw_out" "$_gw_err"; then
+            _gw_elapsed=$(( $(date +%s) - _gw_start ))
+            if [ "$DRAIN_TIMEOUT" -le 0 ] || [ "$_gw_elapsed" -ge "$DRAIN_TIMEOUT" ]; then
+                printf 'review-gate is draining; %s waited %ss (limit %ss); not a review failure\n' \
+                    "$_gw_label" "$_gw_elapsed" "$DRAIN_TIMEOUT" >&2
+                log "stop gate-draining label=$_gw_label waited=${_gw_elapsed}s limit=${DRAIN_TIMEOUT}s" || true
+                emit stop reason="gate-draining" label="$_gw_label" waited="$_gw_elapsed" || true
+                rm -f "$_gw_out" "$_gw_err"
+                return 4
+            fi
+            drain_mark "$_gw_label" "$_gw_start" "$_gw_elapsed" "$_gw_attempt" || true
+            log "drain wait label=$_gw_label attempt=$_gw_attempt elapsed=${_gw_elapsed}s" || true
+            emit drain_wait label="$_gw_label" attempt="$_gw_attempt" elapsed="$_gw_elapsed" || true
+            if [ "$DRAIN_INTERVAL" -gt 0 ]; then sleep "$DRAIN_INTERVAL"; fi
+            continue
+        fi
+        cat "$_gw_out"
+        cat "$_gw_err" >&2
+        rm -f "$_gw_out" "$_gw_err"
+        return "$_gw_rc"
+    done
 }
 
 write_retry_meta() {
@@ -847,8 +950,13 @@ resume_pending() {
                 log "resume committed review=$rrid already recorded as $recorded"
             else
                 [ -z "$recorded" ] || { echo "resume: review $rrid was recorded as $recorded" >&2; return 1; }
-                out=$(review-gate record --id "$TASK" --review "$rrid" --commit "$rcommit" --tag "$rtag") || {
-                    echo "resume: record failed; state kept" >&2; return 1; }
+                set +e
+                out=$(gate_write record review-gate record --id "$TASK" --review "$rrid" --commit "$rcommit" --tag "$rtag")
+                grc=$?
+                set -e
+                if [ "$grc" -eq 4 ]; then return 4; fi
+                if [ "$grc" -ne 0 ]; then
+                    echo "resume: record failed; state kept" >&2; return 1; fi
                 raction=$(printf '%s' "$out" | jget action)
             fi
             ;;
@@ -892,8 +1000,13 @@ resume_pending() {
             fi
             write_state committed "$rit" "$rrid" "$rcommit" "$rtag" "$rmsg" "$rchan" "$rhead" "$started_clean" "" "$rtree" || {
                 echo "resume: cannot persist committed state" >&2; return 1; }
-            out=$(review-gate record --id "$TASK" --review "$rrid" --commit "$rcommit" --tag "$rtag") || {
-                echo "resume: record failed; state kept" >&2; return 1; }
+            set +e
+            out=$(gate_write record review-gate record --id "$TASK" --review "$rrid" --commit "$rcommit" --tag "$rtag")
+            grc=$?
+            set -e
+            if [ "$grc" -eq 4 ]; then return 4; fi
+            if [ "$grc" -ne 0 ]; then
+                echo "resume: record failed; state kept" >&2; return 1; fi
             ;;
         staged|reviewing|verify)
             if [ -n "$rhead" ] && [ "$cur_head" != "$rhead" ]; then
@@ -951,8 +1064,13 @@ resume_pending() {
                     raction=already-recorded
                     log "resume rejected review=$rrid already recorded as $recorded" ;;
                 "")
-                    out=$(review-gate record --id "$TASK" --review "$rrid") || {
-                        echo "resume: record failed; state kept" >&2; return 1; }
+                    set +e
+                    out=$(gate_write record review-gate record --id "$TASK" --review "$rrid")
+                    grc=$?
+                    set -e
+                    if [ "$grc" -eq 4 ]; then return 4; fi
+                    if [ "$grc" -ne 0 ]; then
+                        echo "resume: record failed; state kept" >&2; return 1; fi
                     raction=$(printf '%s' "$out" | jget action) ;;
                 *)
                     echo "resume: review $rrid was recorded as $recorded" >&2; return 1 ;;
@@ -1144,7 +1262,9 @@ while :; do
             echo "pending state $state; rerun with --resume" >&2
             exit 2
         fi
-        resume_pending || exit 1
+        resume_pending
+        _rp_rc=$?
+        [ "$_rp_rc" -eq 0 ] || exit "$_rp_rc"
         show=$(review-gate task show --id "$TASK")
         status=$(printf '%s' "$show" | jget status)
         [ "$status" = running ] || { log "stop status=${status:-unknown}"; echo "task $TASK is ${status:-unknown}; stopping"; exit 0; }
@@ -1269,7 +1389,12 @@ while :; do
 
         _fbtext=$(cat "$feedback" 2>/dev/null || true)
         write_state staged "$iteration" "" "" "" "$msg" "" "$head_base" "$started_clean" "$_fbtext"
-        if ! review-gate stage --id "$TASK" >/dev/null; then
+        set +e
+        gate_write stage review-gate stage --id "$TASK" >/dev/null
+        grc=$?
+        set -e
+        if [ "$grc" -eq 4 ]; then exit 4; fi
+        if [ "$grc" -ne 0 ]; then
             log "stop stage-failed"
             emit stop reason="stage-failed"
             echo "review-gate stage failed; changes kept" >&2
@@ -1282,7 +1407,12 @@ while :; do
         fi
         _fbtext=$(cat "$feedback" 2>/dev/null || true)
         write_state staged "$iteration" "" "" "" "$msg" "" "$head_base" "$started_clean" "$_fbtext"
-        if ! review-gate stage --id "$TASK" >/dev/null; then
+        set +e
+        gate_write stage review-gate stage --id "$TASK" >/dev/null
+        grc=$?
+        set -e
+        if [ "$grc" -eq 4 ]; then exit 4; fi
+        if [ "$grc" -ne 0 ]; then
             log "stop stage-failed"
             emit stop reason="stage-failed"
             echo "review-gate stage failed; changes kept" >&2
@@ -1299,12 +1429,13 @@ while :; do
     if [ -n "$EVIDENCE" ]; then set -- "$@" --evidence "$EVIDENCE"; fi
     if [ -n "$PROVIDER" ]; then set -- "$@" --provider "$PROVIDER"; fi
     if [ "$REVIEW_TIMEOUT" -gt 0 ]; then
-        job=$(timeout "$REVIEW_TIMEOUT" "$@" 9>&-)
+        job=$(gate_write review-run timeout "$REVIEW_TIMEOUT" "$@" 9>&-)
     else
-        job=$("$@" 9>&-)
+        job=$(gate_write review-run "$@" 9>&-)
     fi
     rc=$?
     set -e
+    if [ "$rc" -eq 4 ]; then exit 4; fi
     if ! worker_lease_release; then
         echo "review left a background process holding the worker lease" >&2
         log "stop review-descendant"
@@ -1358,7 +1489,12 @@ while :; do
             echo "fallback reviewer wrote no review text" >&2
             exit 1
         fi
-        if ! job=$(review-gate review submit --id "$TASK" --channel "$FALLBACK_CHANNEL" --file "$fb_file"); then
+        set +e
+        job=$(gate_write review-submit review-gate review submit --id "$TASK" --channel "$FALLBACK_CHANNEL" --file "$fb_file")
+        frc=$?
+        set -e
+        if [ "$frc" -eq 4 ]; then exit 4; fi
+        if [ "$frc" -ne 0 ]; then
             log "stop fallback-submit-failed"
             emit stop reason="fallback-submit-failed"
             echo "review submit failed; staged tree kept" >&2
@@ -1406,7 +1542,17 @@ while :; do
         write_state committed "$iteration" "$rid" "$full" "$tag" "$msg" "$channel" "$head_base" "$started_clean" "" "$reviewed_tree"
         log "approved review=$rid commit=$commit tag=$tag"
         emit approved review="$rid" commit="$commit" tag="$tag"
-        out=$(review-gate record --id "$TASK" --review "$rid" --commit HEAD --tag "$tag")
+        set +e
+        out=$(gate_write record review-gate record --id "$TASK" --review "$rid" --commit HEAD --tag "$tag")
+        grc=$?
+        set -e
+        if [ "$grc" -eq 4 ]; then exit 4; fi
+        if [ "$grc" -ne 0 ]; then
+            log "stop record-failed"
+            emit stop reason="record-failed"
+            echo "review-gate record failed; state kept" >&2
+            exit 1
+        fi
         write_manifest "$iteration" "$rid" "$full" "$tag" "$channel" "$msg" "$rprovider" "$reviewed_tree" "$version_acceptance" "$VERIFY_CMD" \
             || { echo "cannot append approved version to $manifest; state kept" >&2; exit 1; }
         rm -f "$durable_feedback"
@@ -1422,7 +1568,17 @@ while :; do
         write_retry_meta "$head_base" "$untracked_b64"
         log "rejected review=$rid"
         emit rejected review="$rid"
-        out=$(review-gate record --id "$TASK" --review "$rid")
+        set +e
+        out=$(gate_write record review-gate record --id "$TASK" --review "$rid")
+        grc=$?
+        set -e
+        if [ "$grc" -eq 4 ]; then exit 4; fi
+        if [ "$grc" -ne 0 ]; then
+            log "stop record-failed"
+            emit stop reason="record-failed"
+            echo "review-gate record failed; state kept" >&2
+            exit 1
+        fi
         git -C "$repo" reset -q
         if [ "$started_clean" -eq 1 ]; then
             clean_untracked "$untracked_b64"

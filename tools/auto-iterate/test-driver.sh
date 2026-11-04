@@ -9,6 +9,17 @@ trap cleanup EXIT
 
 fail() { echo "test-driver: FAIL: $*" >&2; exit 1; }
 
+kill_driver_tree() {
+    _dp=$1
+    for _c in $(pgrep -P "$_dp" 2>/dev/null || true); do
+        if tr '\0' ' ' < "/proc/$_c/cmdline" 2>/dev/null | grep -q 'auto-iterate.sh'; then
+            kill -9 "$_c" 2>/dev/null || true
+        fi
+    done
+    kill -9 "$_dp" 2>/dev/null || true
+    wait "$_dp" 2>/dev/null || true
+}
+
 repo=$tmp/repo
 bin=$tmp/bin
 state=$tmp/state
@@ -27,6 +38,17 @@ set -eu
 state=${STUB_STATE:?}
 n=$(cat "$state" 2>/dev/null || echo 0)
 [ -n "$n" ] || n=0
+drain_snapshot() {
+    [ -z "${STUB_DRAIN_SNAPSHOT:-}" ] || [ -z "${STUB_DRIVER_STATE:-}" ] \
+        || cp "$STUB_DRIVER_STATE" "$STUB_DRAIN_SNAPSHOT" 2>/dev/null || true
+}
+drain_once() {
+    _marker=$1
+    [ "${2:-0}" = 1 ] || return 1
+    [ ! -f "$_marker" ] || return 1
+    : > "$_marker"
+    return 0
+}
 case "$1" in
     task)
         if [ -f "$state.done" ]; then st=done
@@ -36,6 +58,11 @@ case "$1" in
         printf '{"status":"%s","current_iteration":%s,"repo":"%s","stop_reason":null,"goal":"g","final_acceptance":"a","history":%s}\n' "$st" "$((n+1))" "$STUB_REPO" "$hist"
         ;;
     stage)
+        if drain_once "$state.drain_stage" "${STUB_DRAIN_STAGE_ONCE:-0}"; then
+            drain_snapshot
+            echo "503 draining: stage" >&2
+            exit 1
+        fi
         if [ "${STUB_FAIL_STAGE:-0}" = 1 ] && [ ! -f "$state.stage_failed" ]; then
             : > "$state.stage_failed"
             exit 1
@@ -53,6 +80,12 @@ case "$1" in
     review)
         case "$2" in
             run)
+                if [ "${STUB_DRAIN_RUN_ALWAYS:-0}" = 1 ] \
+                    || drain_once "$state.drain_run" "${STUB_DRAIN_RUN_ONCE:-0}"; then
+                    drain_snapshot
+                    echo "503 draining: review run" >&2
+                    exit 1
+                fi
                 if [ "${STUB_RUN_NO_AI:-0}" = 1 ]; then exit 3; fi
                 if [ "${STUB_SLOW_REVIEW:-0}" = 1 ]; then
                     [ -z "${STUB_REVIEW_PID:-}" ] || printf '%s\n' "$$" > "$STUB_REVIEW_PID"
@@ -74,6 +107,11 @@ case "$1" in
                 printf '{"record":{"id":"v%s-1","verdict":"%s","text":"%s","channel":"stub","provider":"stub-provider","model":"stub-model"}}\n' "$((n+1))" "$v" "$t"
                 ;;
             submit)
+                if drain_once "$state.drain_submit" "${STUB_DRAIN_SUBMIT_ONCE:-0}"; then
+                    drain_snapshot
+                    echo "503 draining: review submit" >&2
+                    exit 1
+                fi
                 if [ -n "${STUB_SUBMIT_ARGS:-}" ]; then printf '%s\n' "$*" > "$STUB_SUBMIT_ARGS"; fi
                 printf '{"id":"fallback-1","verdict":"approved","text":"ok","channel":"claude-subagent","provider":"claude-subagent","model":null}\n'
                 ;;
@@ -81,6 +119,11 @@ case "$1" in
         esac
         ;;
     record)
+        if drain_once "$state.drain_record" "${STUB_DRAIN_RECORD_ONCE:-0}"; then
+            drain_snapshot
+            echo "503 draining: record" >&2
+            exit 1
+        fi
         if [ "${STUB_FAIL_RECORD:-0}" = 1 ] && [ ! -f "${STUB_FAIL_MARKER:-/nonexistent}" ]; then
             : > "${STUB_FAIL_MARKER:-/dev/null}"
             exit 1
@@ -1485,8 +1528,7 @@ while [ ! -f "$tmp/review40.pid" ] && [ "$i" -lt 50 ]; do
     i=$((i + 1))
 done
 [ -f "$tmp/review40.pid" ] || fail "review worker did not start"
-kill -9 "$driver40" 2>/dev/null || true
-wait "$driver40" 2>/dev/null || true
+kill_driver_tree "$driver40"
 set +e
 STUB_REPO=$repo40 STUB_STATE=$state40 STUB_SLOW_REVIEW=1 STUB_REVIEW_PID=$tmp/review40.pid PATH="$bin:$PATH" \
     "$here/auto-iterate.sh" --task review40 --agent-cmd "$tmp/agent.sh" \
@@ -1531,8 +1573,7 @@ while [ ! -f "$tmp/fallback41.pid" ] && [ "$i" -lt 50 ]; do
     i=$((i + 1))
 done
 [ -f "$tmp/fallback41.pid" ] || fail "fallback worker did not start"
-kill -9 "$driver41" 2>/dev/null || true
-wait "$driver41" 2>/dev/null || true
+kill_driver_tree "$driver41"
 set +e
 FB_PID=$tmp/fallback41.pid STUB_REPO=$repo41 STUB_STATE=$state41 STUB_RUN_NO_AI=1 PATH="$bin:$PATH" \
     "$here/auto-iterate.sh" --task fallback41 --agent-cmd "$tmp/agent.sh" \
@@ -2533,5 +2574,110 @@ grep -q "adapter=opencode path=$adir/opencode-agent.sh" "$tmp/log77" \
 grep -q "adapter=opencode path=$adir/opencode-agent.sh" "$tmp/out77" \
     || fail "stdout misses the resolved adapter"
 grep -q "fake opencode round 1" "$tmp/ev77" || fail "adapter evidence was not forwarded"
+
+# Draining review-gate writes are retried without changing the round phase.
+repo80=$tmp/repo80
+state80=$tmp/state80
+mkdir -p "$repo80"
+git -C "$repo80" init -q
+git -C "$repo80" config user.email test@example.com
+git -C "$repo80" config user.name test
+echo base > "$repo80/f"
+git -C "$repo80" add f
+git -C "$repo80" commit -qm base
+echo 0 > "$state80"
+gitdir80=$(git -C "$repo80" rev-parse --absolute-git-dir)
+STUB_REPO=$repo80 STUB_STATE=$state80 STUB_ITERATIONS=1 \
+    STUB_DRAIN_STAGE_ONCE=1 STUB_DRAIN_RUN_ONCE=1 \
+    STUB_DRAIN_SNAPSHOT=$tmp/drain80.snapshot \
+    STUB_DRIVER_STATE=$gitdir80/auto-iterate/drain80.json \
+    REVIEW_GATE_URL=http://127.0.0.1:1 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task drain80 --agent-cmd "$tmp/agent.sh" \
+    --drain-timeout 5 --drain-interval 0 --max 1 --log "$tmp/run80.log" \
+    >"$tmp/out80" 2>&1 || { cat "$tmp/out80"; fail "draining stage/review run failed"; }
+[ "$(git -C "$repo80" rev-list --count HEAD)" -eq 2 ] || fail "draining stage/review run lost the commit"
+[ "$(git -C "$repo80" tag | wc -l)" -eq 1 ] || fail "draining stage/review run lost the tag"
+grep -q "drain wait label=stage" "$tmp/run80.log" || fail "stage draining was not retried"
+grep -q "drain wait label=review-run" "$tmp/run80.log" || fail "review run draining was not retried"
+! grep -q "stop gate-draining" "$tmp/run80.log" || fail "recovered drain was treated as a stop"
+python3 - "$tmp/drain80.snapshot" <<'PY' || fail "drain snapshot has the wrong phase"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["phase"] == "reviewing", d
+PY
+
+# A drain that never clears exits 4, keeps the reviewing state and does not commit.
+repo81=$tmp/repo81
+state81=$tmp/state81
+mkdir -p "$repo81"
+git -C "$repo81" init -q
+git -C "$repo81" config user.email test@example.com
+git -C "$repo81" config user.name test
+echo base > "$repo81/f"
+git -C "$repo81" add f
+git -C "$repo81" commit -qm base
+echo 0 > "$state81"
+gitdir81=$(git -C "$repo81" rev-parse --absolute-git-dir)
+set +e
+STUB_REPO=$repo81 STUB_STATE=$state81 STUB_ITERATIONS=1 STUB_DRAIN_RUN_ALWAYS=1 \
+    REVIEW_GATE_URL=http://127.0.0.1:1 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task drain81 --agent-cmd "$tmp/agent.sh" \
+    --drain-timeout 1 --drain-interval 0 --max 1 --log "$tmp/run81.log" \
+    >"$tmp/out81" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 4 ] || fail "permanent drain exited $rc, expected 4"
+[ "$(git -C "$repo81" rev-list --count HEAD)" -eq 1 ] || fail "permanent drain committed a version"
+[ "$(git -C "$repo81" tag | wc -l)" -eq 0 ] || fail "permanent drain tagged a version"
+grep -q "stop gate-draining" "$tmp/run81.log" || fail "permanent drain did not stop cleanly"
+python3 - "$gitdir81/auto-iterate/drain81.json" <<'PY' || fail "permanent drain changed the state phase"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["phase"] == "reviewing", d
+assert d["drain_wait"]["active"] is True, d
+PY
+
+# A record 503 is retried after the commit; the approved version is recorded once.
+repo82=$tmp/repo82
+state82=$tmp/state82
+mkdir -p "$repo82"
+git -C "$repo82" init -q
+git -C "$repo82" config user.email test@example.com
+git -C "$repo82" config user.name test
+echo base > "$repo82/f"
+git -C "$repo82" add f
+git -C "$repo82" commit -qm base
+echo 0 > "$state82"
+STUB_REPO=$repo82 STUB_STATE=$state82 STUB_ITERATIONS=1 STUB_DRAIN_RECORD_ONCE=1 \
+    REVIEW_GATE_URL=http://127.0.0.1:1 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task drain82 --agent-cmd "$tmp/agent.sh" \
+    --drain-timeout 5 --drain-interval 0 --max 1 --log "$tmp/run82.log" \
+    >"$tmp/out82" 2>&1 || { cat "$tmp/out82"; fail "draining record failed"; }
+[ "$(git -C "$repo82" rev-list --count HEAD)" -eq 2 ] || fail "draining record lost the commit"
+[ "$(git -C "$repo82" tag | wc -l)" -eq 1 ] || fail "draining record lost the tag"
+grep -q "drain wait label=record" "$tmp/run82.log" || fail "record draining was not retried"
+grep -q "action=finalize" "$tmp/run82.log" || fail "draining record did not finalize"
+
+# Fallback review submit is also retried while the gate drains.
+repo83=$tmp/repo83
+state83=$tmp/state83
+mkdir -p "$repo83"
+git -C "$repo83" init -q
+git -C "$repo83" config user.email test@example.com
+git -C "$repo83" config user.name test
+echo base > "$repo83/f"
+git -C "$repo83" add f
+git -C "$repo83" commit -qm base
+echo 0 > "$state83"
+STUB_REPO=$repo83 STUB_STATE=$state83 STUB_ITERATIONS=1 \
+    STUB_RUN_NO_AI=1 STUB_DRAIN_SUBMIT_ONCE=1 \
+    REVIEW_GATE_URL=http://127.0.0.1:1 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task drain83 --agent-cmd "$tmp/agent.sh" \
+    --fallback-cmd "$tmp/fallback.sh" --drain-timeout 5 --drain-interval 0 --max 1 \
+    --log "$tmp/run83.log" >"$tmp/out83" 2>&1 \
+    || { cat "$tmp/out83"; fail "draining fallback submit failed"; }
+[ "$(git -C "$repo83" rev-list --count HEAD)" -eq 2 ] || fail "draining submit lost the commit"
+[ "$(git -C "$repo83" tag | wc -l)" -eq 1 ] || fail "draining submit lost the tag"
+grep -q "drain wait label=review-submit" "$tmp/run83.log" || fail "review submit draining was not retried"
 
 echo "test-driver: ok"

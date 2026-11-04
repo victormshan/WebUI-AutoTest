@@ -228,6 +228,15 @@ status.
 driver exits 3 and leaves the task and staged tree intact; the service may still
 finish the review in the background.
 
+`--drain-timeout S` (default 1800) and `--drain-interval S` (default 5) control
+what happens when the gate is draining. The driver probes `GET /health` for
+`drain.draining`, with a `503` plus `draining` response body as fallback, and
+retries `stage`, `review run`, fallback `review submit` and `record` without
+changing the round phase. It adds only `drain_wait` metadata to the round state.
+If the gate is still draining after the limit, the driver exits 4 and reports
+maintenance; it is not treated as a rejection or a review failure. `0` disables
+waiting (fail on the first draining response); a `0` interval retries immediately.
+
 Each round's elapsed seconds are logged, emitted as `round_done` and added to the
 report row.
 
