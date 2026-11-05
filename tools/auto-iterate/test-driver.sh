@@ -5,16 +5,19 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/auto-iterate-test.XXXXXX")
 cleanup() { rm -rf "$tmp"; }
+printf '%s\n' 'test-gate-token-secret' > "$tmp/token"
+export REVIEW_GATE_TOKEN_FILE=$tmp/token
 trap cleanup EXIT
 
 fail() { echo "test-driver: FAIL: $*" >&2; exit 1; }
 
 kill_driver_tree() {
-    _dp=$1
-    for _c in $(pgrep -P "$_dp" 2>/dev/null || true); do
-        if tr '\0' ' ' < "/proc/$_c/cmdline" 2>/dev/null | grep -q 'auto-iterate.sh'; then
-            kill -9 "$_c" 2>/dev/null || true
-        fi
+    _dp=$1; _task=$2
+    for _p in /proc/[0-9]*; do
+        _cmd=$( { tr '\0' ' ' < "/proc/${_p##*/}/cmdline"; } 2>/dev/null || true )
+        case "$_cmd" in
+            *auto-iterate.sh*"--task $_task"*) kill -9 "${_p##*/}" 2>/dev/null || true ;;
+        esac
     done
     kill -9 "$_dp" 2>/dev/null || true
     wait "$_dp" 2>/dev/null || true
@@ -38,6 +41,7 @@ set -eu
 state=${STUB_STATE:?}
 n=$(cat "$state" 2>/dev/null || echo 0)
 [ -n "$n" ] || n=0
+[ -z "${STUB_TOKEN_SEEN:-}" ] || printf '%s\n' "${REVIEW_GATE_TOKEN_FILE:-}" > "$STUB_TOKEN_SEEN"
 drain_snapshot() {
     [ -z "${STUB_DRAIN_SNAPSHOT:-}" ] || [ -z "${STUB_DRIVER_STATE:-}" ] \
         || cp "$STUB_DRIVER_STATE" "$STUB_DRAIN_SNAPSHOT" 2>/dev/null || true
@@ -51,6 +55,10 @@ drain_once() {
 }
 case "$1" in
     task)
+        if [ "${STUB_403_TASK_SHOW:-0}" = 1 ]; then
+            echo "403 review belongs to another principal" >&2
+            exit 1
+        fi
         if [ -f "$state.done" ]; then st=done
         elif [ -f "$state.paused" ]; then st=paused
         else st=running; fi
@@ -58,6 +66,10 @@ case "$1" in
         printf '{"status":"%s","current_iteration":%s,"repo":"%s","stop_reason":null,"goal":"g","final_acceptance":"a","history":%s}\n' "$st" "$((n+1))" "$STUB_REPO" "$hist"
         ;;
     stage)
+        if [ "${STUB_403_STAGE:-0}" = 1 ]; then
+            echo "403 no known owner for this token" >&2
+            exit 1
+        fi
         if drain_once "$state.drain_stage" "${STUB_DRAIN_STAGE_ONCE:-0}"; then
             drain_snapshot
             echo "503 draining: stage" >&2
@@ -1528,7 +1540,7 @@ while [ ! -f "$tmp/review40.pid" ] && [ "$i" -lt 50 ]; do
     i=$((i + 1))
 done
 [ -f "$tmp/review40.pid" ] || fail "review worker did not start"
-kill_driver_tree "$driver40"
+kill_driver_tree "$driver40" review40
 set +e
 STUB_REPO=$repo40 STUB_STATE=$state40 STUB_SLOW_REVIEW=1 STUB_REVIEW_PID=$tmp/review40.pid PATH="$bin:$PATH" \
     "$here/auto-iterate.sh" --task review40 --agent-cmd "$tmp/agent.sh" \
@@ -1573,7 +1585,7 @@ while [ ! -f "$tmp/fallback41.pid" ] && [ "$i" -lt 50 ]; do
     i=$((i + 1))
 done
 [ -f "$tmp/fallback41.pid" ] || fail "fallback worker did not start"
-kill_driver_tree "$driver41"
+kill_driver_tree "$driver41" fallback41
 set +e
 FB_PID=$tmp/fallback41.pid STUB_REPO=$repo41 STUB_STATE=$state41 STUB_RUN_NO_AI=1 PATH="$bin:$PATH" \
     "$here/auto-iterate.sh" --task fallback41 --agent-cmd "$tmp/agent.sh" \
@@ -2679,5 +2691,95 @@ STUB_REPO=$repo83 STUB_STATE=$state83 STUB_ITERATIONS=1 \
 [ "$(git -C "$repo83" rev-list --count HEAD)" -eq 2 ] || fail "draining submit lost the commit"
 [ "$(git -C "$repo83" tag | wc -l)" -eq 1 ] || fail "draining submit lost the tag"
 grep -q "drain wait label=review-submit" "$tmp/run83.log" || fail "review submit draining was not retried"
+
+# A token file is passed only to gate subprocesses; the agent never sees it and
+# the manifest records the path, not the token.
+repo84=$tmp/repo84
+state84=$tmp/state84
+mkdir -p "$repo84"
+git -C "$repo84" init -q
+git -C "$repo84" config user.email test@example.com
+git -C "$repo84" config user.name test
+echo base > "$repo84/f"
+git -C "$repo84" add f
+git -C "$repo84" commit -qm base
+echo 0 > "$state84"
+printf 'other-token\n' > "$tmp/other-token"
+cat > "$tmp/token-agent.sh" <<'AG'
+#!/bin/sh
+set -eu
+printf '%s' "${REVIEW_GATE_TOKEN_FILE:-}" > "$TOKEN_AGENT_MARKER"
+printf 'token-agent\n' >> "$AUTO_ITERATE_REPO/f"
+AG
+chmod +x "$tmp/token-agent.sh"
+gitdir84=$(git -C "$repo84" rev-parse --absolute-git-dir)
+REVIEW_GATE_TOKEN_FILE=$tmp/other-token STUB_REPO=$repo84 STUB_STATE=$state84 \
+    STUB_ITERATIONS=1 STUB_TOKEN_SEEN=$tmp/token84.seen \
+    TOKEN_AGENT_MARKER=$tmp/token84.agent PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task token84 --agent-cmd "$tmp/token-agent.sh" \
+    --token-file "$tmp/token" --max 1 --log "$tmp/run84.log" \
+    >"$tmp/out84" 2>&1 || { cat "$tmp/out84"; fail "token-file run failed"; }
+[ "$(cat "$tmp/token84.seen")" = "$tmp/token" ] || fail "gate did not receive the selected token file"
+[ ! -s "$tmp/token84.agent" ] || fail "token leaked to the agent"
+python3 - "$gitdir84/auto-iterate/versions.ndjson" "$tmp/token" <<'PY' || fail "manifest token path is wrong or leaked the token"
+import json, sys
+manifest, token = sys.argv[1:]
+raw = open(manifest).read()
+assert "test-gate-token-secret" not in raw, raw
+entry = json.loads(raw.splitlines()[0])
+assert entry["token_file"] == token, entry
+PY
+
+# A missing token file is rejected before any gate call.
+set +e
+env -u REVIEW_GATE_TOKEN_FILE STUB_REPO=$repo84 STUB_STATE=$state84 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --check --task check >"$tmp/out85" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail "missing token exited $rc, expected 2"
+grep -q "no review-gate token file" "$tmp/out85" || fail "missing token was not reported"
+
+# A 403 on task show stops immediately and keeps the gate message.
+repo86=$tmp/repo86
+state86=$tmp/state86
+mkdir -p "$repo86"
+git -C "$repo86" init -q
+git -C "$repo86" config user.email test@example.com
+git -C "$repo86" config user.name test
+echo base > "$repo86/f"
+git -C "$repo86" add f
+git -C "$repo86" commit -qm base
+echo 0 > "$state86"
+set +e
+STUB_403_TASK_SHOW=1 STUB_REPO=$repo86 STUB_STATE=$state86 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task owner403 --agent-cmd true --max 1 \
+    >"$tmp/out86" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "task-show 403 exited $rc, expected 1"
+grep -q "403 review belongs to another principal" "$tmp/out86" || fail "task-show 403 message was lost"
+[ "$(git -C "$repo86" rev-list --count HEAD)" -eq 1 ] || fail "task-show 403 changed the repo"
+
+# A 403 on stage stops immediately and keeps the gate message.
+repo87=$tmp/repo87
+state87=$tmp/state87
+mkdir -p "$repo87"
+git -C "$repo87" init -q
+git -C "$repo87" config user.email test@example.com
+git -C "$repo87" config user.name test
+echo base > "$repo87/f"
+git -C "$repo87" add f
+git -C "$repo87" commit -qm base
+echo 0 > "$state87"
+set +e
+STUB_403_STAGE=1 STUB_REPO=$repo87 STUB_STATE=$state87 PATH="$bin:$PATH" \
+    "$here/auto-iterate.sh" --task owner403stage --agent-cmd true --max 1 \
+    >"$tmp/out87" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "stage 403 exited $rc, expected 1"
+grep -q "403 no known owner for this token" "$tmp/out87" || fail "stage 403 message was lost"
+grep -q "review-gate stage failed" "$tmp/out87" || fail "stage 403 was not treated as a stage failure"
+[ "$(git -C "$repo87" rev-list --count HEAD)" -eq 1 ] || fail "stage 403 changed the repo"
 
 echo "test-driver: ok"

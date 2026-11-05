@@ -20,6 +20,7 @@ usage: auto-iterate.sh --task ID (--agent-cmd CMD | --adapter NAME) [options]
   --report FILE      write a Markdown run report to FILE
   --events FILE      append one JSON object per line to FILE
   --review-timeout S kill the external review client after S seconds (0 = off, default 0)
+  --token-file FILE  review-gate token file (default: REVIEW_GATE_TOKEN_FILE)
   --drain-timeout S  wait up to S seconds while the gate is draining (default 1800;
                      0 = fail immediately on the first draining response)
   --drain-interval S seconds between draining retries (default 5; 0 = immediate)
@@ -73,7 +74,7 @@ Exit: 0 done/finalized, 2 lock held or pending state, 3 no external AI,
 TXT
 }
 
-TASK=; AGENT=; ADAPTER=; adapter_note=; MESSAGE=; EVIDENCE=; EVIDENCE_SET=0; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; DRAIN_TIMEOUT=1800; DRAIN_INTERVAL=5; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; FALLBACK=; FALLBACK_CHANNEL=claude-subagent; state=
+TASK=; AGENT=; ADAPTER=; adapter_note=; MESSAGE=; EVIDENCE=; EVIDENCE_SET=0; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; DRAIN_TIMEOUT=1800; DRAIN_INTERVAL=5; TOKEN_FILE=; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; FALLBACK=; FALLBACK_CHANNEL=claude-subagent; state=
 LOCK_TIMEOUT=0; lockfile=; lock_owner=; VERIFY_CMD=; VERIFY_TIMEOUT=0; VERIFY_CMD_SET=0; VERIFY_TIMEOUT_SET=0; VERSION_PLAN=; resume_review=0; resume_allow_dirty=0; keep_state=0; started_clean=0; durable_feedback=
 NOTIFY=; VERIFY_RANGE=0; NOTIFY_TIMEOUT=0; VERIFY_RANGE_TIMEOUT=0; NOTIFY_EVENTS=; NOTIFY_RETRIES=0; NOTIFY_RETRY_DELAY=1; notify_event=; notify_reason=; manifest=; MANIFEST=; MANIFEST_SET=0; commit=; tag=; rid=; verdict=; channel=; msg=; full=; PLAN=0; status_file=; run_started=
 while [ $# -gt 0 ]; do
@@ -90,6 +91,7 @@ while [ $# -gt 0 ]; do
         --report) REPORT=$2; shift 2 ;;
         --events) EVENTS=$2; shift 2 ;;
         --review-timeout) REVIEW_TIMEOUT=$2; shift 2 ;;
+        --token-file) TOKEN_FILE=$2; shift 2 ;;
         --drain-timeout) DRAIN_TIMEOUT=$2; shift 2 ;;
         --drain-interval) DRAIN_INTERVAL=$2; shift 2 ;;
         --check) CHECK=1; shift ;;
@@ -142,6 +144,19 @@ fi
 for c in review-gate git python3 flock; do
     command -v "$c" >/dev/null 2>&1 || { echo "missing required command: $c" >&2; exit 1; }
 done
+[ -n "$TOKEN_FILE" ] || TOKEN_FILE=${REVIEW_GATE_TOKEN_FILE:-}
+if [ -z "$TOKEN_FILE" ]; then
+    echo "no review-gate token file; pass --token-file or set REVIEW_GATE_TOKEN_FILE" >&2
+    exit 2
+fi
+[ -r "$TOKEN_FILE" ] || { echo "cannot read review-gate token file: $TOKEN_FILE" >&2; exit 1; }
+case "$TOKEN_FILE" in
+    /*) ;;
+    *) TOKEN_FILE=$(CDPATH= cd -- "$(dirname -- "$TOKEN_FILE")" 2>/dev/null && pwd -P)/$(basename -- "$TOKEN_FILE") \
+        || { echo "cannot resolve review-gate token file: $TOKEN_FILE" >&2; exit 1; } ;;
+esac
+unset REVIEW_GATE_TOKEN_FILE REVIEW_GATE_TOKEN
+gate_env() { REVIEW_GATE_TOKEN_FILE="$TOKEN_FILE" "$@"; }
 case "$MAX" in ''|*[!0-9]*) echo "--max must be an integer" >&2; exit 2 ;; esac
 [ "$MAX" -ge 1 ] || { echo "--max must be >= 1" >&2; exit 2; }
 case "$AGENT_TIMEOUT" in ''|*[!0-9]*) echo "--agent-timeout must be an integer" >&2; exit 2 ;; esac
@@ -234,7 +249,7 @@ if [ "$CHECK" -eq 1 ] || [ "$PLAN" -eq 1 ]; then
             { [ -d "$d" ] && [ -w "$d" ]; } || { echo "check: cannot create $f" >&2; exit 1; }
         fi
     done
-    show=$(review-gate task show --id "$TASK")
+    show=$(gate_env review-gate task show --id "$TASK")
     status=$(printf '%s' "$show" | jget status)
     repo=$(printf '%s' "$show" | jget repo)
     iteration=$(printf '%s' "$show" | jget current_iteration)
@@ -487,10 +502,8 @@ gate_write() {
         rm -f "$_gw_out"; return 1; }
     while :; do
         _gw_attempt=$((_gw_attempt + 1))
-        set +e
-        "$@" >"$_gw_out" 2>"$_gw_err"
-        _gw_rc=$?
-        set -e
+        _gw_rc=0
+        ( set +e; "$@" >"$_gw_out" 2>"$_gw_err" ) || _gw_rc=$?
         if [ "$_gw_rc" -eq 0 ]; then
             cat "$_gw_out"
             cat "$_gw_err" >&2
@@ -499,6 +512,7 @@ gate_write() {
         fi
         if gate_is_draining "$_gw_out" "$_gw_err"; then
             _gw_elapsed=$(( $(date +%s) - _gw_start ))
+            drain_mark "$_gw_label" "$_gw_start" "$_gw_elapsed" "$_gw_attempt" || true
             if [ "$DRAIN_TIMEOUT" -le 0 ] || [ "$_gw_elapsed" -ge "$DRAIN_TIMEOUT" ]; then
                 printf 'review-gate is draining; %s waited %ss (limit %ss); not a review failure\n' \
                     "$_gw_label" "$_gw_elapsed" "$DRAIN_TIMEOUT" >&2
@@ -507,7 +521,6 @@ gate_write() {
                 rm -f "$_gw_out" "$_gw_err"
                 return 4
             fi
-            drain_mark "$_gw_label" "$_gw_start" "$_gw_elapsed" "$_gw_attempt" || true
             log "drain wait label=$_gw_label attempt=$_gw_attempt elapsed=${_gw_elapsed}s" || true
             emit drain_wait label="$_gw_label" attempt="$_gw_attempt" elapsed="$_gw_elapsed" || true
             if [ "$DRAIN_INTERVAL" -gt 0 ]; then sleep "$DRAIN_INTERVAL"; fi
@@ -648,13 +661,13 @@ clean_untracked() {
 
 write_manifest() {
     _mi=$1; _mrid=$2; _mcommit=$3; _mtag=$4; _mchan=$5; _mmsg=$6
-    _mprov=$7; _mtree=$8; _macc=$9; _mvcmd=${10:-}
+    _mprov=$7; _mtree=$8; _macc=$9; _mvcmd=${10:-}; _mtoken=${11:-}
     [ -n "$manifest" ] || return 1
     mkdir -p "$(dirname "$manifest")" || return 1
     python3 - "$manifest" "$TASK" "$_mi" "$_mrid" "$_mcommit" "$_mtag" \
-        "$_mchan" "$_mprov" "$_mmsg" "$_mtree" "$_macc" "$_mvcmd" <<'PY'
+        "$_mchan" "$_mprov" "$_mmsg" "$_mtree" "$_macc" "$_mvcmd" "$_mtoken" <<'PY'
 import datetime, json, os, sys
-p, task, iteration, review, commit, tag, channel, provider, message, tree, acceptance, verify_cmd = sys.argv[1:13]
+p, task, iteration, review, commit, tag, channel, provider, message, tree, acceptance, verify_cmd, token_file = sys.argv[1:14]
 entry = {
     "at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "task": task,
@@ -670,6 +683,7 @@ entry = {
     "tree": tree,
     "acceptance": acceptance,
     "verify_cmd": verify_cmd,
+    "token_file": token_file,
 }
 entries = []
 if os.path.exists(p):
@@ -706,7 +720,7 @@ PY
 }
 
 task_range() {
-    _show=$(review-gate task show --id "$TASK") || return 1
+    _show=$(gate_env review-gate task show --id "$TASK") || return 1
     _first=$(printf '%s' "$_show" | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 for h in d.get("history") or []:
@@ -728,13 +742,13 @@ for h in d.get("history") or []:
 verify_range() {
     [ "$VERIFY_RANGE" -eq 1 ] || return 0
     _range=$(task_range) || { echo "verify-range: cannot determine task range" >&2; return 1; }
-    _pub=$(review-gate pubkey 2>/dev/null | tr -d '\r\n') || { echo "verify-range: cannot read gate pubkey" >&2; return 1; }
+    _pub=$(gate_env review-gate pubkey 2>/dev/null | tr -d '\r\n') || { echo "verify-range: cannot read gate pubkey" >&2; return 1; }
     [ -n "$_pub" ] || { echo "verify-range: empty gate pubkey" >&2; return 1; }
     _vrc=0
     if [ "$VERIFY_RANGE_TIMEOUT" -gt 0 ]; then
-        timeout "$VERIFY_RANGE_TIMEOUT" review-gate verify-range --repo "$repo" --pubkey "$_pub" "$_range" || _vrc=$?
+        gate_env timeout "$VERIFY_RANGE_TIMEOUT" review-gate verify-range --repo "$repo" --pubkey "$_pub" "$_range" || _vrc=$?
     else
-        review-gate verify-range --repo "$repo" --pubkey "$_pub" "$_range" || _vrc=$?
+        gate_env review-gate verify-range --repo "$repo" --pubkey "$_pub" "$_range" || _vrc=$?
     fi
     if [ "$_vrc" -eq 124 ] && [ "$VERIFY_RANGE_TIMEOUT" -gt 0 ]; then
         echo "verify-range timed out after ${VERIFY_RANGE_TIMEOUT}s for $_range" >&2
@@ -824,7 +838,7 @@ release_lock() {
 review_outcome() {
     _rid=$1
     [ -n "$_rid" ] || { printf ''; return 0; }
-    _show=$(review-gate task show --id "$TASK" 2>/dev/null) || return 1
+    _show=$(gate_env review-gate task show --id "$TASK" 2>/dev/null) || return 1
     printf '%s' "$_show" | python3 -c 'import json,sys
 rid = sys.argv[1]
 try:
@@ -951,7 +965,7 @@ resume_pending() {
             else
                 [ -z "$recorded" ] || { echo "resume: review $rrid was recorded as $recorded" >&2; return 1; }
                 set +e
-                out=$(gate_write record review-gate record --id "$TASK" --review "$rrid" --commit "$rcommit" --tag "$rtag")
+                out=$(gate_write record gate_env review-gate record --id "$TASK" --review "$rrid" --commit "$rcommit" --tag "$rtag")
                 grc=$?
                 set -e
                 if [ "$grc" -eq 4 ]; then return 4; fi
@@ -1001,7 +1015,7 @@ resume_pending() {
             write_state committed "$rit" "$rrid" "$rcommit" "$rtag" "$rmsg" "$rchan" "$rhead" "$started_clean" "" "$rtree" || {
                 echo "resume: cannot persist committed state" >&2; return 1; }
             set +e
-            out=$(gate_write record review-gate record --id "$TASK" --review "$rrid" --commit "$rcommit" --tag "$rtag")
+            out=$(gate_write record gate_env review-gate record --id "$TASK" --review "$rrid" --commit "$rcommit" --tag "$rtag")
             grc=$?
             set -e
             if [ "$grc" -eq 4 ]; then return 4; fi
@@ -1065,7 +1079,7 @@ resume_pending() {
                     log "resume rejected review=$rrid already recorded as $recorded" ;;
                 "")
                     set +e
-                    out=$(gate_write record review-gate record --id "$TASK" --review "$rrid")
+                    out=$(gate_write record gate_env review-gate record --id "$TASK" --review "$rrid")
                     grc=$?
                     set -e
                     if [ "$grc" -eq 4 ]; then return 4; fi
@@ -1086,7 +1100,7 @@ resume_pending() {
     esac
     [ -n "$raction" ] || raction=$(printf '%s' "$out" | jget action)
     if [ "$rphase" = committed ] || [ "$rphase" = reviewed ]; then
-        write_manifest "$rit" "$rrid" "$rcommit" "$rtag" "$rchan" "$rmsg" "" "$rtree" "$rva" "$rvc" \
+        write_manifest "$rit" "$rrid" "$rcommit" "$rtag" "$rchan" "$rmsg" "" "$rtree" "$rva" "$rvc" "$TOKEN_FILE" \
             || { echo "resume: cannot append approved version to $manifest" >&2; return 1; }
         if [ "$raction" = finalize ] && [ "$VERIFY_RANGE" -eq 1 ]; then
             verify_range || { echo "resume: verify-range failed" >&2; return 1; }
@@ -1198,7 +1212,7 @@ log "start task=$TASK max=$MAX"
 emit start task="$TASK" max="$MAX"
 
 while :; do
-    show=$(review-gate task show --id "$TASK")
+    show=$(gate_env review-gate task show --id "$TASK")
     status=$(printf '%s' "$show" | jget status)
     iteration=$(printf '%s' "$show" | jget current_iteration)
     repo=$(printf '%s' "$show" | jget repo)
@@ -1228,7 +1242,7 @@ while :; do
     if [ -z "$lockfile" ]; then
         lockfile="$gitdir/auto-iterate/lock"
         acquire_lock || exit 2
-        show=$(review-gate task show --id "$TASK")
+        show=$(gate_env review-gate task show --id "$TASK")
         status=$(printf '%s' "$show" | jget status)
         if [ "$status" != running ]; then
             [ "$RESUME" -eq 1 ] && [ "$round" -eq 0 ] && [ -f "$state" ] || {
@@ -1265,7 +1279,7 @@ while :; do
         resume_pending
         _rp_rc=$?
         [ "$_rp_rc" -eq 0 ] || exit "$_rp_rc"
-        show=$(review-gate task show --id "$TASK")
+        show=$(gate_env review-gate task show --id "$TASK")
         status=$(printf '%s' "$show" | jget status)
         [ "$status" = running ] || { log "stop status=${status:-unknown}"; echo "task $TASK is ${status:-unknown}; stopping"; exit 0; }
         iteration=$(printf '%s' "$show" | jget current_iteration)
@@ -1390,7 +1404,7 @@ while :; do
         _fbtext=$(cat "$feedback" 2>/dev/null || true)
         write_state staged "$iteration" "" "" "" "$msg" "" "$head_base" "$started_clean" "$_fbtext"
         set +e
-        gate_write stage review-gate stage --id "$TASK" >/dev/null
+        gate_write stage gate_env review-gate stage --id "$TASK" >/dev/null
         grc=$?
         set -e
         if [ "$grc" -eq 4 ]; then exit 4; fi
@@ -1408,7 +1422,7 @@ while :; do
         _fbtext=$(cat "$feedback" 2>/dev/null || true)
         write_state staged "$iteration" "" "" "" "$msg" "" "$head_base" "$started_clean" "$_fbtext"
         set +e
-        gate_write stage review-gate stage --id "$TASK" >/dev/null
+        gate_write stage gate_env review-gate stage --id "$TASK" >/dev/null
         grc=$?
         set -e
         if [ "$grc" -eq 4 ]; then exit 4; fi
@@ -1429,9 +1443,9 @@ while :; do
     if [ -n "$EVIDENCE" ]; then set -- "$@" --evidence "$EVIDENCE"; fi
     if [ -n "$PROVIDER" ]; then set -- "$@" --provider "$PROVIDER"; fi
     if [ "$REVIEW_TIMEOUT" -gt 0 ]; then
-        job=$(gate_write review-run timeout "$REVIEW_TIMEOUT" "$@" 9>&-)
+        job=$(gate_write review-run gate_env timeout "$REVIEW_TIMEOUT" "$@" 9>&-)
     else
-        job=$(gate_write review-run "$@" 9>&-)
+        job=$(gate_write review-run gate_env "$@" 9>&-)
     fi
     rc=$?
     set -e
@@ -1490,7 +1504,7 @@ while :; do
             exit 1
         fi
         set +e
-        job=$(gate_write review-submit review-gate review submit --id "$TASK" --channel "$FALLBACK_CHANNEL" --file "$fb_file")
+        job=$(gate_write review-submit gate_env review-gate review submit --id "$TASK" --channel "$FALLBACK_CHANNEL" --file "$fb_file")
         frc=$?
         set -e
         if [ "$frc" -eq 4 ]; then exit 4; fi
@@ -1543,7 +1557,7 @@ while :; do
         log "approved review=$rid commit=$commit tag=$tag"
         emit approved review="$rid" commit="$commit" tag="$tag"
         set +e
-        out=$(gate_write record review-gate record --id "$TASK" --review "$rid" --commit HEAD --tag "$tag")
+        out=$(gate_write record gate_env review-gate record --id "$TASK" --review "$rid" --commit HEAD --tag "$tag")
         grc=$?
         set -e
         if [ "$grc" -eq 4 ]; then exit 4; fi
@@ -1553,7 +1567,7 @@ while :; do
             echo "review-gate record failed; state kept" >&2
             exit 1
         fi
-        write_manifest "$iteration" "$rid" "$full" "$tag" "$channel" "$msg" "$rprovider" "$reviewed_tree" "$version_acceptance" "$VERIFY_CMD" \
+        write_manifest "$iteration" "$rid" "$full" "$tag" "$channel" "$msg" "$rprovider" "$reviewed_tree" "$version_acceptance" "$VERIFY_CMD" "$TOKEN_FILE" \
             || { echo "cannot append approved version to $manifest; state kept" >&2; exit 1; }
         rm -f "$durable_feedback"
         rm -f "$retry_meta"
@@ -1569,7 +1583,7 @@ while :; do
         log "rejected review=$rid"
         emit rejected review="$rid"
         set +e
-        out=$(gate_write record review-gate record --id "$TASK" --review "$rid")
+        out=$(gate_write record gate_env review-gate record --id "$TASK" --review "$rid")
         grc=$?
         set -e
         if [ "$grc" -eq 4 ]; then exit 4; fi
@@ -1616,7 +1630,7 @@ while :; do
             fi
             log "finalized"; emit finalized; echo "finalized: $TASK"; exit 0 ;;
         pause)
-            reason=$(review-gate task show --id "$TASK" | jget stop_reason)
+            reason=$(gate_env review-gate task show --id "$TASK" | jget stop_reason)
             notify_event=paused
             log "paused reason=${reason:-none}"
             echo "paused by the gate: ${reason:-no reason}" >&2

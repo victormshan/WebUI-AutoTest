@@ -207,7 +207,7 @@ r=$(new_repo default-evidence)
 mkdir -p "$tmp/evdir"
 set +e
 TMPDIR="$tmp/evdir" \
-AUTO_ITERATE_REPO="$r" AUTO_ITERATE_ITERATION=3 AUTO_ITERATE_TASK='t/3' \
+AUTO_ITERATE_EVIDENCE='' AUTO_ITERATE_REPO="$r" AUTO_ITERATE_ITERATION=3 AUTO_ITERATE_TASK='t/3' \
 OPENCODE_BIN="$fake" FAKE_REPO="$r" FAKE_ARGS="$tmp/args-default-evidence" \
 FAKE_PROMPT="$tmp/prompt-default-evidence" \
 sh "$here/opencode-agent.sh" >"$tmp/out-default-evidence" 2>"$tmp/err-default-evidence"

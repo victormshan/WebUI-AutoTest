@@ -54,6 +54,12 @@ tools/auto-iterate/auto-iterate.sh \
   --evidence /tmp/evidence.txt
 ```
 
+`--token-file FILE` selects the gate token explicitly; without it the driver uses
+`REVIEW_GATE_TOKEN_FILE` and fails if neither is set. The driver reads only the
+path, passes it to gate subprocesses, and never exports the token to the agent or
+adapter. A gate 403 is reported unchanged and stops the run; the driver does not
+retry or switch tokens.
+
 `--adapter codex|opencode` resolves `<driver dir>/<name>-agent.sh` and is exclusive
 with `--agent-cmd`. Each round prints and logs `adapter=<name> path=<absolute>`, so
 the chosen host is visible in the log/report trail. A shell command still works for
@@ -249,7 +255,8 @@ git dir by default; `--manifest FILE` selects another absolute or relative path.
 The file is rewritten atomically and is idempotent by task and iteration, so a crash
 after `record` can be resumed without duplicating an entry. Each line records the
 task, version, review id, commit, tag, channel, provider, message, tree, per-version
-acceptance and verify command. Rejected versions are not added. The selected path is
+acceptance, verify command and the token file path (never its contents). Rejected
+versions are not added. The selected path is
 stored in the round state/retry metadata and restored by `--resume`; a different
 `--manifest` on resume is rejected before commit or record.
 
@@ -374,8 +381,8 @@ tools/auto-iterate/test-driver.sh
 
 ## Notes
 
-- Identity comes from the gate token, never from `--implementer-family`; see
-  `crates/review-gate/README.md`.
+- Identity comes from the gate token; the driver does not accept or send a family
+  override. See `crates/review-gate/README.md`.
 - The installed git hook (`review-gate guard --install`) is a convenience, not the
   security boundary; the gate record and CI `verify-range` are.
 - Reviewer substitution is only allowed with explicit user authorization and must be

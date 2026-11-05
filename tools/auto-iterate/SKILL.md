@@ -18,9 +18,9 @@ description: Autonomously evolve a target repo through N versions under the dsh-
 
 ## 身份与令牌
 
-`implementer_family` 是**认证身份的属性**，不是请求参数。每个 agent 用自己的 gate 令牌；管理员在 `/etc/review-gate/agents.json` 里把令牌映射到**模型厂商**（`claude`、`deepseek`、`openai`…），服务端据此填家族。`--implementer-family` 只是可选的一致性校验，填错会 400；**不要试图自报家族**。
+`implementer_family` 是**认证身份的属性**，不是请求参数。每个 agent 用自己的 gate 令牌；管理员在 `/etc/review-gate/agents.json` 里把令牌映射到**模型厂商**（`claude`、`deepseek`、`openai`…），服务端据此填家族。**不要试图自报家族**；driver 只从令牌身份取家族。
 
-未列入映射的令牌回落到 `--token-file`，被视为 `claude`（兼容单 agent 安装；这是一个共享密钥，不是隔离）。换令牌/轮换后重启服务。
+未列入映射的令牌回落到 `--token-file`，被视为 `claude`（兼容单 agent 安装；这是一个共享密钥，不是隔离）。换令牌/轮换后重启服务。driver 用 `--token-file` 或 `REVIEW_GATE_TOKEN_FILE` 选择令牌，只把路径传给 gate 子进程，不把令牌给实施 agent。
 
 ## 启动
 
