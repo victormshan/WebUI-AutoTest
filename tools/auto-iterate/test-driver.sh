@@ -159,6 +159,166 @@ esac
 STUB
 chmod +x "$bin/review-gate"
 
+cat > "$tmp/http-fake.py" <<'HTTPPY'
+#!/usr/bin/env python3
+import json, os, sys, time, threading, urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+portfile, jobsdir = sys.argv[1], sys.argv[2]
+os.makedirs(jobsdir, exist_ok=True)
+parent = os.getppid()
+def watchdog():
+    while True:
+        if os.getppid() != parent:
+            os._exit(0)
+        time.sleep(0.2)
+threading.Thread(target=watchdog, daemon=True).start()
+
+def jobpath(jobid):
+    return os.path.join(jobsdir, urllib.parse.quote(jobid, safe="") + ".json")
+
+def load_job(jobid):
+    try:
+        with open(jobpath(jobid)) as f:
+            return json.load(f)
+    except OSError:
+        return None
+
+def save_job(job):
+    tmp = jobpath(job["id"]) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(job, f)
+    os.replace(tmp, jobpath(job["id"]))
+
+def verdict():
+    if os.environ.get("STUB_REJECT") == "1":
+        return "rejected", "no"
+    marker = os.environ.get("STUB_STATE", "") + ".rejected_once"
+    if os.environ.get("STUB_REJECT_FIRST") == "1" and not os.path.exists(marker):
+        open(marker, "w").close()
+        return "rejected", "first-no"
+    return "approved", "ok"
+
+def record_for(body):
+    st = os.environ.get("STUB_STATE", "")
+    try:
+        n = int(open(st).read().strip() or "0")
+    except Exception:
+        n = 0
+    v, text = verdict()
+    try:
+        open(st + ".verdict", "w").write(v + "\n")
+    except OSError:
+        pass
+    return {
+        "id": f"v{n + 1}-1", "task": "", "iteration": n + 1, "attempt": 1,
+        "tree": body.get("tree", ""), "base": body.get("base", ""),
+        "verdict": v, "channel": "stub", "provider": "stub-provider",
+        "model": "stub-model", "family": "claude", "prompt_sha": "",
+        "text": text, "at": "2026-11-05T00:00:00Z",
+    }
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+    def send_json(self, status, obj):
+        raw = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+    def do_GET(self):
+        if self.path == "/health":
+            return self.send_json(200, {"ok": True, "drain": {"draining": False}})
+        if self.path.startswith("/jobs/"):
+            job = load_job(urllib.parse.unquote(self.path[len("/jobs/"):]))
+            if job is None:
+                return self.send_json(404, {"error": "no such job"})
+            if job.get("status") == "running":
+                marker = os.environ.get("STUB_STATE", "") + ".job_done"
+                if os.environ.get("STUB_JOB_RUNNING") == "1" and not os.path.exists(marker):
+                    return self.send_json(200, job)
+                job["status"] = "done"
+                job["record"] = job.get("record") or record_for(job)
+                save_job(job)
+            return self.send_json(200, job)
+        return self.send_json(404, {"error": "not found"})
+    def do_POST(self):
+        if not self.path.startswith("/tasks/") or not self.path.endswith("/reviews"):
+            return self.send_json(404, {"error": "not found"})
+        n = int(self.headers.get("Content-Length", "0") or "0")
+        try:
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except Exception:
+            return self.send_json(400, {"error": "invalid json"})
+        st = os.environ.get("STUB_STATE", "")
+        drain_marker = st + ".drain_run"
+        if os.environ.get("STUB_DRAIN_RUN_ALWAYS") == "1" or (
+                os.environ.get("STUB_DRAIN_RUN_ONCE") == "1"
+                and not os.path.exists(drain_marker)):
+            if os.environ.get("STUB_DRAIN_RUN_ONCE") == "1":
+                open(drain_marker, "w").close()
+            snap = os.environ.get("STUB_DRAIN_SNAPSHOT", "")
+            driver_state = os.environ.get("STUB_DRIVER_STATE", "")
+            if snap and driver_state:
+                try:
+                    open(snap, "w").write(open(driver_state).read())
+                except OSError:
+                    pass
+            return self.send_json(503, {"error": "draining: review run"})
+        if os.environ.get("STUB_ARGS"):
+            open(os.environ["STUB_ARGS"], "w").write(
+                f"--provider {body.get('provider') or ''} --evidence {body.get('evidence', '')}\n")
+        if os.environ.get("STUB_EVIDENCE_COPY"):
+            open(os.environ["STUB_EVIDENCE_COPY"], "w").write(body.get("evidence", ""))
+        task = urllib.parse.unquote(self.path[len("/tasks/"):-len("/reviews")])
+        jobid = f"job-{os.getpid()}-{time.time_ns()}"
+        if os.environ.get("STUB_RUN_NO_AI") == "1":
+            job = {"id": jobid, "task": task, "status": "failed",
+                   "unavailable": True, "error": "no external AI available"}
+            save_job(job)
+            return self.send_json(200, job)
+        rec = record_for(body)
+        rec["task"] = task
+        status = "running" if (os.environ.get("STUB_SLOW_REVIEW") == "1"
+                               or os.environ.get("STUB_JOB_RUNNING") == "1") else "done"
+        job = {"id": jobid, "task": task, "status": status, "record": rec}
+        save_job(job)
+        return self.send_json(200, job)
+
+srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+with open(portfile, "w") as f:
+    f.write(str(srv.server_address[1]))
+srv.serve_forever()
+HTTPPY
+chmod +x "$tmp/http-fake.py"
+
+cat > "$tmp/run-driver.sh" <<WRAP
+#!/bin/sh
+set -eu
+portfile=\$(mktemp "$tmp/http-port.XXXXXX")
+mkdir -p "$tmp/http-jobs"
+python3 "$tmp/http-fake.py" "\$portfile" "$tmp/http-jobs" >"$tmp/http-fake.log" 2>&1 &
+srv=\$!
+i=0
+while [ ! -s "\$portfile" ] && [ "\$i" -lt 200 ]; do
+    sleep 0.05
+    i=\$((i + 1))
+done
+[ -s "\$portfile" ] || {
+    echo "fake review-gate did not start" >&2
+    cat "$tmp/http-fake.log" >&2 2>/dev/null || true
+    kill "\$srv" 2>/dev/null || true
+    exit 1
+}
+port=\$(cat "\$portfile")
+export REVIEW_GATE_URL="http://127.0.0.1:\$port"
+[ -z "\${STUB_REVIEW_PID:-}" ] || export AUTO_ITERATE_REVIEW_PIDFILE="\$STUB_REVIEW_PID"
+exec "\${AUTO_ITERATE_DRIVER:-$here/auto-iterate.sh}" "\$@"
+WRAP
+chmod +x "$tmp/run-driver.sh"
+
 cat > "$tmp/fallback.sh" <<'AG'
 #!/bin/sh
 set -eu
@@ -199,7 +359,7 @@ chmod +x "$tmp/notify.sh"
 
 STUB_REPO=$repo STUB_STATE=$state STUB_ARGS=$tmp/args PATH="$bin:$PATH" \
     STUB_NOTIFY_OUT=$tmp/notify.out STUB_VERIFY_RANGE_ARGS=$tmp/vrargs \
-    "$here/auto-iterate.sh" --task demo --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task demo --agent-cmd "$tmp/agent.sh" \
     --message demo --max 3 --log "$tmp/run.log" --report "$tmp/report.md" \
     --events "$tmp/events.jsonl" --provider fake --evidence "$tmp/evidence" \
     --verify-cmd true --notify-cmd "$tmp/notify.sh" --notify-events finalized --verify-range >"$tmp/out" 2>&1 \
@@ -303,7 +463,7 @@ AG
 chmod +x "$tmp/retry-notify.sh"
 STUB_REPO=$repo76 STUB_STATE=$state76 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
     STUB_NOTIFY_COUNT=$tmp/notify76.count \
-    "$here/auto-iterate.sh" --task notify76 --agent-cmd "$tmp/agent.sh" --max 1 \
+    "$tmp/run-driver.sh" --task notify76 --agent-cmd "$tmp/agent.sh" --max 1 \
     --notify-cmd "$tmp/retry-notify.sh" --notify-retries 2 --notify-retry-delay 0 \
     >"$tmp/out76" 2>&1 || fail "notify retry run failed"
 [ "$(cat "$tmp/notify76.count")" = 3 ] || fail "notify retry count is not 3"
@@ -333,7 +493,7 @@ chmod +x "$tmp/hang.sh"
 start=$(date +%s)
 set +e
 STUB_REPO=$repo2 STUB_STATE=$state2 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task hang --agent-cmd "$tmp/hang.sh" \
+    "$tmp/run-driver.sh" --task hang --agent-cmd "$tmp/hang.sh" \
     --agent-timeout 1 --max 1 >"$tmp/out2" 2>&1
 rc=$?
 set -e
@@ -355,7 +515,7 @@ echo 0 > "$state5"
 
 set +e
 STUB_REPO=$repo5 STUB_STATE=$state5 STUB_REJECT=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task stop --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task stop --agent-cmd "$tmp/agent.sh" \
     --stop-on-reject --max 2 >"$tmp/out5" 2>&1
 rc=$?
 set -e
@@ -378,7 +538,7 @@ echo 0 > "$state3"
 start=$(date +%s)
 set +e
 STUB_REPO=$repo3 STUB_STATE=$state3 STUB_SLOW_REVIEW=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task slow --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task slow --agent-cmd "$tmp/agent.sh" \
     --review-timeout 1 --max 1 >"$tmp/out3" 2>&1
 rc=$?
 set -e
@@ -402,20 +562,20 @@ echo 0 > "$state6"
 
 set +e
 STUB_REPO=$repo6 STUB_STATE=$state6 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --check --task check >"$tmp/out6" 2>&1
+    "$tmp/run-driver.sh" --check --task check >"$tmp/out6" 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "dirty check exited $rc"
 grep -q "uncommitted changes" "$tmp/out6" || fail "no dirty check message"
 
 out=$(STUB_REPO=$repo6 STUB_STATE=$state6 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --check --allow-dirty --task check 2>&1) || fail "allow-dirty check failed"
+    "$tmp/run-driver.sh" --check --allow-dirty --task check 2>&1) || fail "allow-dirty check failed"
 printf '%s' "$out" | grep -q "check ok" || fail "allow-dirty check output"
 
 rm -f "$tmp/notify6.out"
 set +e
 STUB_REPO=$repo6 STUB_STATE=$state6 STUB_NOTIFY_OUT=$tmp/notify6.out PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task filter6 --agent-cmd true \
+    "$tmp/run-driver.sh" --task filter6 --agent-cmd true \
     --notify-cmd "$tmp/notify.sh" --notify-events finalized --max 1 >"$tmp/outfilter6" 2>&1
 rc=$?
 set -e
@@ -435,7 +595,7 @@ echo 0 > "$state7"
 
 set +e
 STUB_REPO=$repo7 STUB_STATE=$state7 STUB_FAIL_RECORD=1 STUB_FAIL_MARKER=$tmp/marker \
-    PATH="$bin:$PATH" "$here/auto-iterate.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
+    PATH="$bin:$PATH" "$tmp/run-driver.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
     --message "resume v1" --manifest "$tmp/manifest7.ndjson" --max 1 >"$tmp/out7" 2>&1
 rc=$?
 set -e
@@ -455,7 +615,7 @@ assert d["manifest"].endswith("/manifest7.ndjson"), d
 PY
 set +e
 STUB_REPO=$repo7 STUB_STATE=$state7 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
     --max 1 >"$tmp/out7b" 2>&1
 rc=$?
 set -e
@@ -463,7 +623,7 @@ set -e
 grep -q "pending state" "$tmp/out7b" || fail "no pending state message"
 set +e
 STUB_REPO=$repo7 STUB_STATE=$state7 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
     --resume --manifest "$tmp/other7.ndjson" --max 1 >"$tmp/out7conflict" 2>&1
 rc=$?
 set -e
@@ -471,7 +631,7 @@ set -e
 grep -q "manifest path differs" "$tmp/out7conflict" || fail "no manifest conflict message"
 [ ! -e "$tmp/other7.ndjson" ] || fail "conflicting manifest was created"
 STUB_REPO=$repo7 STUB_STATE=$state7 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume7 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out7c" 2>&1 || fail "resume committed failed"
 grep -q "task resume7 is done" "$tmp/out7c" || fail "resume did not observe done"
 [ ! -f "$state7file" ] || fail "state not cleared after resume"
@@ -502,7 +662,7 @@ mkdir -p "$gitdir8/auto-iterate"
 printf '{"phase":"reviewed","iteration":1,"review":"v1-1","commit":"","tag":"","message":"resume reviewed v1","channel":"stub"}\n' \
     > "$gitdir8/auto-iterate/resume8.json"
 STUB_REPO=$repo8 STUB_STATE=$state8 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume8 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume8 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out8" 2>&1 || fail "resume reviewed failed"
 [ "$(git -C "$repo8" rev-list --count HEAD)" -eq 2 ] || fail "resume reviewed did not commit"
 [ "$(git -C "$repo8" show HEAD:f2)" = change ] || fail "resume reviewed lost the staged change"
@@ -522,7 +682,7 @@ echo 0 > "$state9"
 
 STUB_REPO=$repo9 STUB_STATE=$state9 STUB_ITERATIONS=1 STUB_RUN_NO_AI=1 \
     STUB_SUBMIT_ARGS=$tmp/subargs STUB_FALLBACK_DIFF=$tmp/fbdiff STUB_FALLBACK_ENV=$tmp/fbenv \
-    PATH="$bin:$PATH" "$here/auto-iterate.sh" --task fallback9 --agent-cmd "$tmp/agent.sh" \
+    PATH="$bin:$PATH" "$tmp/run-driver.sh" --task fallback9 --agent-cmd "$tmp/agent.sh" \
     --fallback-cmd "$tmp/fallback.sh" --fallback-channel claude-subagent \
     --log "$tmp/run9.log" --max 1 >"$tmp/out9" 2>&1 || fail "fallback run failed"
 [ "$(git -C "$repo9" rev-list --count HEAD)" -eq 2 ] || fail "fallback did not commit"
@@ -544,7 +704,7 @@ git -C "$repo10" commit -qm base
 echo 0 > "$state10"
 set +e
 STUB_REPO=$repo10 STUB_STATE=$state10 STUB_RUN_NO_AI=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task noai10 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out10" 2>&1
+    "$tmp/run-driver.sh" --task noai10 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out10" 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 3 ] || fail "no-ai without fallback exited $rc"
@@ -563,16 +723,16 @@ git -C "$repo4" commit -qm base
 echo 0 > "$state4"
 
 out=$(STUB_REPO=$repo4 STUB_STATE=$state4 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --check --task check 2>&1) || fail "check mode failed"
+    "$tmp/run-driver.sh" --check --task check 2>&1) || fail "check mode failed"
 printf '%s' "$out" | grep -q "check ok: task=check" || fail "no check output"
 [ "$(git -C "$repo4" rev-list --count HEAD)" -eq 1 ] || fail "check mode changed the repo"
 out=$(STUB_REPO=$repo4 STUB_STATE=$state4 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --check --task check --manifest "$tmp/check-manifest.ndjson" 2>&1) \
+    "$tmp/run-driver.sh" --check --task check --manifest "$tmp/check-manifest.ndjson" 2>&1) \
     || fail "custom manifest check failed"
 printf '%s' "$out" | grep -q "check ok: task=check" || fail "custom manifest check output"
 [ ! -e "$tmp/check-manifest.ndjson" ] || fail "check created the manifest"
 out=$(STUB_REPO=$repo4 STUB_STATE=$state4 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --plan --task check --manifest "$tmp/plan-manifest.ndjson" 2>&1) \
+    "$tmp/run-driver.sh" --plan --task check --manifest "$tmp/plan-manifest.ndjson" 2>&1) \
     || { printf '%s\n' "$out"; fail "plan mode failed"; }
 printf '%s' "$out" | grep -q "plan task=check status=running iteration=1" || fail "no plan task output"
 printf '%s' "$out" | grep -q "plan worktree=clean" || fail "plan misses worktree"
@@ -581,7 +741,7 @@ printf '%s' "$out" | grep -q "plan next=run-round" || fail "plan misses next act
 [ ! -e "$tmp/plan-manifest.ndjson" ] || fail "plan created the manifest"
 [ ! -e "$repo4/auto-iterate" ] || fail "plan wrote state"
 out=$(STUB_REPO=$repo4 STUB_STATE=$state4 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --dry-run --task check 2>&1) || fail "dry-run alias failed"
+    "$tmp/run-driver.sh" --dry-run --task check 2>&1) || fail "dry-run alias failed"
 printf '%s' "$out" | grep -q "plan task=check" || fail "dry-run alias output"
 
 # --- v13: repo flock lease ---
@@ -609,7 +769,7 @@ printf '{"owner":"other:1","host":"%s","pid":%s,"task":"other","iteration":1,"st
     "$(hostname)" "$holder11" "$now11" "$now11" > "$lock11.meta"
 set +e
 STUB_REPO=$repo11 STUB_STATE=$state11 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task lock11 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out11" 2>&1
+    "$tmp/run-driver.sh" --task lock11 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out11" 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 2 ] || fail "active lock exited $rc"
@@ -618,7 +778,7 @@ grep -q "repo is locked by other" "$tmp/out11" || fail "no active-lock message"
 kill "$holder11" 2>/dev/null || true
 wait "$holder11" 2>/dev/null || true
 STUB_REPO=$repo11 STUB_STATE=$state11 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task lock11 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out11b" 2>&1 \
+    "$tmp/run-driver.sh" --task lock11 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out11b" 2>&1 \
     || fail "post-lock run failed"
 [ "$(git -C "$repo11" rev-list --count HEAD)" -eq 2 ] || fail "post-lock run did not commit"
 [ ! -f "$lock11.meta" ] || fail "lock metadata not removed after run"
@@ -643,7 +803,7 @@ sleep 4
 AG
 chmod +x "$tmp/agent-slow.sh"
 STUB_REPO=$repo75 STUB_STATE=$state75a STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task conc60a --agent-cmd "$tmp/agent-slow.sh" --max 1 \
+    "$tmp/run-driver.sh" --task conc60a --agent-cmd "$tmp/agent-slow.sh" --max 1 \
     >"$tmp/out60a" 2>&1 &
 pid60=$!
 gitdir75=$(git -C "$repo75" rev-parse --absolute-git-dir)
@@ -655,7 +815,7 @@ done
 [ -f "$gitdir75/auto-iterate/lock.meta" ] || fail "first driver never took the lock"
 set +e
 STUB_REPO=$repo75 STUB_STATE=$state75b PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task conc60b --agent-cmd true --max 1 \
+    "$tmp/run-driver.sh" --task conc60b --agent-cmd true --max 1 \
     >"$tmp/out60b" 2>&1
 rc=$?
 set -e
@@ -683,7 +843,7 @@ git -C "$repo12" add f
 git -C "$repo12" commit -qm base
 echo 0 > "$state12"
 STUB_REPO=$repo12 STUB_STATE=$state12 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task verify12 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task verify12 --agent-cmd "$tmp/agent.sh" \
     --verify-cmd 'test -f out.txt && echo verify-ok' --evidence "$tmp/evidence12" \
     --log "$tmp/run12.log" --max 1 >"$tmp/out12" 2>&1 || fail "verify success run failed"
 [ "$(git -C "$repo12" rev-list --count HEAD)" -eq 2 ] || fail "verify success did not commit"
@@ -703,7 +863,7 @@ git -C "$repo13" commit -qm base
 echo 0 > "$state13"
 set +e
 STUB_REPO=$repo13 STUB_STATE=$state13 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task verify13 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task verify13 --agent-cmd "$tmp/agent.sh" \
     --verify-cmd 'echo no >&2; exit 7' --max 1 >"$tmp/out13" 2>&1
 rc=$?
 set -e
@@ -737,7 +897,7 @@ echo "v$AUTO_ITERATE_ITERATION" > "$AUTO_ITERATE_REPO/out.txt"
 AG
 chmod +x "$tmp/agent14.sh"
 STUB_REPO=$repo14 STUB_STATE=$state14 STUB_ITERATIONS=2 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task plan14 --agent-cmd "$tmp/agent14.sh" \
+    "$tmp/run-driver.sh" --task plan14 --agent-cmd "$tmp/agent14.sh" \
     --version-plan "$tmp/plan14.json" --evidence "$tmp/evidence14" --max 2 >"$tmp/out14" 2>&1 \
     || fail "version plan run failed"
 [ "$(cat "$repo14/va-1.txt")" = "first acceptance" ] || fail "version 1 acceptance wrong"
@@ -769,7 +929,7 @@ echo "v$it" > out.txt
 AG
 chmod +x "$tmp/agent15.sh"
 STUB_REPO=$repo15 STUB_STATE=$state15 STUB_REJECT_FIRST=1 STUB_ITERATIONS=2 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task reject15 --agent-cmd "$tmp/agent15.sh" --max 3 >"$tmp/out15" 2>&1 \
+    "$tmp/run-driver.sh" --task reject15 --agent-cmd "$tmp/agent15.sh" --max 3 >"$tmp/out15" 2>&1 \
     || fail "reject/retry/finalize run failed"
 [ ! -e "$repo15/junk-1.txt" ] || fail "junk-1 survived the same-version retry"
 grep -q "first-no" "$repo15/feedback-1.txt" || fail "rejection feedback was not delivered on the same-version retry"
@@ -797,7 +957,7 @@ mkdir -p "$gitdir16/auto-iterate"
 printf '{"phase":"staged","iteration":1,"review":"","commit":"","tag":"","message":"staged v1","channel":"","head":"%s","clean":1}\n' \
     "$base16" > "$gitdir16/auto-iterate/resume16.json"
 STUB_REPO=$repo16 STUB_STATE=$state16 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume16 --agent-cmd 'echo agent-ran > agent-ran.txt' \
+    "$tmp/run-driver.sh" --task resume16 --agent-cmd 'echo agent-ran > agent-ran.txt' \
     --resume --max 1 >"$tmp/out16" 2>&1 || fail "staged resume failed"
 [ "$(git -C "$repo16" rev-list --count HEAD)" -eq 2 ] || fail "staged resume did not commit"
 [ "$(git -C "$repo16" show HEAD:f2)" = change ] || fail "staged resume lost the change"
@@ -823,7 +983,7 @@ mkdir -p "$gitdir17/auto-iterate"
 printf '{"phase":"reviewing","iteration":1,"review":"","commit":"","tag":"","message":"reviewing v1","channel":"","head":"%s","clean":1}\n' \
     "$base17" > "$gitdir17/auto-iterate/resume17.json"
 STUB_REPO=$repo17 STUB_STATE=$state17 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume17 --agent-cmd 'echo agent-ran > agent-ran.txt' \
+    "$tmp/run-driver.sh" --task resume17 --agent-cmd 'echo agent-ran > agent-ran.txt' \
     --resume --max 1 >"$tmp/out17" 2>&1 || fail "reviewing resume failed"
 [ "$(git -C "$repo17" rev-list --count HEAD)" -eq 2 ] || fail "reviewing resume did not commit"
 [ "$(git -C "$repo17" show HEAD:f2)" = change ] || fail "reviewing resume lost the change"
@@ -847,7 +1007,7 @@ printf '{"phase":"staged","iteration":1,"review":"","commit":"","tag":"","messag
     > "$gitdir18/auto-iterate/resume18.json"
 set +e
 STUB_REPO=$repo18 STUB_STATE=$state18 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume18 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume18 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out18" 2>&1
 rc=$?
 set -e
@@ -881,7 +1041,7 @@ printf '{"phase":"committed","iteration":1,"review":"v1-9","commit":"%s","tag":"
     "$commit19" "$tag19" "$base19" > "$gitdir19/auto-iterate/resume19.json"
 printf 'stale durable\n' > "$gitdir19/auto-iterate/resume19.feedback"
 STUB_REPO=$repo19 STUB_STATE=$state19 STUB_HISTORY=$tmp/history19.json STUB_ITERATIONS=2 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume19 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume19 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 --log "$tmp/run19.log" >"$tmp/out19" 2>&1 || fail "already-recorded committed resume failed"
 grep -q "already recorded" "$tmp/run19.log" || fail "committed record was replayed"
 [ "$(git -C "$repo19" rev-list --count HEAD)" -eq 3 ] || fail "committed resume did not continue to v2"
@@ -918,7 +1078,7 @@ echo v1 > "$AUTO_ITERATE_REPO/out.txt"
 AG
 chmod +x "$tmp/agent20.sh"
 STUB_REPO=$repo20 STUB_STATE=$state20 STUB_HISTORY=$tmp/history20.json STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume20 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume20 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 --log "$tmp/run20.log" >"$tmp/out20" 2>&1 || fail "already-recorded rejected resume failed"
 grep -q "already recorded" "$tmp/run20.log" || fail "rejected record was replayed"
 grep -q "fix from previous review" "$repo20/feedback.txt" || fail "rejection feedback was not restored"
@@ -941,7 +1101,7 @@ echo 0 > "$state21"
 printf '{"phase":"staged"}\n' > "$gitdir21/auto-iterate/other-task.json"
 set +e
 STUB_REPO=$repo21 STUB_STATE=$state21 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume21 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out21" 2>&1
+    "$tmp/run-driver.sh" --task resume21 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out21" 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 2 ] || fail "other-task pending state exited $rc"
@@ -973,7 +1133,7 @@ printf '[{"review":"v1-7","outcome":"approved"}]\n' > "$tmp/history22.json"
 printf '{"phase":"committed","iteration":1,"review":"v1-7","commit":"%s","tag":"%s","message":"v1","channel":"stub","head":"%s","clean":1,"feedback":""}\n' \
     "$commit22" "$tag22" "$base22" > "$gitdir22/auto-iterate/resume22.json"
 STUB_REPO=$repo22 STUB_STATE=$state22 STUB_HISTORY=$tmp/history22.json PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume22 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume22 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out22" 2>&1 || fail "finalized pending resume failed"
 [ ! -f "$gitdir22/auto-iterate/resume22.json" ] || fail "finalized pending state was not removed"
 [ "$(git -C "$repo22" rev-list --count HEAD)" -eq 2 ] || fail "finalized pending resume changed history"
@@ -998,7 +1158,7 @@ printf '{"phase":"reviewed","iteration":1,"review":"v1-5","commit":"","tag":"","
     "$base24" > "$gitdir24/auto-iterate/resume24.json"
 set +e
 STUB_REPO=$repo24 STUB_STATE=$state24 STUB_ITERATIONS=1 STUB_FAIL_RECORD=1 STUB_FAIL_MARKER=$tmp/fail24 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume24 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume24 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out24a" 2>&1
 rc=$?
 set -e
@@ -1006,7 +1166,7 @@ set -e
 grep -q '"phase": "committed"' "$gitdir24/auto-iterate/resume24.json" || fail "reviewed recovery did not persist committed"
 [ "$(git -C "$repo24" rev-list --count HEAD)" -eq 2 ] || fail "reviewed recovery did not commit"
 STUB_REPO=$repo24 STUB_STATE=$state24 STUB_ITERATIONS=1 STUB_FAIL_RECORD=1 STUB_FAIL_MARKER=$tmp/fail24 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume24 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume24 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out24b" 2>&1 || fail "reviewed record replay failed"
 [ ! -f "$gitdir24/auto-iterate/resume24.json" ] || fail "reviewed replay state was not removed"
 [ "$(git -C "$repo24" tag | wc -l)" -eq 1 ] || fail "reviewed replay did not keep one tag"
@@ -1033,7 +1193,7 @@ chmod +x "$tmp/kill25.sh"
 KILL_MARKER=$tmp/kill25.marker
 export KILL_MARKER
 STUB_REPO=$repo25 STUB_STATE=$state25 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task kill25 --agent-cmd "$tmp/kill25.sh" --max 1 >"$tmp/out25a" 2>&1 &
+    "$tmp/run-driver.sh" --task kill25 --agent-cmd "$tmp/kill25.sh" --max 1 >"$tmp/out25a" 2>&1 &
 pid25=$!
 i=0
 while [ ! -f "$KILL_MARKER" ] && [ "$i" -lt 50 ]; do
@@ -1045,7 +1205,7 @@ kill -9 "$pid25" 2>/dev/null || true
 wait "$pid25" 2>/dev/null || true
 set +e
 STUB_REPO=$repo25 STUB_STATE=$state25 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task kill25 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task kill25 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out25b" 2>&1
 rc=$?
 set -e
@@ -1058,7 +1218,7 @@ while [ ! -f "$KILL_MARKER.late" ] && [ "$i" -lt 50 ]; do
 done
 [ -f "$KILL_MARKER.late" ] || fail "surviving agent did not finish its delayed write"
 STUB_REPO=$repo25 STUB_STATE=$state25 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task kill25 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task kill25 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out25c" 2>&1 || fail "resume failed after the surviving agent exited"
 [ "$(git -C "$repo25" rev-list --count HEAD)" -eq 2 ] || fail "post-kill driver did not commit"
 
@@ -1082,7 +1242,7 @@ printf '{"phase":"staged","iteration":1,"review":"","commit":"","tag":"","messag
     "$base26" > "$gitdir26/auto-iterate/resume26.json"
 set +e
 STUB_REPO=$repo26 STUB_STATE=$state26 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume26 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume26 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out26" 2>&1
 rc=$?
 set -e
@@ -1112,7 +1272,7 @@ chmod +x "$tmp/verify27.sh"
 VERIFY_MARKER=$tmp/verify27.marker
 export VERIFY_MARKER
 STUB_REPO=$repo27 STUB_STATE=$state27 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task verify27 --agent-cmd "$tmp/agent.sh" --verify-cmd "sh $tmp/verify27.sh" --max 1 >"$tmp/out27a" 2>&1 &
+    "$tmp/run-driver.sh" --task verify27 --agent-cmd "$tmp/agent.sh" --verify-cmd "sh $tmp/verify27.sh" --max 1 >"$tmp/out27a" 2>&1 &
 pid27=$!
 i=0
 while [ ! -f "$VERIFY_MARKER" ] && [ "$i" -lt 50 ]; do
@@ -1124,7 +1284,7 @@ kill -9 "$pid27" 2>/dev/null || true
 wait "$pid27" 2>/dev/null || true
 set +e
 STUB_REPO=$repo27 STUB_STATE=$state27 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task verify27 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task verify27 --agent-cmd "$tmp/agent.sh" \
     --resume --verify-cmd true --max 1 >"$tmp/out27b" 2>&1
 rc=$?
 set -e
@@ -1137,7 +1297,7 @@ while [ ! -f "$VERIFY_MARKER.late" ] && [ "$i" -lt 50 ]; do
 done
 [ -f "$VERIFY_MARKER.late" ] || fail "verifier did not finish its delayed write"
 STUB_REPO=$repo27 STUB_STATE=$state27 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task verify27 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task verify27 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out27c" 2>&1 || fail "resume failed after the verifier exited"
 [ "$(git -C "$repo27" rev-list --count HEAD)" -eq 2 ] || fail "post-verify-kill driver did not commit"
 
@@ -1155,7 +1315,7 @@ echo 0 > "$state28"
 (
     cd "$tmp"
     STUB_REPO=$repo28 STUB_STATE=$state28 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-        "$here/auto-iterate.sh" --task evidence28 --agent-cmd "$tmp/agent.sh" \
+        "$tmp/run-driver.sh" --task evidence28 --agent-cmd "$tmp/agent.sh" \
         --evidence rel28.log --max 1 >"$tmp/out28" 2>&1
 ) || fail "relative evidence run failed"
 [ "$(cat "$repo28/evidence.txt")" = "$tmp/rel28.log" ] || fail "relative evidence resolved from the repo"
@@ -1180,14 +1340,14 @@ printf '{"phase":"agent","iteration":1,"review":"","commit":"","tag":"","message
     "$base29" > "$gitdir29/auto-iterate/resume29.json"
 set +e
 STUB_REPO=$repo29 STUB_STATE=$state29 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume29 --agent-cmd 'exit 1' \
+    "$tmp/run-driver.sh" --task resume29 --agent-cmd 'exit 1' \
     --resume --max 1 --log "$tmp/run29a.log" >"$tmp/out29a" 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "agent failure exited $rc"
 [ -f "$gitdir29/auto-iterate/resume29.json" ] || fail "agent failure dropped state"
 STUB_REPO=$repo29 STUB_STATE=$state29 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume29 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume29 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out29b" 2>&1 || fail "agent retry failed"
 grep -q "keep agent feedback" "$repo29/feedback.txt" || fail "agent retry lost feedback"
 
@@ -1216,7 +1376,7 @@ printf '{"phase":"agent","iteration":1,"review":"","commit":"","tag":"","message
     "$base30" "$tmp/verify30.sh" > "$gitdir30/auto-iterate/resume30.json"
 set +e
 VERIFY30_MARK=$tmp/verify30.mark STUB_REPO=$repo30 STUB_STATE=$state30 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume30 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume30 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out30a" 2>&1
 rc=$?
 set -e
@@ -1224,7 +1384,7 @@ set -e
 [ -f "$gitdir30/auto-iterate/resume30.json" ] || fail "verify failure dropped state"
 grep -q '"phase": "verify"' "$gitdir30/auto-iterate/resume30.json" || fail "verify failure state phase is not verify"
 VERIFY30_MARK=$tmp/verify30.mark STUB_REPO=$repo30 STUB_STATE=$state30 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume30 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume30 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out30b" 2>&1 || fail "verify retry failed"
 grep -q "keep verify feedback" "$repo30/feedback.txt" || fail "verify retry lost feedback"
 
@@ -1246,7 +1406,7 @@ printf '{"phase":"agent","iteration":1,"review":"","commit":"","tag":"","message
     "$base31" > "$gitdir31/auto-iterate/resume31.json"
 set +e
 STUB_REPO=$repo31 STUB_STATE=$state31 STUB_ITERATIONS=1 STUB_FAIL_STAGE=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume31 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume31 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out31a" 2>&1
 rc=$?
 set -e
@@ -1254,7 +1414,7 @@ set -e
 [ -f "$gitdir31/auto-iterate/resume31.json" ] || fail "stage failure dropped state"
 grep -q '"phase": "staged"' "$gitdir31/auto-iterate/resume31.json" || fail "stage failure state phase is not staged"
 STUB_REPO=$repo31 STUB_STATE=$state31 STUB_ITERATIONS=1 STUB_FAIL_STAGE=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume31 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume31 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out31b" 2>&1 || fail "stage retry failed"
 grep -q "keep stage feedback" "$repo31/feedback.txt" || fail "stage retry lost feedback"
 
@@ -1287,7 +1447,7 @@ done
 [ -f "$tmp/lease32.ready" ] || fail "worker lease holder did not start"
 set +e
 STUB_REPO=$repo32 STUB_STATE=$state32 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task lease32 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out32a" 2>&1
+    "$tmp/run-driver.sh" --task lease32 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out32a" 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 2 ] || fail "held worker lease exited $rc"
@@ -1295,7 +1455,7 @@ grep -q "previous agent/verifier is still running" "$tmp/out32a" || fail "worker
 kill "$holder32" 2>/dev/null || true
 wait "$holder32" 2>/dev/null || true
 STUB_REPO=$repo32 STUB_STATE=$state32 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task lease32 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out32b" 2>&1 \
+    "$tmp/run-driver.sh" --task lease32 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out32b" 2>&1 \
     || fail "run after worker lease release failed"
 [ "$(git -C "$repo32" rev-list --count HEAD)" -eq 2 ] || fail "run after worker lease release did not commit"
 
@@ -1322,7 +1482,7 @@ echo mutated > "$repo33/f"
 git -C "$repo33" add f
 set +e
 STUB_REPO=$repo33 STUB_STATE=$state33 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task review33 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task review33 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out33" 2>&1
 rc=$?
 set -e
@@ -1355,7 +1515,7 @@ printf '{"phase":"reviewed","iteration":1,"review":"v1-1","commit":"","tag":"","
     "$base34" "$tree34" > "$gitdir34/auto-iterate/review34.json"
 set +e
 STUB_REPO=$repo34 STUB_STATE=$state34 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task review34 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task review34 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out34" 2>&1
 rc=$?
 set -e
@@ -1378,7 +1538,7 @@ mkdir -p "$gitdir35/auto-iterate"
 echo 0 > "$state35"
 set +e
 STUB_REPO=$repo35 STUB_STATE=$state35 STUB_REJECT_FIRST=1 STUB_PAUSE_REJECT=1 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task pause35a --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out35a" 2>&1
+    "$tmp/run-driver.sh" --task pause35a --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out35a" 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 4 ] || fail "paused rejection exited $rc"
@@ -1386,12 +1546,12 @@ set -e
 [ -s "$gitdir35/auto-iterate/pause35a.feedback" ] || fail "paused rejection lost durable feedback"
 grep -q "first-no" "$gitdir35/auto-iterate/pause35a.feedback" || fail "durable feedback content missing"
 STUB_REPO=$repo35 STUB_STATE=$state35 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task pause35a --agent-cmd "$tmp/agent.sh" --resume --max 1 >"$tmp/out35b" 2>&1 \
+    "$tmp/run-driver.sh" --task pause35a --agent-cmd "$tmp/agent.sh" --resume --max 1 >"$tmp/out35b" 2>&1 \
     || fail "resume of paused rejection failed"
 state35b=$tmp/state35b
 echo 0 > "$state35b"
 STUB_REPO=$repo35 STUB_STATE=$state35b STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task pause35b --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out35c" 2>&1 \
+    "$tmp/run-driver.sh" --task pause35b --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out35c" 2>&1 \
     || fail "another task could not start after a paused rejection"
 [ "$(git -C "$repo35" rev-list --count HEAD)" -eq 2 ] || fail "another task did not commit after a paused rejection"
 
@@ -1418,7 +1578,7 @@ json.dump({"phase":"rejected","iteration":1,"review":"v1-6","commit":"","tag":""
 PY
 : > "$state36.paused"
 STUB_REPO=$repo36 STUB_STATE=$state36 STUB_HISTORY=$tmp/history36.json PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume36 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume36 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out36" 2>&1 || fail "insufficient-reviewer resume failed"
 [ ! -f "$gitdir36/auto-iterate/resume36.json" ] || fail "insufficient-reviewer resume kept pending state"
 grep -q "reviewer unavailable" "$gitdir36/auto-iterate/resume36.feedback" || fail "insufficient-reviewer feedback was lost"
@@ -1452,7 +1612,7 @@ while [ ! -f "$tmp/lock37.ready" ] && [ "$i" -lt 50 ]; do
 done
 [ -f "$tmp/lock37.ready" ] || fail "lock holder did not start"
 STUB_REPO=$repo37 STUB_STATE=$state37 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task contention37 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task contention37 --agent-cmd "$tmp/agent20.sh" \
     --max 1 --lock-timeout 5 >"$tmp/out37" 2>&1 &
 waiter37=$!
 sleep 1
@@ -1483,7 +1643,7 @@ chmod +x "$tmp/agent38.sh"
 echo 0 > "$state38"
 set +e
 STUB_REPO=$repo38 STUB_STATE=$state38 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task agent38 --agent-cmd "$tmp/agent38.sh" --max 1 >"$tmp/out38" 2>&1
+    "$tmp/run-driver.sh" --task agent38 --agent-cmd "$tmp/agent38.sh" --max 1 >"$tmp/out38" 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 2 ] || fail "agent descendant exited $rc"
@@ -1511,7 +1671,7 @@ chmod +x "$tmp/verify39.sh"
 echo 0 > "$state39"
 set +e
 VERIFY_BG=$tmp/bg39.pid STUB_REPO=$repo39 STUB_STATE=$state39 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task verify39 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task verify39 --agent-cmd "$tmp/agent.sh" \
     --verify-cmd "sh $tmp/verify39.sh" --max 1 >"$tmp/out39" 2>&1
 rc=$?
 set -e
@@ -1532,7 +1692,7 @@ git -C "$repo40" add f
 git -C "$repo40" commit -qm base
 echo 0 > "$state40"
 STUB_REPO=$repo40 STUB_STATE=$state40 STUB_SLOW_REVIEW=1 STUB_REVIEW_PID=$tmp/review40.pid PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task review40 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out40a" 2>&1 &
+    "$tmp/run-driver.sh" --task review40 --agent-cmd "$tmp/agent.sh" --max 1 >"$tmp/out40a" 2>&1 &
 driver40=$!
 i=0
 while [ ! -f "$tmp/review40.pid" ] && [ "$i" -lt 50 ]; do
@@ -1543,7 +1703,7 @@ done
 kill_driver_tree "$driver40" review40
 set +e
 STUB_REPO=$repo40 STUB_STATE=$state40 STUB_SLOW_REVIEW=1 STUB_REVIEW_PID=$tmp/review40.pid PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task review40 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task review40 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out40b" 2>&1
 rc=$?
 set -e
@@ -1552,7 +1712,7 @@ grep -q "previous agent/verifier is still running" "$tmp/out40b" || fail "surviv
 kill "$(cat "$tmp/review40.pid")" 2>/dev/null || true
 sleep 0.3
 STUB_REPO=$repo40 STUB_STATE=$state40 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task review40 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task review40 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out40c" 2>&1 || fail "resume failed after the review exited"
 [ "$(git -C "$repo40" rev-list --count HEAD)" -eq 2 ] || fail "post-review-kill driver did not commit"
 
@@ -1575,7 +1735,7 @@ AG
 chmod +x "$tmp/fallback41.sh"
 echo 0 > "$state41"
 FB_PID=$tmp/fallback41.pid STUB_REPO=$repo41 STUB_STATE=$state41 STUB_RUN_NO_AI=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task fallback41 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task fallback41 --agent-cmd "$tmp/agent.sh" \
     --fallback-cmd "sh $tmp/fallback41.sh" --fallback-channel claude-subagent \
     --max 1 >"$tmp/out41a" 2>&1 &
 driver41=$!
@@ -1588,7 +1748,7 @@ done
 kill_driver_tree "$driver41" fallback41
 set +e
 FB_PID=$tmp/fallback41.pid STUB_REPO=$repo41 STUB_STATE=$state41 STUB_RUN_NO_AI=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task fallback41 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task fallback41 --agent-cmd "$tmp/agent.sh" \
     --fallback-cmd "sh $tmp/fallback41.sh" --fallback-channel claude-subagent \
     --resume --max 1 >"$tmp/out41b" 2>&1
 rc=$?
@@ -1598,9 +1758,173 @@ grep -q "previous agent/verifier is still running" "$tmp/out41b" || fail "surviv
 kill "$(cat "$tmp/fallback41.pid")" 2>/dev/null || true
 sleep 0.3
 STUB_REPO=$repo41 STUB_STATE=$state41 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task fallback41 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task fallback41 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out41c" 2>&1 || fail "resume failed after the fallback exited"
 [ "$(git -C "$repo41" rev-list --count HEAD)" -eq 2 ] || fail "post-fallback-kill driver did not commit"
+
+# A resumed review reuses the saved job and waits for it instead of submitting again.
+repo90=$tmp/repo90
+state90=$tmp/state90
+mkdir -p "$repo90"
+git -C "$repo90" init -q
+git -C "$repo90" config user.email test@example.com
+git -C "$repo90" config user.name test
+echo base > "$repo90/f"
+git -C "$repo90" add f
+git -C "$repo90" commit -qm base
+gitdir90=$(git -C "$repo90" rev-parse --absolute-git-dir)
+echo 0 > "$state90"
+STUB_REPO=$repo90 STUB_STATE=$state90 STUB_ITERATIONS=1 STUB_JOB_RUNNING=1 \
+    STUB_REVIEW_PID=$tmp/review90.pid PATH="$bin:$PATH" \
+    "$tmp/run-driver.sh" --task review90 --agent-cmd "$tmp/agent.sh" \
+    --max 1 >"$tmp/out90a" 2>&1 &
+driver90=$!
+i=0
+while [ "$i" -lt 100 ]; do
+    if python3 - "$gitdir90/auto-iterate/review90.json" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d.get("review_job", "").startswith("job-")
+assert d.get("review_tree") and d.get("review_base")
+PY
+    then break; fi
+    sleep 0.1
+    i=$((i + 1))
+done
+[ "$i" -lt 100 ] || fail "review job id was not persisted"
+[ -f "$tmp/review90.pid" ] || fail "running review did not start"
+kill_driver_tree "$driver90" review90
+kill -9 "$(cat "$tmp/review90.pid")" 2>/dev/null || true
+sleep 0.2
+before90=$(grep -l '"task": "review90"' "$tmp/http-jobs"/*.json 2>/dev/null | wc -l)
+STUB_REPO=$repo90 STUB_STATE=$state90 STUB_ITERATIONS=1 STUB_JOB_RUNNING=1 \
+    AUTO_ITERATE_REVIEW_POLL_INTERVAL=0.1 PATH="$bin:$PATH" \
+    "$tmp/run-driver.sh" --task review90 --agent-cmd "$tmp/agent.sh" \
+    --resume --max 1 --log "$tmp/run90b.log" >"$tmp/out90b" 2>&1 &
+driver90b=$!
+sleep 0.6
+: > "$state90.job_done"
+wait "$driver90b" || { cat "$tmp/out90b"; fail "resume of a running review failed"; }
+after90=$(grep -l '"task": "review90"' "$tmp/http-jobs"/*.json 2>/dev/null | wc -l)
+[ "$before90" -eq "$after90" ] || fail "resume submitted a new review job"
+grep -q "review resume reason=job .* completed" "$tmp/run90b.log" || fail "resume did not report the reused job"
+[ "$(git -C "$repo90" rev-list --count HEAD)" -eq 2 ] || fail "resumed running review did not commit"
+
+# A completed saved review is reused without polling or resubmitting.
+repo91=$tmp/repo91
+state91=$tmp/state91
+mkdir -p "$repo91"
+git -C "$repo91" init -q
+git -C "$repo91" config user.email test@example.com
+git -C "$repo91" config user.name test
+echo base > "$repo91/f"
+git -C "$repo91" add f
+git -C "$repo91" commit -qm base
+gitdir91=$(git -C "$repo91" rev-parse --absolute-git-dir)
+echo 0 > "$state91"
+STUB_REPO=$repo91 STUB_STATE=$state91 STUB_ITERATIONS=1 STUB_JOB_RUNNING=1 \
+    STUB_REVIEW_PID=$tmp/review91.pid PATH="$bin:$PATH" \
+    "$tmp/run-driver.sh" --task review91 --agent-cmd "$tmp/agent.sh" \
+    --max 1 >"$tmp/out91a" 2>&1 &
+driver91=$!
+i=0
+while [ "$i" -lt 100 ]; do
+    grep -q '"review_job": "job-' "$gitdir91/auto-iterate/review91.json" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+done
+[ "$i" -lt 100 ] || fail "completed-review setup did not persist a job"
+kill_driver_tree "$driver91" review91
+kill -9 "$(cat "$tmp/review91.pid")" 2>/dev/null || true
+sleep 0.2
+before91=$(grep -l '"task": "review91"' "$tmp/http-jobs"/*.json 2>/dev/null | wc -l)
+STUB_REPO=$repo91 STUB_STATE=$state91 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
+    "$tmp/run-driver.sh" --task review91 --agent-cmd "$tmp/agent.sh" \
+    --resume --max 1 --log "$tmp/run91b.log" >"$tmp/out91b" 2>&1 || { cat "$tmp/out91b"; fail "resume of a completed review failed"; }
+after91=$(grep -l '"task": "review91"' "$tmp/http-jobs"/*.json 2>/dev/null | wc -l)
+[ "$before91" -eq "$after91" ] || fail "completed review was resubmitted"
+grep -q "review resume reason=job .* completed" "$tmp/run91b.log" || fail "completed review was not reported"
+[ "$(git -C "$repo91" rev-list --count HEAD)" -eq 2 ] || fail "completed saved review did not commit"
+
+# A missing saved job is resubmitted once and then reused normally.
+repo92=$tmp/repo92
+state92=$tmp/state92
+mkdir -p "$repo92"
+git -C "$repo92" init -q
+git -C "$repo92" config user.email test@example.com
+git -C "$repo92" config user.name test
+echo base > "$repo92/f"
+git -C "$repo92" add f
+git -C "$repo92" commit -qm base
+gitdir92=$(git -C "$repo92" rev-parse --absolute-git-dir)
+echo 0 > "$state92"
+STUB_REPO=$repo92 STUB_STATE=$state92 STUB_ITERATIONS=1 STUB_JOB_RUNNING=1 \
+    STUB_REVIEW_PID=$tmp/review92.pid PATH="$bin:$PATH" \
+    "$tmp/run-driver.sh" --task review92 --agent-cmd "$tmp/agent.sh" \
+    --max 1 >"$tmp/out92a" 2>&1 &
+driver92=$!
+i=0
+while [ "$i" -lt 100 ]; do
+    grep -q '"review_job": "job-' "$gitdir92/auto-iterate/review92.json" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+done
+[ "$i" -lt 100 ] || fail "404-review setup did not persist a job"
+kill_driver_tree "$driver92" review92
+kill -9 "$(cat "$tmp/review92.pid")" 2>/dev/null || true
+sleep 0.2
+grep -l '"task": "review92"' "$tmp/http-jobs"/*.json 2>/dev/null | xargs -r rm -f
+STUB_REPO=$repo92 STUB_STATE=$state92 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
+    "$tmp/run-driver.sh" --task review92 --agent-cmd "$tmp/agent.sh" \
+    --resume --max 1 --log "$tmp/run92b.log" >"$tmp/out92b" 2>&1 || { cat "$tmp/out92b"; fail "404 review resume failed"; }
+after92=$(grep -l '"task": "review92"' "$tmp/http-jobs"/*.json 2>/dev/null | wc -l)
+[ "$after92" -eq 1 ] || fail "missing job was not resubmitted exactly once"
+grep -q "not found; starting a new review" "$tmp/run92b.log" "$tmp/out92b" || fail "missing job was not reported"
+[ "$(git -C "$repo92" rev-list --count HEAD)" -eq 2 ] || fail "404 review resume did not commit"
+
+# A done record for a different tree/base is not reused.
+repo93=$tmp/repo93
+state93=$tmp/state93
+mkdir -p "$repo93"
+git -C "$repo93" init -q
+git -C "$repo93" config user.email test@example.com
+git -C "$repo93" config user.name test
+echo base > "$repo93/f"
+git -C "$repo93" add f
+git -C "$repo93" commit -qm base
+gitdir93=$(git -C "$repo93" rev-parse --absolute-git-dir)
+echo 0 > "$state93"
+STUB_REPO=$repo93 STUB_STATE=$state93 STUB_ITERATIONS=1 STUB_JOB_RUNNING=1 \
+    STUB_REVIEW_PID=$tmp/review93.pid PATH="$bin:$PATH" \
+    "$tmp/run-driver.sh" --task review93 --agent-cmd "$tmp/agent.sh" \
+    --max 1 >"$tmp/out93a" 2>&1 &
+driver93=$!
+i=0
+while [ "$i" -lt 100 ]; do
+    grep -q '"review_job": "job-' "$gitdir93/auto-iterate/review93.json" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+done
+[ "$i" -lt 100 ] || fail "mismatch-review setup did not persist a job"
+kill_driver_tree "$driver93" review93
+kill -9 "$(cat "$tmp/review93.pid")" 2>/dev/null || true
+sleep 0.2
+python3 - "$tmp/http-jobs" <<'PY'
+import glob, json, sys
+for p in glob.glob(sys.argv[1] + "/*.json"):
+    d = json.load(open(p))
+    if d.get("task") == "review93":
+        d["record"]["tree"] = "different-tree"
+        json.dump(d, open(p, "w"))
+PY
+before93=$(grep -l '"task": "review93"' "$tmp/http-jobs"/*.json 2>/dev/null | wc -l)
+STUB_REPO=$repo93 STUB_STATE=$state93 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
+    "$tmp/run-driver.sh" --task review93 --agent-cmd "$tmp/agent.sh" \
+    --resume --max 1 --log "$tmp/run93b.log" >"$tmp/out93b" 2>&1 || { cat "$tmp/out93b"; fail "mismatched review resume failed"; }
+after93=$(grep -l '"task": "review93"' "$tmp/http-jobs"/*.json 2>/dev/null | wc -l)
+[ "$after93" -eq $((before93 + 1)) ] || fail "mismatched record was not resubmitted"
+grep -q "tree/base mismatch; starting a new review" "$tmp/run93b.log" || fail "mismatched record was not reported"
+[ "$(git -C "$repo93" rev-list --count HEAD)" -eq 2 ] || fail "mismatched review resume did not commit"
 
 # Resume rejects a verify command that differs from the saved round.
 repo42=$tmp/repo42
@@ -1620,7 +1944,7 @@ printf '{"phase":"verify","iteration":1,"review":"","commit":"","tag":"","messag
     "$base42" > "$gitdir42/auto-iterate/resume42.json"
 set +e
 STUB_REPO=$repo42 STUB_STATE=$state42 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume42 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume42 --agent-cmd "$tmp/agent.sh" \
     --resume --verify-cmd true --max 1 >"$tmp/out42" 2>&1
 rc=$?
 set -e
@@ -1648,7 +1972,7 @@ echo 0 > "$state43"
 printf '{"phase":"staged","iteration":1,"review":"","commit":"","tag":"","message":"v1","channel":"","head":"%s","clean":1,"feedback":"","tree":"","verify_cmd":"","verify_timeout":0,"version_plan":"%s","version_acceptance":"accept 43","evidence":"%s"}\n' \
     "$base43" "$tmp/plan43.json" "$tmp/evidence43" > "$gitdir43/auto-iterate/resume43.json"
 STUB_REPO=$repo43 STUB_STATE=$state43 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume43 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume43 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out43" 2>&1 || fail "saved acceptance resume failed"
 grep -q "accept 43" "$tmp/evidence43" || fail "saved version acceptance was not restored"
 [ "$(git -C "$repo43" rev-list --count HEAD)" -eq 2 ] || fail "saved acceptance resume did not commit"
@@ -1674,7 +1998,7 @@ printf '{"phase":"staged","iteration":1,"review":"","commit":"","tag":"","messag
     "$base44" "$tmp/plan44.json" > "$gitdir44/auto-iterate/resume44.json"
 set +e
 STUB_REPO=$repo44 STUB_STATE=$state44 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume44 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume44 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out44" 2>&1
 rc=$?
 set -e
@@ -1704,7 +2028,7 @@ echo 0 > "$state45"
 printf '{"phase":"reviewed","iteration":1,"review":"v1-1","commit":"","tag":"","message":"v1","channel":"stub","head":"%s","clean":1,"feedback":"","tree":"%s","verify_cmd":"","verify_timeout":0,"version_plan":"%s","version_acceptance":"accept 45 v1"}\n' \
     "$base45" "$(git -C "$repo45" write-tree)" "$tmp/plan45.json" > "$gitdir45/auto-iterate/resume45.json"
 STUB_REPO=$repo45 STUB_STATE=$state45 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume45 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume45 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out45" 2>&1 || fail "reviewed v1 acceptance resume failed"
 grep -q "version acceptance differs" "$tmp/out45" && fail "v2 acceptance was compared to v1"
 [ "$(git -C "$repo45" rev-list --count HEAD)" -eq 2 ] || fail "reviewed v1 acceptance resume did not commit"
@@ -1734,7 +2058,7 @@ printf '{"phase":"committed","iteration":1,"review":"v1-9","commit":"%s","tag":"
     "$commit46" "$tag46" "$base46" "$(git -C "$repo46" rev-parse "$commit46^{tree}")" "$tmp/plan46.json" > "$gitdir46/auto-iterate/resume46.json"
 printf '{"1":"accept 46 v1","2":"accept 46 v2"}\n' > "$tmp/plan46.json"
 STUB_REPO=$repo46 STUB_STATE=$state46 STUB_HISTORY=$tmp/history46.json STUB_ITERATIONS=2 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume46 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume46 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out46" 2>&1 || fail "committed v1 acceptance resume failed"
 grep -q "version acceptance differs" "$tmp/out46" && fail "v2 acceptance was compared to committed v1"
 [ "$(git -C "$repo46" rev-list --count HEAD)" -eq 3 ] || fail "committed v1 acceptance resume did not continue to v2"
@@ -1759,7 +2083,7 @@ printf '{"phase":"reviewed","iteration":1,"review":"v1-1","commit":"","tag":"","
     "$base47" "$(git -C "$repo47" write-tree)" > "$gitdir47/auto-iterate/resume47.json"
 set +e
 STUB_REPO=$repo47 STUB_STATE=$state47 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume47 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume47 --agent-cmd "$tmp/agent.sh" \
     --resume --verify-cmd 'exit 1' --max 1 >"$tmp/out47" 2>&1
 rc=$?
 set -e
@@ -1786,7 +2110,7 @@ printf '{"phase":"verify","iteration":1,"review":"","commit":"","tag":"","messag
     "$base48" > "$gitdir48/auto-iterate/resume48.json"
 set +e
 STUB_REPO=$repo48 STUB_STATE=$state48 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume48 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume48 --agent-cmd "$tmp/agent.sh" \
     --resume --verify-timeout 5 --max 1 >"$tmp/out48" 2>&1
 rc=$?
 set -e
@@ -1814,10 +2138,10 @@ echo 0 > "$state49"
 printf '{"phase":"verify","iteration":1,"review":"","commit":"","tag":"","message":"v1","channel":"","head":"%s","clean":1,"feedback":"","tree":"","verify_cmd":"echo evidence-ok","verify_timeout":0,"version_plan":"","version_acceptance":"","evidence":"%s"}\n' \
     "$base49" "$tmp/evidence49" > "$gitdir49/auto-iterate/resume49.json"
 STUB_REPO=$repo49 STUB_STATE=$state49 STUB_ITERATIONS=1 STUB_ARGS=$tmp/args49 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume49 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume49 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out49" 2>&1 || fail "saved evidence resume failed"
 grep -q "evidence-ok" "$tmp/evidence49" || fail "saved evidence was not used for verify"
-grep -q -- "--evidence $tmp/evidence49" "$tmp/args49" || fail "saved evidence was not passed to review"
+grep -q "evidence-ok" "$tmp/args49" || fail "saved evidence was not passed to review"
 
 # A custom tag saved with reviewed state is reused on recovery.
 repo50=$tmp/repo50
@@ -1838,7 +2162,7 @@ echo 0 > "$state50"
 printf '{"phase":"reviewed","iteration":1,"review":"v1-1","commit":"","tag":"custom/resume50/v1","message":"v1","channel":"stub","head":"%s","clean":1,"feedback":"","tree":"%s","verify_cmd":"","verify_timeout":0,"version_plan":"","version_acceptance":"","evidence":""}\n' \
     "$base50" "$(git -C "$repo50" write-tree)" > "$gitdir50/auto-iterate/resume50.json"
 STUB_REPO=$repo50 STUB_STATE=$state50 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume50 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume50 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out50" 2>&1 || fail "custom tag resume failed"
 [ "$(git -C "$repo50" tag)" = "custom/resume50/v1" ] || fail "custom tag was not reused"
 [ "$(git -C "$repo50" rev-list --count HEAD)" -eq 2 ] || fail "custom tag resume did not commit"
@@ -1856,7 +2180,7 @@ git -C "$repo51" commit -qm base
 printf '{"1":"review accept 51"}\n' > "$tmp/plan51.json"
 echo 0 > "$state51"
 STUB_REPO=$repo51 STUB_STATE=$state51 STUB_ITERATIONS=1 STUB_ARGS=$tmp/args51 STUB_EVIDENCE_COPY=$tmp/evidence51.copy PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task review51 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task review51 --agent-cmd "$tmp/agent.sh" \
     --version-plan "$tmp/plan51.json" --max 1 >"$tmp/out51" 2>&1 || fail "version plan without evidence failed"
 grep -q "review accept 51" "$tmp/evidence51.copy" || fail "reviewer did not receive version acceptance"
 grep -q -- "--evidence" "$tmp/args51" || fail "reviewer was not given an evidence path"
@@ -1882,14 +2206,14 @@ chmod +x "$tmp/verify52.sh"
 echo 0 > "$state52"
 set +e
 (cd "$tmp" && VERIFY52_MARK=$tmp/verify52.mark STUB_REPO=$repo52 STUB_STATE=$state52 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task plan52 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task plan52 --agent-cmd "$tmp/agent.sh" \
     --version-plan plan52.json --verify-cmd "sh $tmp/verify52.sh" --max 1 >"$tmp/out52a" 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "relative plan setup exited $rc"
 grep -Fq "\"version_plan\": \"$tmp/plan52.json\"" "$repo52/.git/auto-iterate/plan52.json" || fail "version plan was not stored absolutely"
 (cd / && VERIFY52_MARK=$tmp/verify52.mark STUB_REPO=$repo52 STUB_STATE=$state52 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task plan52 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task plan52 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out52b" 2>&1) || fail "resume from another directory failed"
 
 # Repeating the same plan options after an interruption keeps the saved evidence.
@@ -1913,13 +2237,13 @@ chmod +x "$tmp/verify53.sh"
 echo 0 > "$state53"
 set +e
 (cd "$tmp" && VERIFY53_MARK=$tmp/verify53.mark STUB_REPO=$repo53 STUB_STATE=$state53 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task plan53 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task plan53 --agent-cmd "$tmp/agent.sh" \
     --version-plan plan53.json --verify-cmd "sh $tmp/verify53.sh" --max 1 >"$tmp/out53a" 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "repeated-plan setup exited $rc"
 VERIFY53_MARK=$tmp/verify53.mark STUB_REPO=$repo53 STUB_STATE=$state53 STUB_ITERATIONS=1 STUB_EVIDENCE_COPY=$tmp/evidence53.copy PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task plan53 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task plan53 --agent-cmd "$tmp/agent.sh" \
     --resume --version-plan "$tmp/plan53.json" --max 1 >"$tmp/out53b" 2>&1 \
     || fail "resume with repeated plan options failed"
 grep -q "accept 53" "$tmp/evidence53.copy" || fail "repeated-plan resume lost acceptance evidence"
@@ -1949,13 +2273,13 @@ chmod +x "$tmp/agent54.sh"
 echo 0 > "$state54"
 set +e
 STUB_REPO=$repo54 STUB_STATE=$state54 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task agent54 --agent-cmd "$tmp/agent54.sh" --max 1 >"$tmp/out54a" 2>&1
+    "$tmp/run-driver.sh" --task agent54 --agent-cmd "$tmp/agent54.sh" --max 1 >"$tmp/out54a" 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "partial agent exited $rc"
 [ -f "$repo54/partial.txt" ] || fail "partial edit was not kept"
 STUB_REPO=$repo54 STUB_STATE=$state54 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task agent54 --agent-cmd "$tmp/agent54.sh" \
+    "$tmp/run-driver.sh" --task agent54 --agent-cmd "$tmp/agent54.sh" \
     --resume --max 1 >"$tmp/out54b" 2>&1 || fail "partial agent resume failed"
 grep -q "preserving partial edits" "$tmp/run.log" 2>/dev/null || true
 [ "$(git -C "$repo54" show HEAD:partial.txt)" = partial ] || fail "partial edit was not committed"
@@ -1979,7 +2303,7 @@ echo 0 > "$state55"
 printf '{"phase":"agent","iteration":1,"review":"","commit":"","tag":"","message":"v1","channel":"","head":"%s","clean":1,"feedback":"retry feedback"}\n' \
     "$base55" > "$gitdir55/auto-iterate/resume55.json"
 STUB_REPO=$repo55 STUB_STATE=$state55 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume55 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume55 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out55" 2>&1 || fail "dirty rejection retry resume failed"
 [ "$(git -C "$repo55" show HEAD:f)" = edited ] || fail "tracked rejection edit was lost"
 grep -q "retry feedback" "$repo55/feedback.txt" || fail "dirty rejection retry lost feedback"
@@ -2013,7 +2337,7 @@ chmod +x "$tmp/agent56.sh" "$tmp/verify56.sh"
 echo 0 > "$state56"
 set +e
 STUB_REPO=$repo56 STUB_STATE=$state56 STUB_REJECT=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task reject56 --agent-cmd "$tmp/agent56.sh" \
+    "$tmp/run-driver.sh" --task reject56 --agent-cmd "$tmp/agent56.sh" \
     --verify-cmd "sh $tmp/verify56.sh" --version-plan "$tmp/plan56.json" \
     --evidence "$tmp/evidence56" --stop-on-reject --max 1 >"$tmp/out56a" 2>&1
 rc=$?
@@ -2024,7 +2348,7 @@ set -e
 grep -q '"verify_cmd"' "$repo56/.git/auto-iterate/reject56.retry" || fail "retry metadata lost verify settings"
 grep -q '"version_plan"' "$repo56/.git/auto-iterate/reject56.retry" || fail "retry metadata lost version plan"
 STUB_REPO=$repo56 STUB_STATE=$state56 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task reject56 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task reject56 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out56b" 2>&1 || fail "rejection stop resume failed"
 [ "$(git -C "$repo56" show HEAD:f)" = tracked-change ] || fail "rejection resume lost tracked edit"
 [ "$(git -C "$repo56" rev-list --count HEAD)" -eq 2 ] || fail "rejection resume did not commit"
@@ -2057,7 +2381,7 @@ printf '{"phase":"committed","iteration":1,"review":"v1-5","commit":"%s","tag":"
     "$commit57" "$tag57" "$base57" "$(git -C "$repo57" rev-parse "$commit57^{tree}")" > "$gitdir57/auto-iterate/resume57.json"
 : > "$state57.paused"
 STUB_REPO=$repo57 STUB_STATE=$state57 STUB_HISTORY=$tmp/history57.json PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume57 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task resume57 --agent-cmd "$tmp/agent.sh" \
     --resume --max 1 >"$tmp/out57" 2>&1 || fail "insufficient committed resume failed"
 [ ! -f "$gitdir57/auto-iterate/resume57.json" ] || fail "insufficient committed resume kept state"
 [ "$(git -C "$repo57" rev-list --count HEAD)" -eq 2 ] || fail "insufficient committed resume changed history"
@@ -2092,7 +2416,7 @@ chmod +x "$tmp/bin-fail58/python3"
 set +e
 STUB_REPO=$repo58 STUB_STATE=$state58 STUB_HISTORY=$tmp/history58.json \
     PATH="$tmp/bin-fail58:$bin:$PATH" FAIL_STATE=$gitdir58/auto-iterate/resume58.json \
-    "$here/auto-iterate.sh" --task resume58 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume58 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out58" 2>&1
 rc=$?
 set -e
@@ -2122,7 +2446,7 @@ printf '{"phase":"staged","iteration":1,"review":"","commit":"","tag":"","messag
 : > "$state59.paused"
 set +e
 STUB_REPO=$repo59 STUB_STATE=$state59 AUTO_ITERATE_FAIL_FEEDBACK=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume59 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume59 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out59" 2>&1
 rc=$?
 set -e
@@ -2148,7 +2472,7 @@ printf '{"phase":"agent","iteration":1,"review":"","commit":"","tag":"","message
 : > "$state60.paused"
 set +e
 STUB_REPO=$repo60 STUB_STATE=$state60 AUTO_ITERATE_FAIL_FEEDBACK=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume60 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume60 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out60" 2>&1
 rc=$?
 set -e
@@ -2169,7 +2493,7 @@ printf '{"1":"must fail"}\n' > "$tmp/plan61.json"
 echo 0 > "$state61"
 set +e
 STUB_REPO=$repo61 STUB_STATE=$state61 AUTO_ITERATE_FAIL_EVIDENCE=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task accept61 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task accept61 --agent-cmd "$tmp/agent20.sh" \
     --version-plan "$tmp/plan61.json" --evidence "$tmp/evidence61" \
     --max 1 >"$tmp/out61" 2>&1
 rc=$?
@@ -2189,7 +2513,7 @@ git -C "$repo62" commit -qm base
 echo 0 > "$state62"
 set +e
 STUB_REPO=$repo62 STUB_STATE=$state62 AUTO_ITERATE_FAIL_EVIDENCE=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task verify62 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task verify62 --agent-cmd "$tmp/agent20.sh" \
     --verify-cmd true --evidence "$tmp/evidence62" --max 1 >"$tmp/out62" 2>&1
 rc=$?
 set -e
@@ -2220,7 +2544,7 @@ printf '{"phase":"rejected","iteration":1,"review":"v1-9","commit":"","tag":"","
     "$base63" "$untracked63" > "$gitdir63/auto-iterate/resume63.json"
 : > "$state63.paused"
 STUB_REPO=$repo63 STUB_STATE=$state63 STUB_HISTORY=$tmp/history63.json PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume63 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume63 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out63" 2>&1 || fail "targeted cleaned resume failed"
 [ ! -e "$repo63/agent-junk.txt" ] || fail "recorded agent junk survived"
 [ -e "$repo63/user-created.txt" ] || fail "unrelated user file was deleted"
@@ -2246,7 +2570,7 @@ printf '{"phase":"rejected","iteration":1,"review":"v1-7","commit":"","tag":"","
 : > "$state64.paused"
 set +e
 STUB_REPO=$repo64 STUB_STATE=$state64 STUB_HISTORY=$tmp/history64.json AUTO_ITERATE_FAIL_FEEDBACK=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume64 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume64 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out64" 2>&1
 rc=$?
 set -e
@@ -2274,7 +2598,7 @@ chmod +x "$tmp/agent65.sh"
 echo 0 > "$state65"
 set +e
 STUB_REPO=$repo65 STUB_STATE=$state65 STUB_REJECT=1 STUB_FAIL_RECORD=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task reject65 --agent-cmd "$tmp/agent65.sh" \
+    "$tmp/run-driver.sh" --task reject65 --agent-cmd "$tmp/agent65.sh" \
     --max 1 >"$tmp/out65a" 2>&1
 rc=$?
 set -e
@@ -2283,7 +2607,7 @@ gitdir65=$(git -C "$repo65" rev-parse --absolute-git-dir)
 [ -f "$gitdir65/auto-iterate/reject65.json" ] || fail "record failure did not keep rejected state"
 [ -f "$repo65/agent-junk65.txt" ] || fail "record failure cleaned junk too early"
 STUB_REPO=$repo65 STUB_STATE=$state65 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task reject65 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task reject65 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out65b" 2>&1 || fail "rejected record retry failed"
 [ ! -e "$repo65/agent-junk65.txt" ] || fail "driver-written rejected state lost cleanup list"
 [ "$(git -C "$repo65" show HEAD:f)" = tracked ] || fail "rejected record retry lost tracked edit"
@@ -2308,14 +2632,14 @@ chmod +x "$tmp/agent66.sh"
 echo 0 > "$state66"
 set +e
 STUB_REPO=$repo66 STUB_STATE=$state66 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume66 --agent-cmd "$tmp/agent66.sh" \
+    "$tmp/run-driver.sh" --task resume66 --agent-cmd "$tmp/agent66.sh" \
     --max 1 >"$tmp/out66a" 2>&1
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "interrupted agent did not fail"
 echo keep > "$repo66/user-created66.txt"
 STUB_REPO=$repo66 STUB_STATE=$state66 STUB_REJECT=1 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume66 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume66 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out66b" 2>&1 || fail "resumed rejection failed"
 [ -e "$repo66/user-created66.txt" ] || fail "user file created before resume was deleted"
 
@@ -2331,7 +2655,7 @@ git -C "$repo67" add f
 git -C "$repo67" commit -qm base
 echo 0 > "$state67"
 STUB_REPO=$repo67 STUB_STATE=$state67 STUB_EVIDENCE_COPY=$tmp/copy67 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task verify67 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task verify67 --agent-cmd "$tmp/agent20.sh" \
     --verify-cmd 'echo verify-marker' --max 1 >"$tmp/out67" 2>&1 || fail "verify evidence run failed"
 [ -f "$tmp/copy67" ] || fail "reviewer received no evidence file"
 grep -q "verify-marker" "$tmp/copy67" || fail "reviewer evidence missed verify output"
@@ -2350,14 +2674,14 @@ git -C "$repo68" commit -qm base
 echo 0 > "$state68"
 set +e
 STUB_REPO=$repo68 STUB_STATE=$state68 STUB_REJECT=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task reject68 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task reject68 --agent-cmd "$tmp/agent20.sh" \
     --stop-on-reject --max 1 >"$tmp/out68a" 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 5 ] || fail "first rejection exited $rc"
 echo keep > "$repo68/user-created68.txt"
 STUB_REPO=$repo68 STUB_STATE=$state68 STUB_REJECT=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task reject68 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task reject68 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out68b" 2>&1 || fail "retry rejection failed"
 [ -e "$repo68/user-created68.txt" ] || fail "user file created before retry resume was deleted"
 
@@ -2383,7 +2707,7 @@ check_resume_preserve() {
         "$_phase" "$_base" "$_vcmd" > "$_gitdir/auto-iterate/resume-$_phase.json"
     echo keep > "$_repo/user-$_phase.txt"
     STUB_REPO=$_repo STUB_STATE=$_state STUB_REJECT=1 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-        "$here/auto-iterate.sh" --task "resume-$_phase" --agent-cmd "$tmp/agent20.sh" \
+        "$tmp/run-driver.sh" --task "resume-$_phase" --agent-cmd "$tmp/agent20.sh" \
         --resume --max 1 >"$tmp/out-preserve-$_phase" 2>&1 || fail "$_phase resume failed"
     [ -e "$_repo/user-$_phase.txt" ] || fail "$_phase recovery deleted a user file"
 }
@@ -2410,7 +2734,7 @@ chmod +x "$tmp/agent69.sh"
 echo 0 > "$state69"
 set +e
 STUB_REPO=$repo69 STUB_STATE=$state69 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume69 --agent-cmd "$tmp/agent69.sh" \
+    "$tmp/run-driver.sh" --task resume69 --agent-cmd "$tmp/agent69.sh" \
     --max 1 >"$tmp/out69a" 2>&1
 rc=$?
 set -e
@@ -2418,13 +2742,13 @@ set -e
 echo keep > "$repo69/user-created69.txt"
 set +e
 STUB_REPO=$repo69 STUB_STATE=$state69 STUB_REJECT=1 STUB_FAIL_RECORD=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume69 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume69 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out69b" 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "rejection record failure exited $rc"
 STUB_REPO=$repo69 STUB_STATE=$state69 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task resume69 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task resume69 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out69c" 2>&1 || fail "rejected record retry failed"
 [ -e "$repo69/user-created69.txt" ] || fail "empty cleanup list deleted a protected user file"
 
@@ -2450,7 +2774,7 @@ printf '{"phase":"reviewing","iteration":1,"review":"v1-1","commit":"","tag":"",
     "$base70" "$protected70" > "$gitdir70/auto-iterate/review70.json"
 : > "$state70.paused"
 STUB_REPO=$repo70 STUB_STATE=$state70 STUB_HISTORY=$tmp/history70.json STUB_REJECT=1 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task review70 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task review70 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out70" 2>&1 || fail "protected reviewing resume failed"
 [ -e "$repo70/user-protected70.txt" ] || fail "saved protection was dropped after staging"
 
@@ -2475,7 +2799,7 @@ echo keep > "$repo71/user-staged71.txt"
 git -C "$repo71" add user-staged71.txt
 : > "$state71.paused"
 STUB_REPO=$repo71 STUB_STATE=$state71 STUB_HISTORY=$tmp/history71.json STUB_REJECT=1 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task review71 --agent-cmd "$tmp/agent20.sh" \
+    "$tmp/run-driver.sh" --task review71 --agent-cmd "$tmp/agent20.sh" \
     --resume --max 1 >"$tmp/out71" 2>&1 || fail "staged user file resume failed"
 [ -e "$repo71/user-staged71.txt" ] || fail "newly staged user file was deleted"
 
@@ -2493,7 +2817,7 @@ echo 0 > "$state72"
 set +e
 STUB_REPO=$repo72 STUB_STATE=$state72 STUB_ITERATIONS=1 STUB_FAIL_VERIFY_RANGE=1 PATH="$bin:$PATH" \
     STUB_NOTIFY_OUT=$tmp/notify72.out \
-    "$here/auto-iterate.sh" --task vr72 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task vr72 --agent-cmd "$tmp/agent.sh" \
     --verify-range --notify-cmd "$tmp/notify.sh" --max 1 >"$tmp/out72" 2>&1
 rc=$?
 set -e
@@ -2522,7 +2846,7 @@ AG
 chmod +x "$tmp/slow-notify.sh"
 start=$(date +%s)
 STUB_REPO=$repo73 STUB_STATE=$state73 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task notify73 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task notify73 --agent-cmd "$tmp/agent.sh" \
     --notify-cmd "$tmp/slow-notify.sh" --notify-timeout 1 --max 1 >"$tmp/out73" 2>&1 \
     || fail "notification timeout changed the driver exit status"
 elapsed=$(( $(date +%s) - start ))
@@ -2544,7 +2868,7 @@ echo 0 > "$state74"
 start=$(date +%s)
 set +e
 STUB_REPO=$repo74 STUB_STATE=$state74 STUB_ITERATIONS=1 STUB_SLOW_VERIFY_RANGE=1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task vr74 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task vr74 --agent-cmd "$tmp/agent.sh" \
     --verify-range --verify-range-timeout 1 --max 1 >"$tmp/out74" 2>&1
 rc=$?
 set -e
@@ -2576,7 +2900,7 @@ printf 'fake opencode round %s\n' "${AUTO_ITERATE_ITERATION:-}" >> "${AUTO_ITERA
 AG
 chmod +x "$adir/opencode-agent.sh"
 STUB_REPO=$repo77 STUB_STATE=$state77 STUB_ITERATIONS=1 PATH="$bin:$PATH" \
-    sh "$adir/auto-iterate.sh" --task adapter77 --adapter opencode \
+    AUTO_ITERATE_DRIVER="$adir/auto-iterate.sh" "$tmp/run-driver.sh" --task adapter77 --adapter opencode \
     --message "adapter v1" --evidence "$tmp/ev77" --log "$tmp/log77" \
     >"$tmp/out77" 2>&1 || { cat "$tmp/out77"; fail "adapter run exited $?"; }
 [ "$(cat "$repo77/adapter.out")" = adapter-ran ] || fail "sibling adapter did not run"
@@ -2604,7 +2928,7 @@ STUB_REPO=$repo80 STUB_STATE=$state80 STUB_ITERATIONS=1 \
     STUB_DRAIN_SNAPSHOT=$tmp/drain80.snapshot \
     STUB_DRIVER_STATE=$gitdir80/auto-iterate/drain80.json \
     REVIEW_GATE_URL=http://127.0.0.1:1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task drain80 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task drain80 --agent-cmd "$tmp/agent.sh" \
     --drain-timeout 5 --drain-interval 0 --max 1 --log "$tmp/run80.log" \
     >"$tmp/out80" 2>&1 || { cat "$tmp/out80"; fail "draining stage/review run failed"; }
 [ "$(git -C "$repo80" rev-list --count HEAD)" -eq 2 ] || fail "draining stage/review run lost the commit"
@@ -2633,7 +2957,7 @@ gitdir81=$(git -C "$repo81" rev-parse --absolute-git-dir)
 set +e
 STUB_REPO=$repo81 STUB_STATE=$state81 STUB_ITERATIONS=1 STUB_DRAIN_RUN_ALWAYS=1 \
     REVIEW_GATE_URL=http://127.0.0.1:1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task drain81 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task drain81 --agent-cmd "$tmp/agent.sh" \
     --drain-timeout 1 --drain-interval 0 --max 1 --log "$tmp/run81.log" \
     >"$tmp/out81" 2>&1
 rc=$?
@@ -2662,7 +2986,7 @@ git -C "$repo82" commit -qm base
 echo 0 > "$state82"
 STUB_REPO=$repo82 STUB_STATE=$state82 STUB_ITERATIONS=1 STUB_DRAIN_RECORD_ONCE=1 \
     REVIEW_GATE_URL=http://127.0.0.1:1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task drain82 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task drain82 --agent-cmd "$tmp/agent.sh" \
     --drain-timeout 5 --drain-interval 0 --max 1 --log "$tmp/run82.log" \
     >"$tmp/out82" 2>&1 || { cat "$tmp/out82"; fail "draining record failed"; }
 [ "$(git -C "$repo82" rev-list --count HEAD)" -eq 2 ] || fail "draining record lost the commit"
@@ -2684,7 +3008,7 @@ echo 0 > "$state83"
 STUB_REPO=$repo83 STUB_STATE=$state83 STUB_ITERATIONS=1 \
     STUB_RUN_NO_AI=1 STUB_DRAIN_SUBMIT_ONCE=1 \
     REVIEW_GATE_URL=http://127.0.0.1:1 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task drain83 --agent-cmd "$tmp/agent.sh" \
+    "$tmp/run-driver.sh" --task drain83 --agent-cmd "$tmp/agent.sh" \
     --fallback-cmd "$tmp/fallback.sh" --drain-timeout 5 --drain-interval 0 --max 1 \
     --log "$tmp/run83.log" >"$tmp/out83" 2>&1 \
     || { cat "$tmp/out83"; fail "draining fallback submit failed"; }
@@ -2716,7 +3040,7 @@ gitdir84=$(git -C "$repo84" rev-parse --absolute-git-dir)
 REVIEW_GATE_TOKEN_FILE=$tmp/other-token STUB_REPO=$repo84 STUB_STATE=$state84 \
     STUB_ITERATIONS=1 STUB_TOKEN_SEEN=$tmp/token84.seen \
     TOKEN_AGENT_MARKER=$tmp/token84.agent PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task token84 --agent-cmd "$tmp/token-agent.sh" \
+    "$tmp/run-driver.sh" --task token84 --agent-cmd "$tmp/token-agent.sh" \
     --token-file "$tmp/token" --max 1 --log "$tmp/run84.log" \
     >"$tmp/out84" 2>&1 || { cat "$tmp/out84"; fail "token-file run failed"; }
 [ "$(cat "$tmp/token84.seen")" = "$tmp/token" ] || fail "gate did not receive the selected token file"
@@ -2733,7 +3057,7 @@ PY
 # A missing token file is rejected before any gate call.
 set +e
 env -u REVIEW_GATE_TOKEN_FILE STUB_REPO=$repo84 STUB_STATE=$state84 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --check --task check >"$tmp/out85" 2>&1
+    "$tmp/run-driver.sh" --check --task check >"$tmp/out85" 2>&1
 rc=$?
 set -e
 [ "$rc" -eq 2 ] || fail "missing token exited $rc, expected 2"
@@ -2752,7 +3076,7 @@ git -C "$repo86" commit -qm base
 echo 0 > "$state86"
 set +e
 STUB_403_TASK_SHOW=1 STUB_REPO=$repo86 STUB_STATE=$state86 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task owner403 --agent-cmd true --max 1 \
+    "$tmp/run-driver.sh" --task owner403 --agent-cmd true --max 1 \
     >"$tmp/out86" 2>&1
 rc=$?
 set -e
@@ -2773,7 +3097,7 @@ git -C "$repo87" commit -qm base
 echo 0 > "$state87"
 set +e
 STUB_403_STAGE=1 STUB_REPO=$repo87 STUB_STATE=$state87 PATH="$bin:$PATH" \
-    "$here/auto-iterate.sh" --task owner403stage --agent-cmd true --max 1 \
+    "$tmp/run-driver.sh" --task owner403stage --agent-cmd true --max 1 \
     >"$tmp/out87" 2>&1
 rc=$?
 set -e

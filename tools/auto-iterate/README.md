@@ -195,7 +195,7 @@ the same contract:
 - Never stage, commit, tag, push, record, or write/infer a verdict; never read gate
   credentials; unset `REVIEW_GATE_*` before starting the host model.
 - Evidence: append host stdout/stderr to `AUTO_ITERATE_EVIDENCE`; refuse a path
-  inside the repository. The driver passes this file to `review run`.
+  inside the repository. The driver sends this file's text in the review request.
 - Guards: exit non-zero on host failure; after the host exits, refuse to hand the
   tree back when `HEAD` moved, a tag name/object changed, or the worktree/index/
   untracked snapshot is byte-identical (nothing to review).
@@ -230,14 +230,15 @@ non-zero hook, and `--notify-retry-delay S` sets the base for exponential backof
 (1s, 2s, 4s, ... capped at 30s). Notification failure never changes the driver exit
 status.
 
-`--review-timeout S` bounds the `review run` client (0 disables it). On timeout the
-driver exits 3 and leaves the task and staged tree intact; the service may still
-finish the review in the background.
+`--review-timeout S` bounds the HTTP review-job client (0 disables it). On timeout
+the driver exits 3 and leaves the task, staged tree and review job id intact; the
+service may still finish the review in the background. A later `--resume` asks
+`GET /jobs/{id}` for that job instead of submitting the same tree again.
 
 `--drain-timeout S` (default 1800) and `--drain-interval S` (default 5) control
 what happens when the gate is draining. The driver probes `GET /health` for
 `drain.draining`, with a `503` plus `draining` response body as fallback, and
-retries `stage`, `review run`, fallback `review submit` and `record` without
+retries `stage`, `review-run`, fallback `review submit` and `record` without
 changing the round phase. It adds only `drain_wait` metadata to the round state.
 If the gate is still draining after the limit, the driver exits 4 and reports
 maintenance; it is not treated as a rejection or a review failure. `0` disables
@@ -246,7 +247,7 @@ waiting (fail on the first draining response); a `0` interval retries immediatel
 Each round's elapsed seconds are logged, emitted as `round_done` and added to the
 report row.
 
-`--provider NAME` is forwarded to `review run`, selecting the reviewer provider.
+`--provider NAME` is forwarded to the review request, selecting the reviewer provider.
 The verdict log line and the `review` event also carry the channel and provider the
 service used, so the report records which reviewer decided each version.
 
@@ -298,10 +299,17 @@ Each round writes `agent -> staged -> reviewing -> reviewed -> committed` (or
 `verify`/`staged`/`reviewing` tree that can be verified and staged again without
 discarding the edits, and a `rejected` record that still needs `record`/reset.
 The state carries the absolute evidence path, verification command and timeout, the
-absolute version-plan path, the selected acceptance, and the intended tag. A resume without those options
+absolute version-plan path, the selected acceptance, the intended tag, and the
+review job id with the exact staged tree/base. A resume without those options
 restores them, while adding or changing an evidence path, command, timeout, plan or
 acceptance is rejected before any recovery commit, tag or record. A custom tag is
-therefore reused even if the resume uses a different `--tag-prefix`. Feedback is carried through
+therefore reused even if the resume uses a different `--tag-prefix`. A `reviewing`
+state with a saved job id asks the gate for that job: a still-running job is
+polled, a completed job is reused only when its record matches the saved tree/base,
+and a 404 or a different record starts exactly one new review. A failed saved job
+is retried as a new review. The resume reason is written to the log, events and
+report; the report notes that a reused job hits the prompt cache, which saves
+waiting rather than relaxing review. Feedback is carried through
 `agent`, `verify`, `staged` and `reviewing` writes. After approval the durable
 feedback is removed before the state file, so a crash between those operations
 cannot leak rejection text into the next version. A

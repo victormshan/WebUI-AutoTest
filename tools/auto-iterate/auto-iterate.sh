@@ -77,6 +77,7 @@ TXT
 TASK=; AGENT=; ADAPTER=; adapter_note=; MESSAGE=; EVIDENCE=; EVIDENCE_SET=0; MAX=10; TAG_PREFIX=auto-iterate; LOG=; AGENT_TIMEOUT=0; REPORT=; report_init=0; EVENTS=; REVIEW_TIMEOUT=0; DRAIN_TIMEOUT=1800; DRAIN_INTERVAL=5; TOKEN_FILE=; CHECK=0; PROVIDER=; STOP_ON_REJECT=0; ALLOW_DIRTY=0; RESUME=0; FALLBACK=; FALLBACK_CHANNEL=claude-subagent; state=
 LOCK_TIMEOUT=0; lockfile=; lock_owner=; VERIFY_CMD=; VERIFY_TIMEOUT=0; VERIFY_CMD_SET=0; VERIFY_TIMEOUT_SET=0; VERSION_PLAN=; resume_review=0; resume_allow_dirty=0; keep_state=0; started_clean=0; durable_feedback=
 NOTIFY=; VERIFY_RANGE=0; NOTIFY_TIMEOUT=0; VERIFY_RANGE_TIMEOUT=0; NOTIFY_EVENTS=; NOTIFY_RETRIES=0; NOTIFY_RETRY_DELAY=1; notify_event=; notify_reason=; manifest=; MANIFEST=; MANIFEST_SET=0; commit=; tag=; rid=; verdict=; channel=; msg=; full=; PLAN=0; status_file=; run_started=
+review_job_id=; review_job_tree=; review_job_base=; review_resume_reason=
 while [ $# -gt 0 ]; do
     case "$1" in
         --task) TASK=$2; shift 2 ;;
@@ -417,10 +418,11 @@ write_state() {
     _head=${8:-}; _clean=${9:-0}; _fb=${10:-}; _tree=${11:-}; _untracked=${12-$preserve_untracked}
     _vcmd=${VERIFY_CMD:-}; _vtimeout=${VERIFY_TIMEOUT:-0}
     _vplan=${VERSION_PLAN:-}; _vacc=${version_acceptance:-}; _ev=${EVIDENCE:-}; _man=${manifest:-}
+    _vjob=${review_job_id:-}; _vjt=${review_job_tree:-}; _vjb=${review_job_base:-}
     mkdir -p "$(dirname "$state")"
-    python3 - "$state" "$_phase" "$_it" "$_rid" "$_commit" "$_tag" "$_msg" "$_chan" "$_head" "$_clean" "$_fb" "$_tree" "$_untracked" "$_vcmd" "$_vtimeout" "$_vplan" "$_vacc" "$_ev" "$_man" <<'PY'
+    python3 - "$state" "$_phase" "$_it" "$_rid" "$_commit" "$_tag" "$_msg" "$_chan" "$_head" "$_clean" "$_fb" "$_tree" "$_untracked" "$_vcmd" "$_vtimeout" "$_vplan" "$_vacc" "$_ev" "$_man" "$_vjob" "$_vjt" "$_vjb" <<'PY'
 import json, os, sys
-p, phase, iteration, review, commit, tag, message, channel, head, clean, feedback, tree, untracked, vcmd, vtimeout, vplan, vacc, evidence, manifest = sys.argv[1:20]
+p, phase, iteration, review, commit, tag, message, channel, head, clean, feedback, tree, untracked, vcmd, vtimeout, vplan, vacc, evidence, manifest, review_job, review_tree, review_base = sys.argv[1:23]
 tmp = f"{p}.tmp.{os.getpid()}"
 with open(tmp, "w") as f:
     json.dump({"phase": phase, "iteration": int(iteration), "review": review,
@@ -429,7 +431,9 @@ with open(tmp, "w") as f:
                "feedback": feedback, "tree": tree, "untracked": untracked,
                "verify_cmd": vcmd, "verify_timeout": int(vtimeout or 0),
                "version_plan": vplan, "version_acceptance": vacc,
-               "evidence": evidence, "manifest": manifest}, f)
+               "evidence": evidence, "manifest": manifest,
+               "review_job": review_job, "review_tree": review_tree,
+               "review_base": review_base}, f)
     f.write("\n")
     f.flush()
     os.fsync(f.fileno())
@@ -531,6 +535,197 @@ gate_write() {
         rm -f "$_gw_out" "$_gw_err"
         return "$_gw_rc"
     done
+}
+
+# Start or resume an external review through the service's HTTP API. The job id
+# and the exact tree/base are persisted in the round state before polling, so an
+# interrupted driver can ask the gate about the same job instead of submitting
+# the version again. A 404 or a done record for a different tree/base is treated
+# as "no usable job" and starts one new review.
+review_run_http() {
+    _rr_tree=$1; _rr_base=$2
+    python3 - "$state" "$TOKEN_FILE" "${REVIEW_GATE_URL:-http://127.0.0.1:7878}" \
+        "$TASK" "$_rr_tree" "$_rr_base" "${EVIDENCE:-}" "${PROVIDER:-}" "$REVIEW_TIMEOUT" <<'PY'
+import json, os, sys, time, urllib.error, urllib.request
+
+state, token_file, base_url, task, tree, base, evidence_path, provider, timeout_s = sys.argv[1:10]
+timeout_s = int(timeout_s or 0)
+deadline = time.time() + timeout_s if timeout_s > 0 else None
+poll = float(os.environ.get("AUTO_ITERATE_REVIEW_POLL_INTERVAL", "5"))
+pidfile = os.environ.get("AUTO_ITERATE_REVIEW_PIDFILE", "")
+if pidfile:
+    with open(pidfile, "w") as f:
+        f.write(str(os.getpid()) + "\n")
+token = open(token_file).read().strip()
+base_url = base_url.rstrip("/")
+if evidence_path:
+    try:
+        evidence = open(evidence_path).read()
+    except OSError as e:
+        print(f"cannot read evidence {evidence_path}: {e}", file=sys.stderr)
+        sys.exit(1)
+else:
+    evidence = ""
+
+def remaining():
+    if deadline is None:
+        return 30
+    left = deadline - time.time()
+    if left <= 0:
+        print(f"review timed out after {timeout_s}s; the task may have a pending review", file=sys.stderr)
+        sys.exit(124)
+    return max(1, min(30, int(left) or 1))
+
+def request(method, path, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(base_url + path, data=data, method=method)
+    req.add_header("Authorization", "Bearer " + token)
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=remaining()) as resp:
+            raw = resp.read()
+            return resp.status, json.loads(raw or b"{}")
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            v = json.loads(raw or b"{}")
+        except Exception:
+            v = {"error": raw.decode(errors="replace")}
+        return e.code, v
+    except Exception as e:
+        if deadline is not None and time.time() >= deadline:
+            print(f"review timed out after {timeout_s}s; the task may have a pending review", file=sys.stderr)
+            sys.exit(124)
+        print(f"review-gate unreachable at {base_url}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+def load_state():
+    with open(state) as f:
+        return json.load(f)
+
+def update_state(**kw):
+    d = load_state()
+    d.update(kw)
+    tmp = f"{state}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(d, f)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, state)
+
+def fail_http(st, v):
+    err = str(v.get("error", v))
+    if st == 503 and "draining" in err.lower():
+        print(f"503 {err}", file=sys.stderr)
+        sys.exit(1)
+    print(f"review-gate {st}: {err}", file=sys.stderr)
+    sys.exit(1)
+
+def post_review(reason=""):
+    st, v = request("POST", f"/tasks/{task}/reviews",
+                    {"tree": tree, "base": base, "evidence": evidence,
+                     "provider": provider or None})
+    if st < 200 or st >= 300:
+        fail_http(st, v)
+    update_state(review_job=v["id"], review_tree=tree, review_base=base,
+                 review_resume_reason=reason)
+    return v
+
+def get_job(job_id):
+    st, v = request("GET", f"/jobs/{job_id}")
+    if st == 404:
+        return None
+    if st < 200 or st >= 300:
+        fail_http(st, v)
+    return v
+
+def usable(job):
+    if job is None:
+        return False
+    if job.get("status") == "done":
+        rec = job.get("record") or {}
+        return rec.get("tree") == tree and rec.get("base") == base
+    return True
+
+d = load_state()
+saved = d.get("review_job") or ""
+saved_tree = d.get("review_tree") or ""
+saved_base = d.get("review_base") or ""
+job = None
+reason = ""
+resumed = False
+if saved and saved_tree == tree and saved_base == base:
+    resumed = True
+    job = get_job(saved)
+    if job is None:
+        reason = f"job {saved} not found; starting a new review"
+        print("review resume: " + reason, file=sys.stderr)
+        update_state(review_job="", review_tree="", review_base="",
+                     review_resume_reason=reason)
+        job = post_review(reason)
+    elif job.get("status") == "done" and not usable(job):
+        reason = f"job {saved} tree/base mismatch; starting a new review"
+        print("review resume: " + reason, file=sys.stderr)
+        update_state(review_job="", review_tree="", review_base="",
+                     review_resume_reason=reason)
+        job = post_review(reason)
+    elif job.get("status") == "failed":
+        reason = f"job {saved} had failed; starting a new review"
+        print("review resume: " + reason, file=sys.stderr)
+        update_state(review_job="", review_tree="", review_base="",
+                     review_resume_reason=reason)
+        job = post_review(reason)
+    elif job.get("status") == "running":
+        update_state(review_resume_reason=f"job {saved} still running")
+else:
+    if saved:
+        reason = f"saved job {saved} does not match tree/base; starting a new review"
+        print("review resume: " + reason, file=sys.stderr)
+        update_state(review_job="", review_tree="", review_base="",
+                     review_resume_reason=reason)
+    job = post_review(reason)
+
+while job.get("status") == "running":
+    if deadline is not None:
+        left = deadline - time.time()
+        if left <= 0:
+            print(f"review timed out after {timeout_s}s; the task may have a pending review", file=sys.stderr)
+            sys.exit(124)
+        time.sleep(min(poll, left))
+    else:
+        time.sleep(poll)
+    nxt = get_job(job["id"])
+    if nxt is None:
+        reason = f"job {job['id']} disappeared while polling; starting a new review"
+        print("review resume: " + reason, file=sys.stderr)
+        update_state(review_job="", review_tree="", review_base="",
+                     review_resume_reason=reason)
+        job = post_review(reason)
+        continue
+    job = nxt
+
+if job.get("status") == "done":
+    rec = job.get("record") or {}
+    if rec.get("tree") != tree or rec.get("base") != base:
+        reason = f"job {job['id']} returned a different tree/base; starting a new review"
+        print("review resume: " + reason, file=sys.stderr)
+        update_state(review_job="", review_tree="", review_base="",
+                     review_resume_reason=reason)
+        job = post_review(reason)
+    elif resumed:
+        update_state(review_resume_reason=reason or f"job {job['id']} completed")
+elif job.get("status") == "failed":
+    err = job.get("error") or "review job failed"
+    print(err, file=sys.stderr)
+    sys.exit(3 if job.get("unavailable") else 1)
+else:
+    print(f"review job {job.get('id')} ended with status {job.get('status')}", file=sys.stderr)
+    sys.exit(1)
+
+print(json.dumps(job))
+PY
 }
 
 write_retry_meta() {
@@ -919,6 +1114,10 @@ resume_pending() {
     rva=$(printf '%s' "$raw" | jget version_acceptance)
     rev=$(printf '%s' "$raw" | jget evidence)
     rman=$(printf '%s' "$raw" | jget manifest)
+    review_job_id=$(printf '%s' "$raw" | jget review_job)
+    review_job_tree=$(printf '%s' "$raw" | jget review_tree)
+    review_job_base=$(printf '%s' "$raw" | jget review_base)
+    review_resume_reason=
     runtracked=$(printf '%s' "$raw" | jget untracked)
     case "$rphase" in
         agent|verify|staged|reviewing)
@@ -1212,6 +1411,7 @@ log "start task=$TASK max=$MAX"
 emit start task="$TASK" max="$MAX"
 
 while :; do
+    review_job_id=; review_job_tree=; review_job_base=; review_resume_reason=
     show=$(gate_env review-gate task show --id "$TASK")
     status=$(printf '%s' "$show" | jget status)
     iteration=$(printf '%s' "$show" | jget current_iteration)
@@ -1404,7 +1604,7 @@ while :; do
         _fbtext=$(cat "$feedback" 2>/dev/null || true)
         write_state staged "$iteration" "" "" "" "$msg" "" "$head_base" "$started_clean" "$_fbtext"
         set +e
-        gate_write stage gate_env review-gate stage --id "$TASK" >/dev/null
+        stage_json=$(gate_write stage gate_env review-gate stage --id "$TASK")
         grc=$?
         set -e
         if [ "$grc" -eq 4 ]; then exit 4; fi
@@ -1422,7 +1622,7 @@ while :; do
         _fbtext=$(cat "$feedback" 2>/dev/null || true)
         write_state staged "$iteration" "" "" "" "$msg" "" "$head_base" "$started_clean" "$_fbtext"
         set +e
-        gate_write stage gate_env review-gate stage --id "$TASK" >/dev/null
+        stage_json=$(gate_write stage gate_env review-gate stage --id "$TASK")
         grc=$?
         set -e
         if [ "$grc" -eq 4 ]; then exit 4; fi
@@ -1434,22 +1634,32 @@ while :; do
         fi
         resume_review=0
     fi
+    review_tree=$(printf '%s' "$stage_json" | jget tree)
+    review_base=$(printf '%s' "$stage_json" | jget base)
+    [ -n "$review_tree" ] && [ -n "$review_base" ] || {
+        log "stop stage-empty"
+        echo "review-gate stage returned no tree/base" >&2
+        exit 1
+    }
+    review_job_tree=$review_tree; review_job_base=$review_base
     _fbtext=$(cat "$feedback" 2>/dev/null || true)
     write_state reviewing "$iteration" "" "" "" "$msg" "" "$head_base" "$started_clean" "$_fbtext"
 
     worker_lease_acquire || { echo "another worker is active; refusing to start the review" >&2; exit 2; }
     set +e
-    set -- review-gate review run --id "$TASK"
-    if [ -n "$EVIDENCE" ]; then set -- "$@" --evidence "$EVIDENCE"; fi
-    if [ -n "$PROVIDER" ]; then set -- "$@" --provider "$PROVIDER"; fi
-    if [ "$REVIEW_TIMEOUT" -gt 0 ]; then
-        job=$(gate_write review-run gate_env timeout "$REVIEW_TIMEOUT" "$@" 9>&-)
-    else
-        job=$(gate_write review-run gate_env "$@" 9>&-)
-    fi
+    job=$(gate_write review-run review_run_http "$review_tree" "$review_base" 9>&-)
     rc=$?
     set -e
     if [ "$rc" -eq 4 ]; then exit 4; fi
+    _resume_reason=$(jget review_resume_reason < "$state" 2>/dev/null || true)
+    if [ -n "$_resume_reason" ]; then
+        log "review resume reason=$_resume_reason"
+        emit review_resume reason="$_resume_reason"
+        if [ -n "$REPORT" ]; then
+            printf '\n- review resume: %s (reuses the prompt cache where possible; saves waiting, not review)\n' \
+                "$_resume_reason" >>"$REPORT" 2>/dev/null || true
+        fi
+    fi
     if ! worker_lease_release; then
         echo "review left a background process holding the worker lease" >&2
         log "stop review-descendant"
